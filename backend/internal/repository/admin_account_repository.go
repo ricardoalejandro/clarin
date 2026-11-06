@@ -41,10 +41,10 @@ func (r *AccountRepository) CreateWithSubscription(ctx context.Context, account 
 		INSERT INTO accounts (
 			name, slug, plan, max_devices, max_users_override, storage_limit_bytes, is_active, kommo_enabled
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING id,created_at,updated_at
+		RETURNING id,created_at,updated_at,session_idle_timeout_minutes
 	`, account.Name, account.Slug, account.Plan, account.MaxDevices, account.MaxUsersOverride,
 		account.StorageLimitBytes, account.IsActive, account.KommoEnabled).Scan(
-		&account.ID, &account.CreatedAt, &account.UpdatedAt,
+		&account.ID, &account.CreatedAt, &account.UpdatedAt, &account.SessionIdleTimeoutMinutes,
 	); err != nil {
 		return err
 	}

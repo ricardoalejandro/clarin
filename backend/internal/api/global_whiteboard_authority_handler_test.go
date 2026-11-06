@@ -269,7 +269,7 @@ func TestGeneralWebSocketRegistrationUsesFinalSessionAndAuthorityBarrier(t *test
 	}
 
 	handler := boundedGlobalAuthorityHandler(t, source, "handleWebSocket", "Listen")
-	validate := strings.Index(handler, "s.services.Auth.ValidateSessionReadOnly")
+	validate := strings.Index(handler, "s.services.Auth.SessionSnapshot")
 	register := strings.Index(handler, "s.hub.RegisterAtAuthorityEpoch")
 	writer := strings.Index(handler, "go client.WritePump()")
 	if validate < 0 || register <= validate || writer <= register {

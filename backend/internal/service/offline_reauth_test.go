@@ -87,7 +87,7 @@ func TestOfflineReauthLoginRealPostgres(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cache := &authSessionFakeCache{}
 			service := &AuthService{repos: repos, cache: cache}
-			token, refresh, user, _, _, err := service.Login(ctx, username, test.password, "qa-only-jwt-key", OfflineReauthIdentity{UserID: test.userID, AccountID: test.accountID})
+			token, refresh, user, _, _, _, err := service.Login(ctx, username, test.password, "qa-only-jwt-key", OfflineReauthIdentity{UserID: test.userID, AccountID: test.accountID})
 			if (err == nil) != test.success {
 				t.Fatalf("unexpected login result: %v", err)
 			}
@@ -145,7 +145,7 @@ func TestOfflineReauthLoginRealPostgres(t *testing.T) {
 	}
 	cache := &authSessionFakeCache{}
 	service := &AuthService{repos: repos, cache: cache}
-	if token, _, _, _, _, err := service.Login(ctx, username, password, "qa-only-jwt-key", OfflineReauthIdentity{UserID: userID, AccountID: otherAccountID}); !errors.Is(err, ErrOfflineIdentityMismatch) || token != "" || cache.setCalls != 0 {
+	if token, _, _, _, _, _, err := service.Login(ctx, username, password, "qa-only-jwt-key", OfflineReauthIdentity{UserID: userID, AccountID: otherAccountID}); !errors.Is(err, ErrOfflineIdentityMismatch) || token != "" || cache.setCalls != 0 {
 		t.Fatalf("inactive account received a session: %v", err)
 	}
 }

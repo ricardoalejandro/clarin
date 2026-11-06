@@ -1,0 +1,96 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "@excalidraw/mermaid-to-excalidraw": {
+      "name": "@excalidraw/mermaid-to-excalidraw",
+      "severity": "low",
+      "isDirect": false,
+      "via": [
+        "mermaid"
+      ],
+      "effects": [],
+      "range": "0.3.0 - 2.3.0",
+      "nodes": [
+        "node_modules/@excalidraw/mermaid-to-excalidraw"
+      ],
+      "fixAvailable": {
+        "name": "@excalidraw/mermaid-to-excalidraw",
+        "version": "3.6.0",
+        "isSemVerMajor": true
+      }
+    },
+    "katex": {
+      "name": "katex",
+      "severity": "low",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1241206,
+          "name": "katex",
+          "dependency": "katex",
+          "title": "KaTeX: Existing prototype pollution can bypass trust restrictions",
+          "url": "https://github.com/advisories/GHSA-238p-pmpm-9mq7",
+          "severity": "low",
+          "cwe": [
+            "CWE-807"
+          ],
+          "cvss": {
+            "score": 0,
+            "vectorString": null
+          },
+          "range": ">=0.11.0 <0.18.2"
+        }
+      ],
+      "effects": [
+        "mermaid"
+      ],
+      "range": "0.11.0 - 0.18.1",
+      "nodes": [
+        "node_modules/katex"
+      ],
+      "fixAvailable": {
+        "name": "mermaid",
+        "version": "12.3.0",
+        "isSemVerMajor": true
+      }
+    },
+    "mermaid": {
+      "name": "mermaid",
+      "severity": "low",
+      "isDirect": true,
+      "via": [
+        "katex"
+      ],
+      "effects": [
+        "@excalidraw/mermaid-to-excalidraw"
+      ],
+      "range": "10.9.0-rc.1 - 12.1.0",
+      "nodes": [
+        "node_modules/mermaid"
+      ],
+      "fixAvailable": {
+        "name": "mermaid",
+        "version": "12.3.0",
+        "isSemVerMajor": true
+      }
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 3,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 3
+    },
+    "dependencies": {
+      "prod": 432,
+      "dev": 225,
+      "optional": 186,
+      "peer": 46,
+      "peerOptional": 0,
+      "total": 750
+    }
+  }
+}

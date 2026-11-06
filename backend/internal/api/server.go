@@ -410,9 +410,8 @@ func (s *Server) setupRoutes() {
 	api.Post("/whatsapp/cloud/webhook", s.handleWhatsAppCloudWebhook)
 
 	// Reconnect credentials must not manufacture account activity or extend the
-	// login idle timeout. This exact route accepts a current strict JWT or the
-	// path-limited whiteboard session cookie through read-only validation; all
-	// other authenticated routes keep the normal touching middleware.
+	// login idle timeout. This exact route additionally accepts the path-limited
+	// whiteboard session cookie through read-only validation.
 	api.Post("/whiteboards/:id/collab-ticket", s.whiteboardCollabAuthMiddleware, s.handleCreateWhiteboardCollabTicket)
 
 	// Protected routes
@@ -421,6 +420,9 @@ func (s *Server) setupRoutes() {
 	// User routes
 	protected.Get("/me", s.handleGetMe)
 	protected.Get("/me/accounts", s.handleGetMyAccounts)
+	protected.Get("/utilities/access", s.requirePermission(domain.PermUtilities), func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusNoContent)
+	})
 	protected.Post("/auth/logout", s.handleLogout)
 	protected.Post("/auth/activity", s.handleAuthActivity)
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
@@ -1341,6 +1343,7 @@ func (s *Server) setupRoutes() {
 	adminAccounts.Post("/:id/reactivate-subscription", s.handleAdminReactivateSubscription)
 	adminAccounts.Get("/:id", s.handleAdminGetAccount)
 	adminAccounts.Put("/:id", s.handleAdminUpdateAccount)
+	adminAccounts.Put("/:id/session-policy", s.handleAdminUpdateAccountSessionPolicy)
 	adminAccounts.Patch("/:id/toggle", s.handleAdminToggleAccount)
 	adminAccounts.Get("/:id/purge-preview", s.handleAdminAccountPurgePreview)
 	adminAccounts.Delete("/:id/purge", s.handleAdminPurgeAccount)
@@ -1445,6 +1448,12 @@ func classifyAuthFailure(err error) authFailureDisposition {
 	if errors.Is(err, service.ErrAuthSessionUnavailable) {
 		return authFailureDisposition{Status: fiber.StatusServiceUnavailable, Code: "authorization_unavailable"}
 	}
+	if errors.Is(err, service.ErrAuthSessionScopeChanged) {
+		return authFailureDisposition{Status: fiber.StatusConflict, Code: "session_scope_changed"}
+	}
+	if errors.Is(err, service.ErrAuthSessionIdleExpired) {
+		return authFailureDisposition{Status: fiber.StatusUnauthorized, Code: "session_idle_expired", ClearCookies: true}
+	}
 	return authFailureDisposition{Status: fiber.StatusUnauthorized, ClearCookies: true}
 }
 
@@ -1465,17 +1474,20 @@ func authTokenFromRequest(c *fiber.Ctx) string {
 
 func writeAuthValidationFailure(c *fiber.Ctx, err error) error {
 	disposition := classifyAuthFailure(err)
-	if disposition.Code != "" {
-		return c.Status(disposition.Status).JSON(fiber.Map{
-			"success": false,
-			"error":   "Authentication is temporarily unavailable",
-			"code":    disposition.Code,
-		})
+	message := "Invalid token"
+	switch disposition.Code {
+	case "authorization_unavailable":
+		message = "Authentication is temporarily unavailable"
+	case "session_scope_changed":
+		message = "La sesión cambió en otra pestaña. Actualiza la sesión para continuar."
+	case "session_idle_expired":
+		message = "Tu sesión se cerró por inactividad."
 	}
-	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-		"success": false,
-		"error":   "Invalid token",
-	})
+	response := fiber.Map{"success": false, "error": message}
+	if disposition.Code != "" {
+		response["code"] = disposition.Code
+	}
+	return c.Status(disposition.Status).JSON(response)
 }
 
 func shouldFallbackToWhiteboardSessionCredential(err error) bool {
@@ -1491,7 +1503,7 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 		})
 	}
 
-	claims, err := s.services.Auth.ValidateToken(token, s.cfg.JWTSecret)
+	claims, session, err := s.services.Auth.ValidateTokenWithSession(c.Context(), token, s.cfg.JWTSecret)
 	if err != nil {
 		return writeAuthValidationFailure(c, err)
 	}
@@ -1499,15 +1511,8 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 		return writeAccountAuthorityFailure(c, err)
 	}
 
-	// Check if user sessions were invalidated (admin toggled/deleted the user)
-	if s.services.Auth.IsUserSessionInvalidated(claims) {
-		return c.Status(401).JSON(fiber.Map{
-			"success": false,
-			"error":   "Session invalidated",
-		})
-	}
-
 	c.Locals("claims", claims)
+	c.Locals("auth_session", session)
 	c.Locals("user_id", claims.UserID)
 	c.Locals("account_id", claims.AccountID)
 	return c.Next()
@@ -1615,9 +1620,9 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing token"})
 		}
 
-		claims, err := s.services.Auth.ValidateToken(token, s.cfg.JWTSecret)
+		claims, err := s.services.Auth.ValidateTokenReadOnly(c.Context(), token, s.cfg.JWTSecret)
 		if err != nil {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
+			return writeAuthValidationFailure(c, err)
 		}
 		if s.hub == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Realtime unavailable"})
@@ -1672,7 +1677,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid_offline_reauth_context"})
 	}
 
-	token, refreshToken, user, accountCount, authorityEffect, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret, restrictions...)
+	token, refreshToken, user, accountCount, session, authorityEffect, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret, restrictions...)
 	s.notifyWhiteboardAuthorityEffect(authorityEffect)
 	if err != nil {
 		if errors.Is(err, service.ErrOfflineIdentityMismatch) {
@@ -1704,6 +1709,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 	if !isAdmin {
 		permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), user.ID, user.AccountID)
 	}
+	session.ServerNow = time.Now().UTC()
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -1720,6 +1726,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 			"permissions":    permissions,
 		},
 		"account_count": accountCount,
+		"session":       session,
 	})
 }
 
@@ -1780,7 +1787,25 @@ func (s *Server) handleAuthActivity(c *fiber.Ctx) error {
 	if claims == nil {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	session, _ := c.Locals("auth_session").(service.AuthSessionSnapshot)
+	if len(c.Body()) != 0 {
+		var request struct {
+			Interaction bool   `json:"interaction"`
+			Scope       string `json:"scope"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Actividad de sesión inválida."})
+		}
+		if request.Interaction {
+			var err error
+			session, err = s.services.Auth.RecordSessionActivity(c.Context(), claims, request.Scope)
+			if err != nil {
+				return writeAuthValidationFailure(c, err)
+			}
+		}
+	}
+	session.ServerNow = time.Now().UTC()
+	return c.JSON(fiber.Map{"success": true, "session": session})
 }
 
 func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
@@ -1791,18 +1816,13 @@ func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": "No refresh token"})
 	}
 
-	newToken, newRefreshToken, err := s.services.Auth.RefreshToken(c.Context(), refreshToken, s.cfg.JWTSecret)
+	newToken, newRefreshToken, session, err := s.services.Auth.RefreshToken(c.Context(), refreshToken, s.cfg.JWTSecret)
 	if err != nil {
 		disposition := classifyAuthFailure(err)
-		if !disposition.ClearCookies {
-			return c.Status(disposition.Status).JSON(fiber.Map{
-				"success": false,
-				"error":   "Authentication is temporarily unavailable",
-				"code":    disposition.Code,
-			})
+		if disposition.ClearCookies {
+			s.clearAuthCookies(c)
 		}
-		s.clearAuthCookies(c)
-		return c.Status(disposition.Status).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAuthValidationFailure(c, err)
 	}
 
 	// Revoke the previous access JWT only after refresh has succeeded. A
@@ -1817,7 +1837,8 @@ func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
 
 	s.setAuthCookies(c, newToken, newRefreshToken)
 
-	return c.JSON(fiber.Map{"success": true})
+	session.ServerNow = time.Now().UTC()
+	return c.JSON(fiber.Map{"success": true, "session": session})
 }
 
 func (s *Server) handleGetMe(c *fiber.Ctx) error {
@@ -1892,6 +1913,8 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 		}
 	}
 
+	session, _ := c.Locals("auth_session").(service.AuthSessionSnapshot)
+	session.ServerNow = time.Now().UTC()
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
@@ -1916,6 +1939,7 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"kommo_enabled":          kommoEnabled,
 		},
 		"account_count": accountCount,
+		"session":       session,
 	})
 }
 
@@ -15451,7 +15475,7 @@ func (s *Server) handleWebSocket(c *websocket.Conn) {
 	// registration barrier. If invalidation won before this read it fails here;
 	// if invalidation races after the read, RegisterAtAuthorityEpoch rejects it.
 	validationCtx, validationCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	validationErr := s.services.Auth.ValidateSessionReadOnly(validationCtx, claims.SessionID, claims.UserID)
+	session, validationErr := s.services.Auth.SessionSnapshot(validationCtx, claims.SessionID, claims.UserID, claims.AccountID)
 	validationCancel()
 	if validationErr != nil {
 		closeCode := websocket.ClosePolicyViolation
@@ -15464,6 +15488,18 @@ func (s *Server) handleWebSocket(c *websocket.Conn) {
 		_ = c.Close()
 		return
 	}
+	client.GuardSession(session.Deadline(), func() (time.Time, int) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		current, err := s.services.Auth.SessionSnapshot(ctx, claims.SessionID, claims.UserID, claims.AccountID)
+		if errors.Is(err, service.ErrAuthSessionUnavailable) {
+			return time.Time{}, websocket.CloseTryAgainLater
+		}
+		if err != nil {
+			return time.Time{}, websocket.ClosePolicyViolation
+		}
+		return current.Deadline(), 0
+	})
 	if !s.hub.RegisterAtAuthorityEpoch(client, authorityEpoch) {
 		_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authority changed"), time.Now().Add(time.Second))
 		_ = c.Close()
@@ -16680,14 +16716,12 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
 
-	token, refreshToken, user, err := s.services.Auth.SwitchAccount(
-		c.Context(), userID, targetAccountID, claims.SessionID, c.Cookies("refresh-token"), s.cfg.JWTSecret,
+	token, refreshToken, user, session, err := s.services.Auth.SwitchAccount(
+		c.Context(), claims, targetAccountID, c.Cookies("refresh-token"), s.cfg.JWTSecret,
 	)
 	if err != nil {
-		if errors.Is(err, service.ErrAuthSessionUnavailable) {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"success": false, "error": "Authentication is temporarily unavailable", "code": "authorization_unavailable",
-			})
+		if errors.Is(err, service.ErrAuthSessionUnavailable) || errors.Is(err, service.ErrAuthSessionExpired) || errors.Is(err, service.ErrAuthSessionScopeChanged) {
+			return writeAuthValidationFailure(c, err)
 		}
 		return c.Status(403).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -16700,9 +16734,11 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 	if !isAdmin {
 		perms, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), userID, targetAccountID)
 	}
+	session.ServerNow = time.Now().UTC()
 
 	return c.JSON(fiber.Map{
 		"success": true,
+		"session": session,
 		"user": fiber.Map{
 			"id":             user.ID,
 			"username":       user.Username,

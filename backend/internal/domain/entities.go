@@ -9,19 +9,20 @@ import (
 
 // Account represents a tenant in the multi-tenant system
 type Account struct {
-	ID                     uuid.UUID  `json:"id"`
-	Name                   string     `json:"name"`
-	Slug                   string     `json:"slug"`
-	Plan                   string     `json:"plan"`
-	MaxDevices             int        `json:"max_devices"`
-	MaxUsersOverride       *int       `json:"max_users_override,omitempty"`
-	MaxUsersEffective      int        `json:"max_users_effective,omitempty"`
-	StorageLimitBytes      int64      `json:"storage_limit_bytes"`
-	IsActive               bool       `json:"is_active"`
-	KommoEnabled           bool       `json:"kommo_enabled"`
-	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	ID                        uuid.UUID  `json:"id"`
+	Name                      string     `json:"name"`
+	Slug                      string     `json:"slug"`
+	Plan                      string     `json:"plan"`
+	MaxDevices                int        `json:"max_devices"`
+	MaxUsersOverride          *int       `json:"max_users_override,omitempty"`
+	MaxUsersEffective         int        `json:"max_users_effective,omitempty"`
+	SessionIdleTimeoutMinutes int        `json:"session_idle_timeout_minutes"`
+	StorageLimitBytes         int64      `json:"storage_limit_bytes"`
+	IsActive                  bool       `json:"is_active"`
+	KommoEnabled              bool       `json:"kommo_enabled"`
+	DefaultIncomingStageID    *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 
 	// Google Contacts integration
 	GoogleEmail          *string    `json:"google_email,omitempty"`
@@ -172,6 +173,7 @@ const (
 	// itself. Account administrators always bypass the capability check.
 	PermTaskEnvironmentsCreate = "tasks.environments.create"
 	PermDocuments              = "documents"
+	PermUtilities              = "utilities"
 	PermWhiteboards            = "whiteboards"
 	PermReports                = "reports"
 	PermQuickRepliesManage     = "quick_replies_manage"
@@ -183,7 +185,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermTaskEnvironmentsCreate, PermDynamics,
-	PermDocuments, PermWhiteboards, PermReports, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermWhiteboards, PermReports, PermTags, PermUtilities, PermSettings, PermIntegrations,
 	PermQuickRepliesManage,
 }
 

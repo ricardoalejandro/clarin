@@ -5,16 +5,22 @@ import {
   apiBlob,
   apiUpload,
   clearIdleTimeout,
+  clearAuthState,
+  continueOnlineSession,
+  getOnlineSessionNotice,
+  initIdleTimeout,
+  isAuthIdleExpired,
   getLoginNoticeForLogoutReason,
   getLoginRedirectForLogout,
   markAuthSessionDetected,
   markAuthTokenRefreshed,
+  retryOnlineSession,
   setSharedWebSocketOfflineSuppressed,
   subscribeWebSocket,
   tryRefreshToken,
   tryRefreshTokenOutcome,
 } from './api'
-import { completeAuthIdentityChange } from './authScope'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from './authScope'
 // JSDOM has no Web Locks. Cross-tab cookie serialization is exercised against
 // a shared lock manager in authCookieLock.test.ts; these tests own API leases.
 vi.mock('./authCookieLock', () => ({ fetchAuthCookie: (url: string, init: RequestInit) => fetch(url, init) }))
@@ -142,7 +148,7 @@ describe('logout navigation', () => {
   })
 
   it('renders an explicit notice only for automatic session expiry', () => {
-    expect(getLoginNoticeForLogoutReason('idle')).toContain('30 minutos sin actividad')
+    expect(getLoginNoticeForLogoutReason('idle')).toContain('por inactividad')
     expect(getLoginNoticeForLogoutReason('expired')).toBe('Tu sesión expiró. Inicia sesión nuevamente para continuar.')
     expect(getLoginNoticeForLogoutReason('manual')).toBe('')
     expect(getLoginNoticeForLogoutReason('unexpected')).toBe('')
@@ -223,10 +229,11 @@ describe('auth session evidence', () => {
 
     await expect(tryRefreshToken()).resolves.toBe(true)
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/auth/refresh', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/refresh', expect.objectContaining({
       method: 'POST',
       credentials: 'include',
-    })
+      signal: expect.any(AbortSignal),
+    }))
     expect(localStorage.getItem(AUTH_REFRESHED_KEY)).toBe('1750000000000')
   })
 
@@ -339,5 +346,127 @@ describe('auth session evidence', () => {
     expect(fetchMock.mock.calls.some(call => call[0] === '/api/auth/logout')).toBe(false)
     expect(localStorage.getItem('token')).toBe('cookie-session')
     expect(localStorage.getItem(AUTH_REFRESHED_KEY)).toBe('1749998700000')
+  })
+})
+
+describe('account session policy', () => {
+  function session(now: number, idleAt: number) {
+    return {
+      scope: 'login-scope-a', account_id: 'account-a', idle_timeout_minutes: 5,
+      server_now: new Date(now).toISOString(), idle_expires_at: new Date(idleAt).toISOString(),
+      absolute_expires_at: new Date(now + 7 * 86_400_000).toISOString(),
+    }
+  }
+
+  afterEach(() => clearAuthState())
+
+  it('ignores legacy activity on reload after adopting the server deadline', () => {
+    const now = Date.now()
+    const legacyActivity = String(now - 31 * 60_000)
+    localStorage.setItem(LAST_ACTIVITY_KEY, legacyActivity)
+    expect(isAuthIdleExpired()).toBe(true)
+
+    markAuthSessionDetected(session(now, now + 60 * 60_000))
+    const persisted = localStorage.getItem('clarin:online_session_sync')
+    expect(persisted).not.toBeNull()
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBeNull()
+
+    clearAuthState()
+    localStorage.setItem('clarin:online_session_sync', persisted!)
+    localStorage.setItem(LAST_ACTIVITY_KEY, legacyActivity)
+    expect(isAuthIdleExpired()).toBe(false)
+  })
+
+  it('uses the server deadline and sends an explicit scope-bound continuation', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_750_000_000_000)
+    const now = Date.now()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      success: true, session: session(Date.now(), Date.now() + 300_000),
+    })))
+
+    markAuthSessionDetected(session(now, now + 300_000))
+    initIdleTimeout()
+    await vi.advanceTimersByTimeAsync(239_999)
+    expect(getOnlineSessionNotice()).toBe('none')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(getOnlineSessionNotice()).toBe('warning')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await expect(continueOnlineSession()).resolves.toBe(true)
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/activity', expect.objectContaining({
+      body: JSON.stringify({ interaction: true, scope: 'login-scope-a' }),
+    }))
+    expect(getOnlineSessionNotice()).toBe('none')
+  })
+
+  it('does not extend the deadline on visibility, API traffic, or transient failure', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_750_000_000_000)
+    const now = Date.now()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 503 }))
+    markAuthTokenRefreshed(session(now, now + 61_000))
+    initIdleTimeout()
+    document.dispatchEvent(new Event('visibilitychange', { bubbles: true }))
+    await apiPost('/api/tasks', {})
+    await vi.advanceTimersByTimeAsync(61_000)
+
+    expect(getOnlineSessionNotice()).toBe('unavailable')
+    expect(fetchMock).toHaveBeenCalledWith('/api/auth/activity', expect.objectContaining({ body: undefined }))
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/auth/logout')).toBe(false)
+    expect(localStorage.getItem('token')).toBe('cookie-session')
+
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ success: true, session: session(Date.now(), Date.now() + 300_000) })))
+    await expect(retryOnlineSession()).resolves.toBe(true)
+    expect(getOnlineSessionNotice()).toBe('none')
+    expect(fetchMock.mock.lastCall?.[1]?.body).toBeUndefined()
+  })
+
+  it('discards a bootstrap response from the account active before a tab switch', () => {
+    const now = Date.now()
+    const current = { ...session(now, now + 300_000), scope: 'login-scope-b', account_id: 'account-b' }
+    markAuthTokenRefreshed(current)
+    expect(markAuthSessionDetected(session(now - 100, now + 299_900), now - 100)).toBe(false)
+    expect(localStorage.getItem('clarin:online_session_sync')).toContain('login-scope-b')
+  })
+
+  it('does not refresh or renew a request that outlives its browser identity', async () => {
+    const now = Date.now()
+    markAuthSessionDetected(session(now, now + 300_000))
+    initIdleTimeout()
+    let release!: (response: Response) => void
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+
+    const pending = continueOnlineSession()
+    beginAuthIdentityChange()
+    release(new Response('{}', { status: 401 }))
+
+    await expect(pending).resolves.toBe(false)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/auth/activity'])
+  })
+
+  it('rechecks a snapshot that reaches its deadline while the response is returned', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_750_000_000_000)
+    const now = Date.now()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ success: true, session: session(Date.now(), Date.now()) })))
+      .mockImplementation(async () => new Response('{}', { status: 503 }))
+    markAuthSessionDetected(session(now, now + 61_000))
+    initIdleTimeout()
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(getOnlineSessionNotice()).toBe('unavailable')
+  })
+
+  it('returns a recoverable outcome when the refresh request cannot complete', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_750_000_000_000)
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new DOMException('Timeout', 'AbortError')), { once: true })
+    }))
+    const outcome = tryRefreshTokenOutcome()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await expect(outcome).resolves.toBe('unavailable')
   })
 })

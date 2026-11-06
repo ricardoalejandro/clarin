@@ -25,6 +25,17 @@ func TestClassifyAuthFailurePreservesSessionDuringTransientOutage(t *testing.T) 
 	}
 }
 
+func TestSessionPolicyExpiryAndRotationResponses(t *testing.T) {
+	idle := classifyAuthFailure(service.ErrAuthSessionIdleExpired)
+	if idle.Status != fiber.StatusUnauthorized || idle.Code != "session_idle_expired" || !idle.ClearCookies {
+		t.Fatalf("inactivity disposition = %+v", idle)
+	}
+	stale := classifyAuthFailure(service.ErrAuthSessionScopeChanged)
+	if stale.Status != fiber.StatusConflict || stale.Code != "session_scope_changed" || stale.ClearCookies {
+		t.Fatalf("stale credential disposition = %+v", stale)
+	}
+}
+
 func TestWhiteboardJWTFallbackNeverMasksRedisUnavailability(t *testing.T) {
 	if !shouldFallbackToWhiteboardSessionCredential(service.ErrAuthSessionExpired) {
 		t.Fatal("terminal access JWT failure did not allow the scoped whiteboard credential")
