@@ -3,7 +3,7 @@
 The repository-root AGENTS.md remains authoritative. Before changing Next.js
 behavior, read the version-matched documentation shipped in
 `node_modules/next/dist/docs/` from this directory. The pinned production
-baseline is Next.js 16.3.5 and React 19.3.0 on Node.js 24 LTS, not Next.js 14.
+baseline is Next.js 16.4.1 and React 19.3.0 on Node.js 24 LTS.
 
 Clarin intentionally uses `next dev --webpack` and `next build --webpack` to
 preserve the audited editor build/hardening boundary. Do not enable experimental

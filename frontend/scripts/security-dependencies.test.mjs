@@ -113,9 +113,11 @@ for (const [name, resolver] of [
 }
 
 
-test('document runtime locks patched Next, image decoder and PDF sanitizer releases', () => {
- const lock=JSON.parse(readFileSync(new URL('../package-lock.json',import.meta.url),'utf8'))
- assert.equal(lock.packages['node_modules/next'].version,'16.3.8')
- assert.equal(lock.packages['node_modules/sharp'].version,'0.35.5')
- assert.equal(lock.packages['node_modules/dompurify'].version,'3.4.16')
+test('the runtime and Monaco resolve the audited Next, image decoder and sanitizer releases', () => {
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
+  assert.equal(lock.packages['node_modules/next'].version, '16.4.1')
+  assert.equal(lock.packages['node_modules/sharp'].version, '0.35.5')
+  assert.equal(lock.packages['node_modules/dompurify'].version, '3.4.17')
+  assert.equal(lock.packages['node_modules/monaco-editor'].version, '0.57.0')
+  assert.equal(lock.packages['node_modules/monaco-editor/node_modules/dompurify'], undefined)
 })
