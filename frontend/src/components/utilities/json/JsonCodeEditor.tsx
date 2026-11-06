@@ -1,9 +1,9 @@
 'use client'
 
 import { useLayoutEffect, useRef } from 'react'
-import { editor, json, languages, Position, Range } from 'monaco-editor'
+import { editor, json, KeyCode, KeyMod, languages, Position, Range } from 'monaco-editor'
 import { jsonLiteralCompletions, xmlClosingTagCompletion } from './documentCompletions'
-import { acceptsEditorZoom, tramRange } from './editorWorkspaceState'
+import { acceptsEditorZoom, documentWrapOptions, tramRange } from './editorWorkspaceState'
 
 globalThis.MonacoEnvironment = {
   getWorker(_moduleId, label) {
@@ -80,18 +80,20 @@ interface Props {
   label: string
   model: editor.ITextModel
   font: number
+  wrap: boolean
   visible: boolean
   reduced: boolean
   chunk: number | null
   revision: number
   onZoom: (delta: number) => void
+  onToggleWrap: () => void
   onFocus: () => void
   onPaste: (event: ClipboardEvent, start: number, end: number) => void
   onReady: (view: editor.IStandaloneCodeEditor | null) => void
 }
 
 export function DocumentCodeEditor(props: Props) {
-  const { id, model, label, font, visible, reduced, chunk, revision } = props
+  const { id, model, label, font, wrap, visible, reduced, chunk, revision } = props
   const host = useRef<HTMLDivElement>(null)
   const instance = useRef<editor.IStandaloneCodeEditor>(null)
   const viewState = useRef<editor.ICodeEditorViewState | null>(null)
@@ -106,6 +108,14 @@ export function DocumentCodeEditor(props: Props) {
     const view = editor.create(element, { ...baseOptions, model: null, ariaLabel: label })
     instance.current = view
     const focus = view.onDidFocusEditorText(() => latest.current.onFocus())
+    const wrapAction = view.addAction({
+      id: 'clarin.document.toggleWrap',
+      label: 'Ajustar líneas',
+      keybindings: [KeyMod.Alt | KeyCode.KeyZ],
+      run: () => {
+        if (latest.current.chunk === null) latest.current.onToggleWrap()
+      },
+    })
     const paste = (event: ClipboardEvent) => {
       const selection = view.getSelection()
       if (!selection || view.getModel() !== model) return
@@ -120,6 +130,7 @@ export function DocumentCodeEditor(props: Props) {
       element.removeEventListener('paste', paste, true)
       unbindWheel()
       focus.dispose()
+      wrapAction.dispose()
       view.dispose()
       preview.current?.dispose()
       preview.current = null
@@ -177,12 +188,12 @@ export function DocumentCodeEditor(props: Props) {
       quickSuggestions: !reduced,
       selectionHighlight: !reduced,
       stickyScroll: { enabled: false },
-      wordWrap: chunk !== null ? 'bounded' : 'off',
+      ...documentWrapOptions(wrap, chunk),
       wordWrapColumn: 100,
       stopRenderingLineAfter: chunk !== null ? -1 : 100_000,
       placeholder: 'Pega texto o abre un archivo local.',
     })
-  }, [font, label, reduced, chunk])
+  }, [font, label, reduced, chunk, wrap])
 
   return <div id={id} ref={host} data-testid={id} className="min-h-0 min-w-0 flex-1 overflow-hidden" />
 }

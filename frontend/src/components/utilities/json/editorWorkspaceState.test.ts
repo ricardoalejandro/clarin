@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptsEditorZoom, adjustFont, canCompare, DIFF_LIMIT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
+import { acceptsEditorZoom, adjustFont, canCompare, DEFAULT_FONT, DIFF_LIMIT, documentWrapOptions, fontZoomPercent, MAX_FONT, MIN_FONT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
 
 describe('estado del espacio de edición', () => {
   it('keeps the selected document visible when the available area is narrow', () => {
@@ -14,8 +14,17 @@ describe('estado del espacio de edición', () => {
     expect(acceptsEditorZoom(event, false)).toBe(false)
     expect(acceptsEditorZoom({ ...event, ctrlKey: false }, true)).toBe(false)
     expect(acceptsEditorZoom({ ...event, cancelable: false }, true)).toBe(false)
-    expect(adjustFont(28, 1)).toBe(28)
-    expect(adjustFont(10, -1)).toBe(10)
+    expect(adjustFont(28, 1)).toBe(29)
+    expect(adjustFont(MAX_FONT, 1)).toBe(MAX_FONT)
+    expect(adjustFont(MIN_FONT, -1)).toBe(MIN_FONT)
+    expect(fontZoomPercent(DEFAULT_FONT)).toBe(100)
+    expect(fontZoomPercent(MAX_FONT)).toBe(500)
+  })
+
+  it('keeps automatic wrapping for chunks and hides horizontal scrolling only when wrapping', () => {
+    expect(documentWrapOptions(false, null)).toMatchObject({ wordWrap: 'off', scrollbar: { horizontal: 'auto' } })
+    expect(documentWrapOptions(true, null)).toMatchObject({ wordWrap: 'on', scrollbar: { horizontal: 'hidden' } })
+    expect(documentWrapOptions(false, 0)).toMatchObject({ wordWrap: 'bounded', scrollbar: { horizontal: 'hidden' } })
   })
 
   it('uses limits per document and preserves surrogate pairs between tramos', () => {

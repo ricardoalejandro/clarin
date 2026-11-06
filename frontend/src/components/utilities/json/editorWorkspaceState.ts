@@ -7,6 +7,8 @@ export const LARGE_DOCUMENT = 8 * 1024 * 1024
 export const LONG_LINE = 100_000
 export const PANEL_BREAKPOINT = 832
 export const DEFAULT_FONT = 14
+export const MIN_FONT = 10
+export const MAX_FONT = 70
 export const TRAM_LENGTH = 24_000
 
 export function otherPanel(panel: Panel): Panel {
@@ -22,7 +24,18 @@ export function canCompare(documents: readonly { bytes: number; lines: number; l
 }
 
 export function adjustFont(font: number, delta: number) {
-  return Math.max(10, Math.min(28, font + delta))
+  return Math.max(MIN_FONT, Math.min(MAX_FONT, font + delta))
+}
+
+export function fontZoomPercent(font: number) {
+  return Math.round(font * 100 / DEFAULT_FONT)
+}
+
+export function documentWrapOptions(enabled: boolean, chunk: number | null) {
+  return {
+    wordWrap: chunk !== null ? 'bounded' : enabled ? 'on' : 'off',
+    scrollbar: { horizontal: enabled || chunk !== null ? 'hidden' : 'auto', alwaysConsumeMouseWheel: false },
+  } as const
 }
 
 export function acceptsEditorZoom(event: Pick<WheelEvent, 'ctrlKey' | 'altKey' | 'metaKey' | 'shiftKey' | 'cancelable' | 'deltaY'>, focused: boolean) {

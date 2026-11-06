@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import JsonUtility from './JsonUtility'
 import { processJson, type DocumentWorkerRequest, type DocumentWorkerResponse } from './jsonOperations'
@@ -6,8 +6,8 @@ import { measureDocument } from './jsonLimits'
 
 vi.mock('monaco-editor', () => ({ editor: { setTheme: vi.fn(), setModelMarkers: vi.fn() } }))
 vi.mock('./JsonCodeEditor', () => ({
-  DocumentCodeEditor: ({ label, model, visible, onFocus }: { label: string; model: { text: string; write: (text: string) => void }; visible: boolean; onFocus: () => void }) =>
-    <textarea aria-label={label} hidden={!visible} value={model.text} onFocus={onFocus} onChange={event => model.write(event.target.value)} />,
+  DocumentCodeEditor: ({ label, model, visible, wrap, onFocus }: { label: string; model: { text: string; write: (text: string) => void }; visible: boolean; wrap: boolean; onFocus: () => void }) =>
+    <textarea aria-label={label} hidden={!visible} wrap={wrap ? 'soft' : 'off'} value={model.text} onFocus={onFocus} onChange={event => model.write(event.target.value)} />,
   DocumentDiff: () => <div>Comparación</div>,
   registerDocumentCompletions: () => () => {},
 }))
@@ -74,6 +74,40 @@ it('uses Clarin’s high-contrast form style only in the dark theme', () => {
   expect(syntax).not.toHaveClass('dark-input')
 })
 
+it('keeps the document actions directly accessible and limits JSON actions to JSON modes', () => {
+  render(<JsonUtility />)
+  const actions = within(screen.getByRole('group', { name: 'Acciones del documento activo' }))
+  for (const name of ['Reparar', 'Escapar', 'Desescapar', 'Copiar documento', 'Descargar documento', 'Limpiar documento']) {
+    expect(actions.getByRole('button', { name })).toBeVisible()
+  }
+  fireEvent.change(screen.getByRole('combobox', { name: 'Formato del documento' }), { target: { value: 'xml' } })
+  expect(actions.queryByRole('button', { name: 'Reparar' })).not.toBeInTheDocument()
+  expect(actions.getByRole('button', { name: 'Descargar documento' })).toBeVisible()
+})
+
+it('reports and resets the zoom and keeps visual wrapping independent for each panel', () => {
+  render(<JsonUtility />)
+  const zoom = screen.getByRole('button', { name: 'Restablecer zoom del editor' })
+  expect(zoom).toHaveTextContent('100%')
+  fireEvent.click(screen.getByRole('button', { name: 'Aumentar letra', hidden: true }))
+  expect(zoom).toHaveTextContent('107%')
+  fireEvent.click(zoom)
+  expect(zoom).toHaveTextContent('100%')
+
+  const wrap = screen.getByRole('button', { name: 'Ajustar líneas' })
+  const a = screen.getByRole('textbox', { name: 'Documento A' })
+  fireEvent.change(a, { target: { value: '{"a":1}' } })
+  fireEvent.click(wrap)
+  expect(a).toHaveAttribute('wrap', 'soft')
+  expect(a).toHaveValue('{"a":1}')
+  fireEvent.click(screen.getByRole('button', { name: 'Mostrar segundo panel' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento B' }))
+  expect(wrap).toHaveAttribute('aria-pressed', 'false')
+  expect(screen.getByRole('textbox', { name: 'Documento B' })).toHaveAttribute('wrap', 'off')
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento A' }))
+  expect(wrap).toHaveAttribute('aria-pressed', 'true')
+})
+
 it('formats only the active document and keeps the hidden draft', async () => {
   vi.stubGlobal('Worker', JsonWorker)
   render(<JsonUtility />)
@@ -99,7 +133,7 @@ it('stages a repair and applies it only after explicit confirmation', async () =
   render(<JsonUtility />)
   const a = screen.getByRole('textbox', { name: 'Documento A' })
   fireEvent.change(a, { target: { value: '{//id://dfdf}' } })
-  fireEvent.click(screen.getByText('Reparar', { selector: 'button' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Reparar' }))
   expect(await screen.findByText('Propuesta de reparación · Documento A')).toBeInTheDocument()
   expect(a).toHaveValue('{//id://dfdf}')
   fireEvent.click(screen.getByRole('button', { name: 'Aplicar reparación' }))

@@ -7,6 +7,8 @@ import { processXml } from './xmlOperations'
 const MAX_ACTIVE_JSON_KEYS = 250_000
 const SMART_COLUMNS = 100
 const EXPANDED_WIDTH = SMART_COLUMNS + 1
+const PACKABLE_GROUP = 1 << 7
+const WIDTH_MASK = PACKABLE_GROUP - 1
 
 export type JsonMode = 'strict' | 'jsonc'
 export type JsonOperation = 'validate' | 'format' | 'smart' | 'minify' | 'escape' | 'unescape' | 'repair'
@@ -153,34 +155,62 @@ function jsonTokens(source: string, consume: (kind: TokenKind, start: number, le
   }
 }
 
+interface SmartWidthFrame {
+  start: number
+  width: number
+  previous: TokenKind
+  packable: boolean
+  entryStart?: number
+  entryWidth: number
+}
+
 function smartWidths(source: string) {
-  // Saturate widths at 101 and index by the source offset of each opening token.
-  // This avoids storing per-token trees or repeatedly scanning nested subtrees.
+  // Index group and scalar entry widths by their first token. The high bit marks
+  // groups whose entries can share a line. A byte per source code unit bounds memory.
   const widths = new Uint8Array(source.length)
-  const stack: { start: number; width: number; previous: TokenKind }[] = []
+  const stack: SmartWidthFrame[] = []
   let previousClosed: number | undefined
   jsonTokens(source, (kind, start, length) => {
-    const parent = stack.at(-1)
-    if (kind === 'comma' && previousClosed !== undefined) widths[previousClosed] = Math.min(EXPANDED_WIDTH, widths[previousClosed] + 1)
+    const parent = stack[stack.length - 1]
+    if (kind === 'comma' && previousClosed !== undefined) {
+      const entry = widths[previousClosed]
+      widths[previousClosed] = (entry & PACKABLE_GROUP) | Math.min(EXPANDED_WIDTH, (entry & WIDTH_MASK) + 1)
+    }
     previousClosed = undefined
     if (kind === 'open') {
-      if (parent) parent.width += inlineSeparator(parent.previous, kind).length
-      stack.push({ start, width: 1, previous: 'open' })
+      if (parent) {
+        parent.width += inlineSeparator(parent.previous, kind).length
+        parent.packable = false
+      }
+      stack.push({ start, width: 1, previous: 'open', packable: true, entryWidth: 0 })
       return
     }
     if (!parent) return
     if (kind === 'close') {
       stack.pop()
       const width = Math.min(EXPANDED_WIDTH, parent.width + 1)
-      widths[parent.start] = width
+      widths[parent.start] = width | (parent.packable ? PACKABLE_GROUP : 0)
+      if (parent.packable && parent.entryStart !== undefined) widths[parent.entryStart] = parent.entryWidth
       previousClosed = parent.start
-      const outer = stack.at(-1)
+      const outer = stack[stack.length - 1]
       if (outer) { outer.width = Math.min(EXPANDED_WIDTH, outer.width + width); outer.previous = 'close' }
       return
     }
+    const tokenWidth = inlineSeparator(parent.previous, kind).length + length
     const forcesLineBreak = kind === 'line-comment' || (kind === 'block-comment' && length <= SMART_COLUMNS && /[\t\n\r]/.test(source.slice(start, start + length)))
-    parent.width = forcesLineBreak ? EXPANDED_WIDTH : Math.min(EXPANDED_WIDTH, parent.width + inlineSeparator(parent.previous, kind).length + length)
+    parent.width = forcesLineBreak ? EXPANDED_WIDTH : Math.min(EXPANDED_WIDTH, parent.width + tokenWidth)
     parent.previous = kind
+    if (kind === 'line-comment' || kind === 'block-comment') parent.packable = false
+    if (!parent.packable) return
+    if (kind === 'comma') {
+      if (parent.entryStart !== undefined) widths[parent.entryStart] = Math.min(EXPANDED_WIDTH, parent.entryWidth + 1)
+      parent.entryStart = undefined
+    } else if (parent.entryStart === undefined) {
+      parent.entryStart = start
+      parent.entryWidth = Math.min(EXPANDED_WIDTH, length)
+    } else {
+      parent.entryWidth = Math.min(EXPANDED_WIDTH, parent.entryWidth + tokenWidth)
+    }
   })
   return widths
 }
@@ -189,15 +219,15 @@ function writeJson(source: string, indent: JsonRequest['indent'] | undefined, sm
   const output = new BoundedDocumentText()
   const lines = indent ? indentationLines(indent) : undefined
   const widths = smart ? smartWidths(source) : undefined
-  const inline: boolean[] = []
+  const layouts: ('inline' | 'packed' | 'multiline')[] = []
   let previous: TokenKind | undefined
   let depth = 0
   let column = 0
 
-  function append(text: string) {
+  function append(text: string, canContainNewline = false) {
     output.append(text)
     if (!widths || !text) return
-    const lastBreak = Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r'))
+    const lastBreak = canContainNewline ? Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r')) : -1
     if (lastBreak >= 0) {
       const lastLine = text.slice(lastBreak + 1)
       column = indent === 'tab' && lastLine.startsWith('\t') ? lastLine.length + lastLine.match(/^\t+/)![0].length * 3 : lastLine.length
@@ -205,16 +235,26 @@ function writeJson(source: string, indent: JsonRequest['indent'] | undefined, sm
   }
 
   jsonTokens(source, (kind, offset, length) => {
-    const parentInline = inline.at(-1)
+    const parentLayout = layouts[layouts.length - 1]
     if (kind === 'close') depth--
-    if (lines) append(parentInline ? inlineSeparator(previous, kind) : separator(previous, kind, lines[depth]))
+    if (lines) {
+      const entryWidth = widths?.[offset] ?? 0
+      const fitsPackedLine = parentLayout === 'packed' && previous === 'comma' && kind === 'value' && entryWidth > 0 && column + 1 + entryWidth <= SMART_COLUMNS
+      const gap = parentLayout === 'inline' || fitsPackedLine ? inlineSeparator(previous, kind) : separator(previous, kind, lines[depth])
+      append(gap, gap[0] === '\n')
+    }
     if (kind === 'open') {
-      if (widths) inline.push(!!parentInline || widths[offset] <= SMART_COLUMNS - column)
+      if (widths) {
+        const group = widths[offset]
+        const fits = (group & WIDTH_MASK) <= SMART_COLUMNS - column
+        const expanded = (group & PACKABLE_GROUP) ? 'packed' : 'multiline'
+        layouts.push(parentLayout === 'inline' || fits ? 'inline' : expanded)
+      }
       depth++
     }
-    append(source.slice(offset, offset + length))
+    append(source.slice(offset, offset + length), kind === 'block-comment')
     if (!lines && kind === 'line-comment') append('\n')
-    if (kind === 'close' && widths) inline.pop()
+    if (kind === 'close' && widths) layouts.pop()
     previous = kind
   })
   return output.finish()

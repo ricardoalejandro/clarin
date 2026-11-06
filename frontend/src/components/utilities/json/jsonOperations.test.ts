@@ -96,4 +96,31 @@ describe('JSON operations', () => {
     const escaped = JSON.stringify('{"name":1}')
     expect(process('smart', escaped)).toMatchObject({ ok: true, text: escaped })
   })
+
+  it('packs complete fields of an expanded flat object while regular formatting keeps one field per line', () => {
+    const long = 'x'.repeat(65)
+    const source = `{"a":"${long}","b":2,"c":3,"d":4,"e":5}`
+    const smart = process('smart', source)
+    const expected = `{\n  "a": "${long}", "b": 2, "c": 3, "d": 4,\n  "e": 5\n}`
+    expect(smart).toMatchObject({ ok: true, text: expected, metrics: { longestLine: 99 } })
+    expect(process('format', source)).toMatchObject({ ok: true, metrics: { lines: 7 } })
+    expect(process('smart', expected)).toEqual(smart)
+    expect(process('minify', expected)).toMatchObject({ ok: true, text: source })
+  })
+
+  it('packs scalar array items within 100 columns, including trailing separators in the calculation', () => {
+    const largeNumber = '90071992547409930000000'
+    const source = `[${Array(5).fill(largeNumber).join(',')}]`
+    const expected = `[\n  ${Array(3).fill(largeNumber).join(', ')},\n  ${largeNumber}, ${largeNumber}\n]`
+    expect(process('smart', source)).toMatchObject({ ok: true, text: expected, warnings: [expect.stringContaining('precisión')] })
+  })
+
+  it('preserves comment placement in a flat group and keeps oversized literals intact', () => {
+    const long = 'x'.repeat(110)
+    const source = `{"a":"${long}","b":2, // retain\n"c":3,"d":4}`
+    const regular = process('format', source, 'jsonc')
+    if (!regular.ok || !regular.text) throw new Error('Expected valid formatted JSONC')
+    expect(process('smart', source, 'jsonc')).toMatchObject({ ok: true, text: regular.text })
+    expect(process('smart', `["${long}",1,2]`)).toMatchObject({ ok: true, text: `[\n  "${long}",\n  1, 2\n]` })
+  })
 })

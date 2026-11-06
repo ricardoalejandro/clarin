@@ -1,4 +1,4 @@
-import { mkdir, rm, truncate, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, truncate, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { expect, test, type FileChooser, type Locator, type Page } from '@playwright/test'
 
@@ -51,6 +51,16 @@ async function openDocument(page: Page, file: Parameters<FileChooser['setFiles']
     page.getByRole('button', { name: 'Abrir archivo', exact: true }).click(),
   ])
   await chooser.setFiles(file)
+}
+
+async function downloadDocument(page: Page) {
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Descargar documento' }).click(),
+  ])
+  const path = await download.path()
+  if (!path) throw new Error('The editor did not download a local file')
+  return { filename: download.suggestedFilename(), source: await readFile(path, 'utf8') }
 }
 
 test('catalog and document workspace adapt to measured width and keep editable drafts local', async ({ page }, testInfo) => {
@@ -149,11 +159,14 @@ test('catalog and document workspace adapt to measured width and keep editable d
   expect(editorErrors).toEqual([])
 })
 
-test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the focused editor', async ({ page }) => {
+test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the focused editor', async ({ page }, testInfo) => {
   await mockAccount(page, { permission: true })
+  const desktopViewport = { width: 1280, height: 720 }
+  await page.setViewportSize(desktopViewport)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.goto(`${baseURL}/dashboard/utilities/json`)
   const editor = page.getByTestId('document-editor-a')
+  const zoom = page.getByRole('button', { name: 'Restablecer zoom del editor' })
   const format = page.getByRole('combobox', { name: 'Formato del documento' })
   const formatContrast = () => format.evaluate(element => {
     const luminance = (color: string) => {
@@ -169,6 +182,7 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
     return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
   })
   await expect(editor.locator('.monaco-editor.vs-dark')).toBeVisible({ timeout: 20_000 })
+  await expect(zoom).toHaveText('100%')
   await expect.poll(formatContrast).toBeGreaterThanOrEqual(4.5)
   const preferences = page.getByRole('button', { name: 'Preferencias del editor' })
   await preferences.click()
@@ -203,7 +217,139 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   expect(await fontSize()).toBe(initialFont)
   expect(await wheel(lines, true)).toBe(true)
   await expect.poll(fontSize).toBeGreaterThan(initialFont)
+  await expect(zoom).toHaveText('107%')
   expect(await viewport()).toEqual(initialViewport)
+
+  await preferences.click()
+  const increase = page.getByRole('button', { name: 'Aumentar letra' })
+  for (let size = 15; size < 70; size++) await increase.press('Enter')
+  await expect(zoom).toHaveText('500%')
+  await expect.poll(fontSize).toBe(70)
+  await expect(increase).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 320, height: 740 })
+  await editor.getByRole('textbox').focus()
+  await page.keyboard.press('Home')
+  await expect(zoom).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await testInfo.attach('editor-320-500-percent.png', { body: await page.screenshot(), contentType: 'image/png' })
+  await page.setViewportSize(desktopViewport)
+  await zoom.click()
+  await expect(zoom).toHaveText('100%')
+  await expect.poll(fontSize).toBe(initialFont)
+  expect(await viewport()).toEqual(initialViewport)
+})
+
+test('smart formatting groups short properties without flattening the JSON document', async ({ page }) => {
+  await mockAccount(page, { permission: true })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editor = page.getByTestId('document-editor-a')
+  const lines = editor.locator('.view-line')
+  const long = 'x'.repeat(65)
+  const source = `{"a":"${long}","b":2,"c":3,"d":4,"e":5}`
+  await expect(editor).toBeVisible({ timeout: 20_000 })
+  await typeDocument(page, editor, source)
+  await page.getByRole('button', { name: 'Formatear', exact: true }).click()
+  await expect(lines).toHaveCount(7)
+  await page.getByRole('button', { name: 'Formato inteligente', exact: true }).click()
+  await expect(lines).toHaveCount(4)
+  expect(await downloadDocument(page)).toEqual({
+    filename: 'documento-a.json',
+    source: `{\n  "a": "${long}", "b": 2, "c": 3, "d": 4,\n  "e": 5\n}`,
+  })
+  await page.getByRole('button', { name: 'Compactar', exact: true }).click()
+  await expect(lines).toHaveCount(1)
+  expect((await downloadDocument(page)).source).toBe(source)
+})
+
+test('document actions stay directly usable in the compact toolbar', async ({ page, browserName }) => {
+  await mockAccount(page, { permission: true })
+  if (browserName === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.setViewportSize({ width: 320, height: 740 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editor = page.getByTestId('document-editor-a')
+  const action = (name: string) => page.getByRole('button', { name, exact: true })
+  await expect(editor).toBeVisible({ timeout: 20_000 })
+  for (const name of ['Copiar documento', 'Descargar documento', 'Reparar', 'Escapar', 'Desescapar', 'Limpiar documento']) {
+    const button = action(name)
+    await expect(button).toBeVisible()
+    await expect(button.locator('svg')).toBeVisible()
+    await expect(button).toBeDisabled()
+  }
+  await expectNoHorizontalOverflow(page)
+  const source = '{"texto":"Ñ"}'
+  await typeDocument(page, editor, source)
+  expect(await downloadDocument(page)).toEqual({ filename: 'documento-a.json', source })
+  if (browserName === 'chromium') {
+    await action('Copiar documento').click()
+    await expect(page.getByRole('status').filter({ hasText: 'Documento copiado.' })).toBeVisible()
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source)
+  }
+  await action('Escapar').click()
+  await expect(action('Desescapar')).toBeEnabled()
+  await expect(editor.locator('.view-lines')).toContainText('\\"texto\\"')
+  expect((await downloadDocument(page)).source).toBe(JSON.stringify(source))
+  await action('Desescapar').click()
+  await expect(editor.locator('.view-lines')).toContainText(source)
+  expect(await downloadDocument(page)).toEqual({ filename: 'documento-a.txt', source })
+
+  const invalid = '{foo: 42}'
+  await openDocument(page, { name: 'invalido.json', mimeType: 'application/json', buffer: Buffer.from(invalid) })
+  await expect(editor.locator('.view-lines')).toContainText(invalid)
+  await action('Reparar').click()
+  await expect(page.getByText('Propuesta de reparación · Documento A')).toBeVisible()
+  expect((await downloadDocument(page)).source).toBe(invalid)
+  await action('Aplicar reparación').click()
+  await expect(editor.locator('.view-lines')).toContainText('"foo"')
+  expect(JSON.parse((await downloadDocument(page)).source)).toEqual({ foo: 42 })
+
+  await action('Limpiar documento').click()
+  await expect(editor.locator('.view-lines')).not.toContainText('foo')
+  await expect(action('Descargar documento')).toBeDisabled()
+  await action('Deshacer').click()
+  await expect(editor.locator('.view-lines')).toContainText('"foo"')
+})
+
+test('word wrap changes only visual lines and is independent for each document', async ({ page }) => {
+  await mockAccount(page, { permission: true })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editorA = page.getByTestId('document-editor-a')
+  const editorB = page.getByTestId('document-editor-b')
+  const wrap = page.getByRole('button', { name: 'Ajustar líneas' })
+  const linesA = editorA.locator('.view-line')
+  const linesB = editorB.locator('.view-line')
+  const scrollbarA = editorA.locator('.editor-scrollable > .scrollbar.horizontal')
+  const scrollbarB = editorB.locator('.editor-scrollable > .scrollbar.horizontal')
+  const source = `{"a":"${'abc'.repeat(200)}"}`
+  await expect(editorA).toBeVisible({ timeout: 20_000 })
+  await typeDocument(page, editorA, source)
+  await expect(wrap).toHaveAttribute('aria-pressed', 'false')
+  await expect(linesA).toHaveCount(1)
+  await wrap.click()
+  await expect(wrap).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => linesA.count()).toBeGreaterThan(1)
+  await expect(scrollbarA).toHaveClass(/\binvisible\b/)
+  expect((await downloadDocument(page)).source).toBe(source)
+
+  await page.getByRole('button', { name: 'Mostrar segundo panel' }).click()
+  await typeDocument(page, editorB, source.replace('"a"', '"b"'))
+  await expect(wrap).toHaveAttribute('aria-pressed', 'false')
+  await expect(linesB).toHaveCount(1)
+  await wrap.click()
+  await expect.poll(() => linesB.count()).toBeGreaterThan(1)
+  await expect(scrollbarB).toHaveClass(/\binvisible\b/)
+
+  await editorA.getByRole('textbox').focus()
+  await expect(wrap).toHaveAttribute('aria-pressed', 'true')
+  await expect(wrap).toHaveAttribute('aria-keyshortcuts', 'Alt+Z')
+  await page.keyboard.press('Alt+z')
+  await expect(wrap).toHaveAttribute('aria-pressed', 'false')
+  await expect(linesA).toHaveCount(1)
+  await editorB.getByRole('textbox').focus()
+  await expect(wrap).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => linesB.count()).toBeGreaterThan(1)
 })
 
 test('Monaco recognizes JSON and XML syntax and offers local completions', async ({ page }) => {
@@ -306,6 +452,9 @@ test('a local 25 MiB document with a long line remains navigable in bounded chun
     await openDocument(page, file)
     await expect(page.getByText(firstMarker, { exact: false })).toBeVisible({ timeout: 30_000 })
     const openMs = Math.round(performance.now() - openStarted)
+    const wrap = page.getByRole('button', { name: 'Ajustar líneas' })
+    await expect(wrap).toHaveAttribute('aria-pressed', 'true')
+    await expect(wrap).toBeDisabled()
     const previous = page.getByRole('button', { name: 'Tramo anterior' })
     const next = page.getByRole('button', { name: 'Tramo siguiente' })
     await expect(previous).toBeDisabled()
