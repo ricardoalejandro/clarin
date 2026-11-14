@@ -1,6 +1,6 @@
 CLARIN WHITEBOARD DEPENDENCY LICENSES
 Generated deterministically from installed license files and pinned official repository evidence.
-SBOM SHA-256: 11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef
+SBOM SHA-256: 517e7e70e5fa6d6c0ff2fce77eaf647120317381ba956064ca441e4f95200e88
 SBOM components: 248; covered: 247; explicitly excluded: 1.
 Identical legal texts are included once, with every applicable component listed.
 This install closure over-approximates browser code; inclusion does not imply runtime execution.
@@ -1094,7 +1094,7 @@ THE SOFTWARE.
 ======================================================================
 SHA-256: 5803fa925ae1703b9c752921c95a321570e6cabf06fcf2de895ddaf1687cebef
 Components:
-  dompurify@3.4.16
+  dompurify@3.4.17
 Sources:
   node_modules/dompurify/src/license_header
 
@@ -1599,7 +1599,7 @@ THE SOFTWARE.
 ======================================================================
 SHA-256: 766ccc1f306c885aa45542a9846bbd0a505b27a0374f146778171c2254ce18e3
 Components:
-  katex@0.16.47
+  katex@0.18.2
 Sources:
   node_modules/katex/LICENSE
 
@@ -3316,7 +3316,7 @@ Components:
   @chevrotain/types@11.1.2
   @chevrotain/utils@11.0.3
   chevrotain@11.0.3
-  dompurify@3.4.16
+  dompurify@3.4.17
 Sources:
   node_modules/@chevrotain/cst-dts-gen/LICENSE.txt
   node_modules/@chevrotain/gast/LICENSE.txt
@@ -5826,7 +5826,7 @@ THIS SOFTWARE.
 ======================================================================
 SHA-256: fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85
 Components:
-  dompurify@3.4.16
+  dompurify@3.4.17
 Sources:
   node_modules/dompurify/LICENSE-MPL
 

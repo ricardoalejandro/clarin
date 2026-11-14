@@ -887,7 +887,7 @@ type AccountRepository struct {
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
 			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-				a.max_users_override,
+				a.max_users_override, a.session_idle_timeout_minutes,
 				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
 				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
@@ -907,7 +907,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	var accounts []*domain.Account
 	for rows.Next() {
 		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.SessionIdleTimeoutMinutes, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
 			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
@@ -921,7 +921,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
 			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-				a.max_users_override,
+				a.max_users_override, a.session_idle_timeout_minutes,
 				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
 				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
@@ -933,7 +933,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		LEFT JOIN subscriptions s ON s.account_id = a.id
 		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		WHERE a.id = $1
-		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.SessionIdleTimeoutMinutes, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)

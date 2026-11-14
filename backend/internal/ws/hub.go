@@ -79,13 +79,20 @@ type Message struct {
 
 // Client represents a connected WebSocket client
 type Client struct {
-	ID          string
-	AccountID   uuid.UUID
-	UserID      uuid.UUID
-	Conn        *websocket.Conn
-	Send        chan []byte
-	Hub         *Hub
-	Permissions map[string]bool
+	ID           string
+	AccountID    uuid.UUID
+	UserID       uuid.UUID
+	Conn         *websocket.Conn
+	Send         chan []byte
+	Hub          *Hub
+	Permissions  map[string]bool
+	sessionGuard *sessionGuard
+}
+
+// GuardSession binds this socket to the issuing session. The callback checks
+// current server authority without reporting activity.
+func (c *Client) GuardSession(deadline time.Time, validate func() (time.Time, int)) {
+	c.sessionGuard = newSessionGuard(deadline, validate)
 }
 
 // AuthorityEpoch is the local registration barrier for long-lived account
@@ -478,6 +485,9 @@ func (c *Client) ReadPump() {
 			log.Printf("[WS Client] Invalid message format: %v", err)
 			continue
 		}
+		if !c.checkSession() {
+			return
+		}
 
 		// Process client message (e.g., typing indicators, read receipts)
 		c.handleMessage(&msg)
@@ -487,6 +497,13 @@ func (c *Client) ReadPump() {
 // WritePump writes messages to the WebSocket connection
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingInterval)
+	var checkTimer *time.Timer
+	var checkTime <-chan time.Time
+	if c.sessionGuard != nil {
+		checkTimer = time.NewTimer(c.sessionGuard.delay())
+		checkTime = checkTimer.C
+		defer checkTimer.Stop()
+	}
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
@@ -501,6 +518,9 @@ func (c *Client) WritePump() {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
+			if !c.checkSession() {
+				return
+			}
 
 			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Printf("[WS Client] Write error: %v", err)
@@ -513,8 +533,29 @@ func (c *Client) WritePump() {
 				log.Printf("[WS Client] Ping error: %v", err)
 				return
 			}
+		case <-checkTime:
+			if !c.checkSession() {
+				return
+			}
+			checkTimer.Reset(c.sessionGuard.delay())
 		}
 	}
+}
+
+func (c *Client) checkSession() bool {
+	if c.sessionGuard == nil {
+		return true
+	}
+	code := c.sessionGuard.check(time.Now())
+	if code == 0 {
+		return true
+	}
+	message := "session invalidated"
+	if code == websocket.CloseTryAgainLater {
+		message = "authorization unavailable"
+	}
+	_ = c.Conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, message), time.Now().Add(time.Second))
+	return false
 }
 
 // handleMessage processes incoming messages from the client

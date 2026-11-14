@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
-import { expect, test, type BrowserContext, type Locator, type Page, type Request, type Route, type TestInfo, type WebSocketRoute } from '@playwright/test'
+import { expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request, type Route, type TestInfo, type WebSocketRoute } from '@playwright/test'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3011'
 const boardID = '10000000-0000-4000-8000-000000000001'
@@ -37,7 +37,7 @@ function recordWhiteboardRequestFailure(
 }
 
 test.describe.configure({ mode: 'serial' })
-test.use({ serviceWorkers: 'block' })
+test.use({ serviceWorkers: 'block', channel: process.env.PLAYWRIGHT_CHANNEL })
 
 test('el acceso compartido mantiene nombre, contraseña y cursor legibles', async ({ page }) => {
   test.setTimeout(90_000)
@@ -2759,9 +2759,7 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
   }
 })
 
-test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni tráfico externo', async ({ browser, browserName }, testInfo) => {
-  test.skip(browserName !== 'chromium', 'El portapapeles nativo se verifica con Chromium.')
-  test.setTimeout(120_000)
+async function verifyMermaidClipboard(browser: Browser, testInfo: TestInfo, diagram: { source: string; label: string; guest?: boolean }) {
   const harness = new WhiteboardRealtimeHarness()
   const requests = new Set<string>()
   const blocked: string[] = []
@@ -2771,8 +2769,10 @@ test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni trá
     serviceWorkers: 'block',
     permissions: ['clipboard-read', 'clipboard-write'],
   })
-  await harness.install(context, 'Ana QA')
-  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const actor = diagram.guest ? 'Marta Invitada' : 'Ana QA'
+  await harness.install(context, actor)
+  const shareLinkID = diagram.guest ? await installGuestWhiteboardHTTP(context, harness, requests, blocked) : undefined
+  if (!diagram.guest) await installWhiteboardHTTP(context, harness, actor, requests, blocked, explicitNavigations)
   await context.addInitScript(() => {
     const state = window as typeof window & {
       __clarinMermaidCSP?: Array<{ directive: string; blockedURI: string }>
@@ -2797,7 +2797,8 @@ test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni trá
   try {
     // El host real mantiene IA apagada y habilita Mermaid de forma independiente.
     // Solo cuenta/API/WebSocket usan fixtures; el bundle y su CSP no se alteran.
-    await openEditor(page)
+    if (shareLinkID) await openGuestEditor(page, shareLinkID)
+    else await openEditor(page)
     await expectEditorSaved(page)
     // Production Next prefetches the dashboard's visible links after hydration.
     // Finish that initial traffic before measuring scripts caused by paste.
@@ -2813,14 +2814,14 @@ test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni trá
     await page.keyboard.press('Escape')
     await page.getByTestId('toolbar-selection').check({ force: true })
     await page.mouse.click(box!.x + box!.width * 0.68, box!.y + box!.height * 0.58)
-    await page.evaluate(value => navigator.clipboard.writeText(value), 'graph TD\n A[Inicio]-->B[Fin]')
+    await page.evaluate(value => navigator.clipboard.writeText(value), diagram.source)
     await page.keyboard.press('Control+v')
     await expect.poll(() => pastedElements().length, { timeout: 30_000 }).toBeGreaterThanOrEqual(5)
     await expect.poll(() => new Set(pastedElements().map(element => element.type))).toEqual(
       new Set(['arrow', 'rectangle', 'text']),
     )
-    expect(pastedText()).toEqual(expect.arrayContaining(['Inicio', 'Fin']))
-    expect(pastedText()).not.toEqual(expect.arrayContaining(['graph TD', 'A[Inicio]-->B[Fin]']))
+    expect(pastedText()).toEqual(expect.arrayContaining([diagram.label, 'Fin']))
+    expect(pastedText()).not.toContain(diagram.source)
     await expectEditorSaved(page)
 
     const diagramIDs = new Set(pastedElements().map(element => String(element.id)))
@@ -2851,14 +2852,36 @@ test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni trá
     expect(pageErrors).toEqual([])
     expect(requestFailures).toEqual([])
 
-    const exported = await exportEditableScene(page)
-    const exportedPaste = exported.elements.filter(element => !initialIDs.has(String(element.id)) && !element.isDeleted)
-    expect(new Set(exportedPaste.map(element => element.type))).toEqual(new Set(['arrow', 'rectangle', 'text']))
-    expect(exportedPaste.find(element => element.originalText === 'Nota normal de la cuenta QA')).toBeDefined()
-    expect(exportedPaste.some(element => element.originalText === 'graph TD')).toBe(false)
+    if (shareLinkID) {
+      await expect(page.getByRole('button', { name: 'Exportar copia editable' })).toHaveCount(0)
+    } else {
+      const exported = await exportEditableScene(page)
+      const exportedPaste = exported.elements.filter(element => !initialIDs.has(String(element.id)) && !element.isDeleted)
+      expect(new Set(exportedPaste.map(element => element.type))).toEqual(new Set(['arrow', 'rectangle', 'text']))
+      expect(exportedPaste.find(element => element.originalText === 'Nota normal de la cuenta QA')).toBeDefined()
+      expect(exportedPaste.map(element => element.originalText)).toEqual(expect.arrayContaining([diagram.label, 'Fin']))
+    }
   } finally {
     await context.close()
   }
+}
+
+test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni tráfico externo', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium', 'El portapapeles nativo se verifica con Chromium.')
+  test.setTimeout(120_000)
+  await verifyMermaidClipboard(browser, testInfo, { source: 'graph TD\n A[Inicio]-->B[Fin]', label: 'Inicio' })
+})
+
+test('Mermaid local · pegar un diagrama con fórmula crea elementos editables sin tráfico externo', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium', 'El portapapeles nativo se verifica con Chromium.')
+  test.setTimeout(120_000)
+  await verifyMermaidClipboard(browser, testInfo, { source: 'flowchart TD\n A["$$x^2$$"] --> B[Fin]', label: '$$x^2$$' })
+})
+
+test('Mermaid local · una invitada con edición puede pegar un diagrama con fórmula sin tráfico externo', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium', 'El portapapeles nativo se verifica con Chromium.')
+  test.setTimeout(120_000)
+  await verifyMermaidClipboard(browser, testInfo, { source: 'flowchart TD\n A["$$x^2$$"] --> B[Fin]', label: '$$x^2$$', guest: true })
 })
 
 test('texto enriquecido · Ctrl+C conserva el texto seleccionado y no lo reemplaza por el sobre del lienzo', async ({ browser, browserName }) => {

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sbomSha256": "11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef",
-  "observedAt": "2026-10-12",
+  "sbomSha256": "517e7e70e5fa6d6c0ff2fce77eaf647120317381ba956064ca441e4f95200e88",
+  "observedAt": "2026-11-05",
   "scope": "License texts for the exact archived engine closure, over-approximating the browser bundle. Verified from an isolated npm ci --ignore-scripts installation of the exact lock and archived upstream license evidence, without additional license downloads.",
   "overrides": [
     {

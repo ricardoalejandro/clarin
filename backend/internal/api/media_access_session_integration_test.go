@@ -65,7 +65,7 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		if loginUser == nil || loginUser.ID != user {
 			t.Fatal("disposable login fixture is missing")
 		}
-		token, refresh, _, _, _, err := f.server.services.Auth.Login(ctx, "qa-"+user.String(), password, f.server.cfg.JWTSecret,
+		token, refresh, _, _, _, _, err := f.server.services.Auth.Login(ctx, "qa-"+user.String(), password, f.server.cfg.JWTSecret,
 			service.OfflineReauthIdentity{UserID: user, AccountID: account})
 		if err != nil {
 			t.Fatalf("password login for disposable account: %v", err)
@@ -83,11 +83,19 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 	owner := login(f.user, f.account)
 	secondSession := login(f.user, f.account)
 	otherActor := login(f.secondUser, f.account)
-	otherToken, otherRefresh, _, err := f.server.services.Auth.SwitchAccount(ctx, f.user, f.other, owner.claims.SessionID, owner.refresh, f.server.cfg.JWTSecret)
+	switchingSession := login(f.user, f.account)
+	otherToken, otherRefresh, _, _, err := f.server.services.Auth.SwitchAccount(ctx, switchingSession.claims, f.other, switchingSession.refresh, f.server.cfg.JWTSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = redisCache.Del(ctx, "refresh:"+otherRefresh) })
+	otherClaims, err := f.server.services.Auth.ValidateTokenReadOnly(ctx, otherToken, f.server.cfg.JWTSecret)
+	if err != nil || otherClaims == nil || otherClaims.AccountID != f.other || otherClaims.SessionID == switchingSession.claims.SessionID {
+		t.Fatal("account switch did not issue a distinct destination session")
+	}
+	t.Cleanup(func() {
+		f.server.services.Auth.Logout(ctx, otherClaims, otherRefresh)
+		_ = redisCache.Del(ctx, "jwtblk:"+otherClaims.ID)
+	})
 	key, _, _ := f.media(f.account, "uploads", "account-a.pdf", true)
 	otherKey, _, _ := f.media(f.other, "uploads", "account-b.pdf", true)
 	draftKey, _, _ := f.media(f.account, "uploads", "own-draft.pdf", false)
@@ -149,6 +157,8 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		get(raw, owner.token, true, http.StatusOK, want, nil)
 		get(raw, owner.token, false, http.StatusOK, want, nil)
 		get(otherRaw, otherToken, true, http.StatusOK, otherWant, nil)
+		get(raw, switchingSession.token, true, http.StatusNotFound, nil, nil)
+		get(otherRaw, switchingSession.token, true, http.StatusNotFound, nil, nil)
 		get(otherRaw, owner.token, true, http.StatusNotFound, nil, nil)
 		get(raw, otherToken, true, http.StatusNotFound, nil, nil)
 		get(raw, owner.token+"invalid", false, http.StatusNotFound, nil, nil)
@@ -381,13 +391,13 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		}
 	})
 	t.Run("logout and global session revocation reject still signed tokens", func(t *testing.T) {
-		f.server.services.Auth.Logout(ctx, owner.claims, otherRefresh)
+		f.server.services.Auth.Logout(ctx, owner.claims, owner.refresh)
 		get(raw, owner.token, true, http.StatusNotFound, nil, nil)
-		// The switched token has a different JTI but shares the revoked session.
-		get(otherRaw, otherToken, true, http.StatusNotFound, nil, nil)
+		get(otherRaw, otherToken, true, http.StatusOK, otherWant, nil)
 		get(raw, secondSession.token, true, http.StatusOK, want, nil)
 		f.server.services.Auth.InvalidateUserSessions(f.user)
 		get(raw, secondSession.token, true, http.StatusNotFound, nil, nil)
+		get(otherRaw, otherToken, true, http.StatusNotFound, nil, nil)
 		get(raw, otherActor.token, true, http.StatusOK, want, nil)
 	})
 	t.Run("session cache failure denies media without exposing bytes", func(t *testing.T) {
