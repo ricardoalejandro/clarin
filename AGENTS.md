@@ -31,7 +31,8 @@ Before changing any area below, read the matching local skill completely:
 - Verification, builds, test strategy, final confidence checks: `.codex/skills/clarin-quality-assurance/SKILL.md`
 - MinIO/S3/media/storage cleanup or inventory: `.codex/skills/clarin-storage-management/SKILL.md`
 - Kommo import/status tags/phone normalization/compatibility fields: `.codex/skills/clarin-kommo-integration/SKILL.md`
-- MCP server, MCP admin UI, credentials, sessions, audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
+- MCP server, MCP admin UI, MCP credentials/sessions/audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
+- Utilitarios catalog, JSON/XML editor, QR, image/Base64, cryptographic tools, or per-account browser-session inactivity policy: `.codex/skills/clarin-utilities-experience/SKILL.md` plus the matching frontend, interface-design, backend, database and quality-assurance skills. Use the MCP skill for MCP sessions specifically.
 - Excalidraw-powered Clarin whiteboards, editor integration or fork changes, documents/folders/revisions, whiteboard assets, import/export, sharing, collaboration, network isolation, licensing, or upstream upgrades: `.codex/skills/clarin-excalidraw-development/SKILL.md` plus every matching frontend, interface-design, backend, database, storage, and quality-assurance skill above.
 - Chats, WhatsApp devices/capabilities, messages/replies, chat details, contact avatars, statuses, stickers, or realtime chat UX: `.codex/skills/clarin-chat-whatsapp-experience/SKILL.md` plus every matching layer skill above.
 - Clarin Work, tasks, Kanban, task folders/lists/workflows/statuses, ordering, filters/saved views, task detail, subtasks, comments, dependencies, Gantt/calendar, or task realtime behavior: `.codex/skills/clarin-task-work-experience/SKILL.md` plus every matching layer skill above.
@@ -52,6 +53,13 @@ If a task touches multiple areas, read all matching skills before editing.
 - File viewers and other long async surfaces own a resource-scoped session and destroy fetches, polls, workers, documents, render tasks, URLs, canvas, and annotations when closed or switched.
 - Complex filters and configuration surfaces use the same measured work-window contract when drag, resize, dock, maximize, draft/apply, or contextual inspection improves the workflow.
 - Custom identity colors persist only as validated `#RRGGBB` values with contrast preview; icons remain allow-listed identifiers.
+
+## Utilities Product Invariants
+
+- Utility payloads and keys stay in memory and are cleared when leaving or changing account/session. Keep processing dependencies local, exports deliberate, and content out of persisted storage, URLs, logs, Eros context and network payloads.
+- The JSON/XML workspace uses compact direct icon controls, independent panel drafts/history and per-panel visual word wrap. Preserve hidden-panel state, selection and scroll. Expose editor zoom up to 500% with a visible percentage and 100% reset, and keep Ctrl+wheel scoped to the focused editor.
+- Preserve JSON lexemes and XML content through bounded, cancellable workers. Reuse canonical limits, stage repairs, keep result format coherent through Undo/Redo and export, and preserve signed XML originals. Smart formatting and visual wrapping have separate controls.
+- Account inactivity policy is changed only by global superadministration, with account isolation and auditing. Preserve the configured login/account-selection snapshot, server/browser deadline agreement and absolute session lifetime.
 
 ## Contact And Program Product Invariants
 
