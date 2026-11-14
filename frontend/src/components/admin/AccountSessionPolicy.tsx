@@ -1,8 +1,8 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Clock } from 'lucide-react'
-import { apiPut } from '@/lib/api'
+import { apiPut, getOnlineSessionTiming, subscribeOnlineSessionNotice } from '@/lib/api'
 
 interface Props {
   accountId: string
@@ -17,6 +17,13 @@ export function AccountSessionPolicy({ accountId, minutes, disabled, onBusyChang
   const [pending, setPending] = useState(false)
   const [notice, setNotice] = useState<{ error: boolean; message: string } | null>(null)
   const requestInProgress = useRef(false)
+  const [timing, setTiming] = useState<ReturnType<typeof getOnlineSessionTiming>>(null)
+  useEffect(() => {
+    const update = () => setTiming(getOnlineSessionTiming())
+    update()
+    return subscribeOnlineSessionNotice(update)
+  }, [])
+  const currentSession = timing?.session.account_id === accountId ? timing : null
 
   async function save() {
     if (requestInProgress.current || disabled || draft === String(minutes)) return
@@ -38,7 +45,7 @@ export function AccountSessionPolicy({ accountId, minutes, disabled, onBusyChang
       }
       setDraft(String(saved))
       onSaved(saved)
-      setNotice({ error: false, message: 'Plazo de inactividad guardado.' })
+      setNotice({ error: false, message: 'Plazo de inactividad guardado. Se aplicará al iniciar sesión o volver a seleccionar esta cuenta; las sesiones abiertas conservan su plazo actual.' })
     } catch {
       setNotice({ error: true, message: 'No se pudo guardar el plazo. Inténtalo nuevamente.' })
     } finally {
@@ -52,6 +59,11 @@ export function AccountSessionPolicy({ accountId, minutes, disabled, onBusyChang
     <section aria-labelledby="account-session-policy-title" className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
       <h3 id="account-session-policy-title" className="flex items-center gap-2 text-sm font-semibold text-slate-800"><Clock aria-hidden="true" size={16} /> Seguridad de sesión</h3>
       <p id="account-session-policy-help" className="text-xs leading-5 text-slate-600">Elige entre 5 y 1440 minutos. El plazo nuevo se aplica al iniciar sesión o al volver a seleccionar esta cuenta. El máximo total de una sesión es de 7 días.</p>
+      <dl className="grid gap-2 text-xs sm:grid-cols-2">
+        <div><dt className="text-slate-500">Plazo configurado de la cuenta</dt><dd className="mt-0.5 font-semibold text-slate-800">{minutes} minutos por inactividad</dd></div>
+        {currentSession && <div><dt className="text-slate-500">Plazo efectivo de esta sesión</dt><dd className="mt-0.5 font-semibold text-slate-800">{currentSession.session.idle_timeout_minutes} minutos por inactividad</dd></div>}
+      </dl>
+      {currentSession && <p className="text-xs leading-5 text-slate-600">Vencimiento estimado sin nueva actividad: <time dateTime={new Date(currentSession.deadlineAt).toISOString()}>{new Date(currentSession.deadlineAt).toLocaleString('es-PE', { dateStyle: 'short', timeStyle: 'short' })}</time>.{currentSession.session.idle_timeout_minutes !== minutes && ' El plazo configurado es diferente del de esta sesión. Vuelve a seleccionar la cuenta para adoptar el nuevo plazo.'}</p>}
       <div className="flex flex-wrap items-end gap-2">
         <label className="min-w-0 flex-1 text-sm font-medium text-slate-700">
           Cerrar por inactividad (minutos)

@@ -10,15 +10,17 @@ import (
 )
 
 type Config struct {
-	DatabaseURL   string
-	RedisURL      string
-	JWTSecret     string
-	Port          string
-	Env           string
-	AdminUser     string
-	AdminPassword string
-	AdminEmail    string
-	CORSOrigins   []string
+	DatabaseURL               string
+	RedisURL                  string
+	JWTSecret                 string
+	UtilitiesVaultActiveKeyID string
+	UtilitiesVaultMasterKeys  string
+	Port                      string
+	Env                       string
+	AdminUser                 string
+	AdminPassword             string
+	AdminEmail                string
+	CORSOrigins               []string
 	// MinIO Storage
 	MinioEndpoint  string
 	MinioAccessKey string
@@ -176,6 +178,8 @@ func Load() *Config {
 		WhatsAppCloudGraphBaseURL:         strings.TrimRight(getEnv("WHATSAPP_CLOUD_GRAPH_BASE_URL", "https://graph.facebook.com"), "/"),
 		WhatsAppCloudVerifyToken:          getEnv("WHATSAPP_CLOUD_VERIFY_TOKEN", ""),
 		WhatsAppCloudTokenEncryptionKey:   getEnv("WHATSAPP_CLOUD_TOKEN_ENCRYPTION_KEY", ""),
+		UtilitiesVaultActiveKeyID:         getEnv("UTILITIES_VAULT_ACTIVE_KEY_ID", ""),
+		UtilitiesVaultMasterKeys:          getEnv("UTILITIES_VAULT_MASTER_KEYS", ""),
 		WhatsAppGroupChatsEnabled:         getEnvBool("WHATSAPP_GROUP_CHATS_ENABLED", false),
 		WhatsAppGroupChatAccounts:         getEnv("WHATSAPP_GROUP_CHAT_ACCOUNTS", ""),
 		WhatsAppNativeForwardingEnabled:   getEnvBool("WHATSAPP_NATIVE_FORWARDING_ENABLED", false),

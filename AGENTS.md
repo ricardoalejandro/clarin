@@ -56,7 +56,8 @@ If a task touches multiple areas, read all matching skills before editing.
 
 ## Utilities Product Invariants
 
-- Utility payloads and keys stay in memory and are cleared when leaving or changing account/session. Keep processing dependencies local, exports deliberate, and content out of persisted storage, URLs, logs, Eros context and network payloads.
+- Utilitarios has a private document library per account and user. Persist ordinary documents only through authorized utility APIs and private inventoried storage; preserve tabs and drafts across tool changes. Keep parsers and processing local. Never put document content in URLs, logs, telemetry, Eros context or shared browser persistence. Account/session changes release in-memory resources.
+- Store private keys and symmetric secrets only through the encrypted server vault; ordinary document configuration contains public options and key references. Passwords and decrypted results remain temporary and never enter ordinary autosave, search indexes or events.
 - The JSON/XML workspace uses compact direct icon controls, independent panel drafts/history and per-panel visual word wrap. Preserve hidden-panel state, selection and scroll. Expose editor zoom up to 500% with a visible percentage and 100% reset, and keep Ctrl+wheel scoped to the focused editor.
 - Preserve JSON lexemes and XML content through bounded, cancellable workers. Reuse canonical limits, stage repairs, keep result format coherent through Undo/Redo and export, and preserve signed XML originals. Smart formatting and visual wrapping have separate controls.
 - Account inactivity policy is changed only by global superadministration, with account isolation and auditing. Preserve the configured login/account-selection snapshot, server/browser deadline agreement and absolute session lifetime.

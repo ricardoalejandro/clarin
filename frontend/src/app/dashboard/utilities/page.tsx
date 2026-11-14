@@ -1,5 +1,5 @@
-import { UtilitiesCatalog } from '@/components/utilities/UtilitiesCatalog'
+import { UtilitiesLibrary } from '@/components/utilities/library/UtilitiesLibrary'
 
 export default function UtilitiesPage() {
-  return <UtilitiesCatalog />
+  return <UtilitiesLibrary />
 }

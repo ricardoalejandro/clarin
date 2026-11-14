@@ -9,13 +9,15 @@ description: Analyze, implement, or review Clarin Utilitarios, including the JSO
 
 - Read `AGENTS.md`, `clarin-frontend-development`, `clarin-interface-design-system` and its design/verification references, and `clarin-quality-assurance` before changing a utility.
 - Add backend and database skills when changing authorization or session policy. This skill does not change the repository's PR, merge, or deployment authorization rules.
-- Inspect `frontend/src/components/utilities`, its dashboard routes, and the implementation behind reported screenshots. Keep the four-tool catalog and local processing contract coherent.
+- Inspect `frontend/src/components/utilities`, its dashboard routes, and the implementation behind reported screenshots. Keep the four-tool catalog, private document library and local processing contract coherent.
 
 ## Access And Local Data
 
 - Preserve the account-scoped `utilities` permission and the server check at `/api/utilities/access`, including revocation and account switching. Sidebar visibility alone cannot authorize a workspace.
-- Keep JSON/XML, image bytes, QR content, plaintext, passwords, keys and results in memory. Clear them on leaving, account/session changes, and history restoration. Explicit copy and download are user-owned exports.
-- Keep utility content out of browser persistence, URLs, logs, telemetry, Eros context and request bodies. Existing authentication and authorization traffic carries only its own metadata.
+- Ordinary JSON/XML, image and QR documents persist through authorized utility APIs and private inventoried storage, scoped by account and owner. Tabs may close without deleting documents; leaving a tool saves its state and releases heavy resources. Account/session changes clear in-memory content.
+- Never put utility content in shared browser persistence, URLs, logs, telemetry or Eros context. Only utility persistence APIs carry document payloads. Autosave and background traffic never manufacture user activity.
+- Private keys and symmetric secrets persist only in the encrypted server vault, protected by a dedicated versioned master key. General document configuration stores public options and key references only. Passwords, crypto plaintext and decrypted results remain temporary and out of ordinary autosave and search.
+- Use CAS versions and idempotent operation IDs; preserve drafts on conflicts and save failures. Delete objects through a durable, reference-aware cleanup job, including failed-upload orphans. Do not claim physical deletion before checking storage.
 - Bundle parsers, editors, workers and QR libraries locally. Scope asynchronous work to its source/version, reject stale completions, and release workers, models, listeners, canvas and object URLs on cancellation or disposal.
 
 ## Compact Document Workspace
@@ -31,12 +33,12 @@ description: Analyze, implement, or review Clarin Utilitarios, including the JSO
 
 ## Document Integrity And Limits
 
-- Reuse `jsonLimits.ts`, `editorWorkspaceState.ts`, the worker and bounded output helpers. Current limits are 25 MiB input, 50 MiB output, 2 MiB repair and 160 nesting levels. Check actual UTF-8 bytes and preserve the original on failure.
-- Process whole documents in a cancellable local worker with bounded time. Very long lines use read-only, surrogate-safe chunks. Large documents use simplified highlighting rather than mounting the whole representation as DOM.
+- Reuse `jsonLimits.ts`, `editorWorkspaceState.ts`, the worker and bounded output helpers. Maximum document/input/output is 60 MiB; 30 MiB is the recommended ordinary size. Repair remains 2 MiB, comparison 5 MiB and nesting 160. Check actual UTF-8 bytes and preserve the original on failure.
+- Process whole documents in a cancellable local worker with bounded time. Very long lines use bounded, editable, surrogate-safe chunks mapped to the original revision. Search must cover the entire document, not only the visible chunk. Large documents use simplified highlighting rather than mounting the whole representation as DOM.
 - Preserve scalar lexemes, wide integers, exponent/decimal spelling, key order and duplicate keys through JSON formatting and compaction. Warn about duplicates or bounded duplicate checking. JSONC retains comments under its explicit syntax mode.
 - Standard JSON formatting places each entry on its own line. Smart formatting is deterministic and idempotent, using the current 100-column budget. It keeps fitting short containers inline and packs adjacent complete scalar fields/items in longer comment-free flat containers. Preserve intact string values and explicit repair. Visual wrapping remains independent.
 - Repair produces a reviewable proposal tied to the source version, then applies once on confirmation. Escapar adds one JSON-string layer and Desescapar removes one complete layer.
-- Read local files as validated UTF-8. Report line/column failures and keep the prior draft when size, encoding or parsing fails.
+- Detect UTF-8/UTF-16 BOM and XML encoding declarations; support explicit Windows-1252/ISO-8859-1 selection and explain conflicts. Preserve the prior draft on decoding failure; UTF-8 exports must have a coherent XML declaration and protect signed originals.
 - XML uses the local XML 1.0 parser with namespaces. Reject DOCTYPE and external entity loading. Preserve text, attributes, comments, CDATA, processing instructions, mixed content and inherited `xml:space`.
 - Structural XML whitespace changes require the explicit option. Detect XML signatures and preserve signed originals. Validate the encoding declaration before a UTF-8 XML download.
 - Comparison uses separate read-only models and retains both editing models. Current limits are 5 MiB and 100,000 lines per document with bounded line length. Report timeout/incomplete computation truthfully and restore editing state on exit.
@@ -62,5 +64,5 @@ description: Analyze, implement, or review Clarin Utilitarios, including the JSO
 
 - Follow the QA skill for affected layers. Cover pure state/transform invariants and source/version races at the nearest stable test boundary.
 - Browser-check direct controls, keyboard/focus, both panels, hidden-panel restoration, 500% font zoom, independent wrap, diff and narrow reflow with sidebar/Eros. Include long strings, wide numbers, duplicate keys, JSONC, mixed/signed XML and oversized input.
-- Exercise clipboard denial/native paste, corrupt/oversized images, QR and Base64 round trips, invalid/authentication-failed crypto, and proof that utility payloads never enter requests or persisted storage.
+- Exercise clipboard denial/native paste, corrupt/oversized images, QR and Base64 round trips, invalid/authentication-failed crypto, and proof that only authorized private utility persistence receives ordinary content. Verify that vault material is encrypted at rest and excluded from generic autosave, search, telemetry and events.
 - Session changes also verify global-superadmin enforcement, account isolation, policy snapshots, idle/absolute deadlines and refresh/realtime races.

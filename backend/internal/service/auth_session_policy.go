@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,7 +71,7 @@ func (session *authSessionData) validateTime(now time.Time) error {
 		return fmt.Errorf("%w: invalid session timing", ErrAuthSessionExpired)
 	}
 	if !now.Before(session.absoluteDeadline()) {
-		return fmt.Errorf("%w: absolute lifetime exceeded", ErrAuthSessionExpired)
+		return errAuthSessionAbsoluteExpired
 	}
 	if !now.Before(session.idleDeadline()) {
 		return ErrAuthSessionIdleExpired
@@ -82,14 +80,19 @@ func (session *authSessionData) validateTime(now time.Time) error {
 }
 
 func (session *authSessionData) snapshot(sessionID string, accountID uuid.UUID) AuthSessionSnapshot {
-	digest := sha256.Sum256([]byte("clarin-browser-session:" + sessionID + ":" + accountID.String()))
 	return AuthSessionSnapshot{
-		Scope: hex.EncodeToString(digest[:]), AccountID: accountID, IdleTimeoutMinutes: session.timeoutMinutes(),
+		Scope: authSessionCorrelation(sessionID, accountID), AccountID: accountID, IdleTimeoutMinutes: session.timeoutMinutes(),
 		ServerNow: time.Now().UTC(), IdleExpiresAt: session.idleDeadline(), AbsoluteExpiresAt: session.absoluteDeadline(),
 	}
 }
 
-func (s *AuthService) loadSession(ctx context.Context, sessionID string, userID, accountID uuid.UUID) (*authSessionData, []byte, error) {
+func (s *AuthService) loadSession(ctx context.Context, sessionID string, userID, accountID uuid.UUID) (loaded *authSessionData, raw []byte, resultErr error) {
+	var diagnostic *authSessionData
+	defer func() {
+		if resultErr != nil {
+			recordAuthSessionDiagnostic(sessionID, userID, accountID, diagnostic, authSessionDiagnosticReason(resultErr))
+		}
+	}()
 	if s.cache == nil {
 		return nil, nil, fmt.Errorf("%w: cache not configured", ErrAuthSessionUnavailable)
 	}
@@ -101,7 +104,7 @@ func (s *AuthService) loadSession(ctx context.Context, sessionID string, userID,
 		return nil, nil, fmt.Errorf("%w: session read failed: %v", ErrAuthSessionUnavailable, err)
 	}
 	if data == nil {
-		return nil, nil, fmt.Errorf("%w: session missing", ErrAuthSessionExpired)
+		return nil, nil, errAuthSessionMissing
 	}
 	var session authSessionData
 	if err := json.Unmarshal(data, &session); err != nil {
@@ -110,8 +113,9 @@ func (s *AuthService) loadSession(ctx context.Context, sessionID string, userID,
 	// Old sessions kept their initial account ID through switches. Their signed
 	// credential account remains authoritative until the next switch/login.
 	if session.UserID != userID.String() || (session.IdleTimeoutMinutes != 0 && accountID != uuid.Nil && session.AccountID != accountID.String()) {
-		return nil, nil, fmt.Errorf("%w: session identity mismatch", ErrAuthSessionExpired)
+		return nil, nil, errAuthSessionIdentityMismatch
 	}
+	diagnostic = &session
 	if err := s.validateSessionInvalidationGeneration(ctx, &session); err != nil {
 		return nil, nil, err
 	}
@@ -136,6 +140,7 @@ func (s *AuthService) RecordSessionActivity(ctx context.Context, claims *JWTClai
 			return AuthSessionSnapshot{}, err
 		}
 		if scope != session.snapshot(claims.SessionID, claims.AccountID).Scope {
+			recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, session, "scope_changed")
 			return AuthSessionSnapshot{}, ErrAuthSessionScopeChanged
 		}
 		previousDeadline := session.deadline()
@@ -149,12 +154,14 @@ func (s *AuthService) RecordSessionActivity(ctx context.Context, claims *JWTClai
 			userSessionInvalidatedPrefix+session.UserID, raw, session.InvalidationMarker, previousDeadline,
 			value, session.deadline().Add(authSessionReasonRetention))
 		if err != nil {
+			recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, session, "unavailable")
 			return AuthSessionSnapshot{}, fmt.Errorf("%w: session update failed: %v", ErrAuthSessionUnavailable, err)
 		}
 		if updated {
 			return session.snapshot(claims.SessionID, claims.AccountID), nil
 		}
 	}
+	recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, "unavailable")
 	return AuthSessionSnapshot{}, fmt.Errorf("%w: session changed during activity", ErrAuthSessionUnavailable)
 }
 
@@ -193,6 +200,7 @@ func (s *AuthService) replaceRefreshCredential(ctx context.Context, oldToken, ne
 			return AuthSessionSnapshot{}, err
 		}
 		if source.CreatedAt != next.CreatedAt {
+			recordAuthSessionDiagnostic(sourceSessionID, userID, sourceAccountID, source, "invalid")
 			return AuthSessionSnapshot{}, fmt.Errorf("%w: refresh session mismatch", ErrAuthSessionExpired)
 		}
 		value, _ := json.Marshal(next)
@@ -212,6 +220,7 @@ func (s *AuthService) replaceRefreshCredential(ctx context.Context, oldToken, ne
 		}
 		updated, err := s.cache.RotateAuthCredential(ctx, rotation)
 		if err != nil {
+			recordAuthSessionDiagnostic(sourceSessionID, userID, sourceAccountID, source, "unavailable")
 			return AuthSessionSnapshot{}, fmt.Errorf("%w: refresh credential rotation failed: %v", ErrAuthSessionUnavailable, err)
 		}
 		if updated {
@@ -219,5 +228,6 @@ func (s *AuthService) replaceRefreshCredential(ctx context.Context, oldToken, ne
 			return current.snapshot(next.SessionID, accountID), nil
 		}
 	}
+	recordAuthSessionDiagnostic(sourceSessionID, userID, sourceAccountID, nil, "unavailable")
 	return AuthSessionSnapshot{}, fmt.Errorf("%w: session changed during credential rotation", ErrAuthSessionUnavailable)
 }

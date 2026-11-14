@@ -38,6 +38,9 @@ var storageReferenceGuardSpecs = []storageReferenceGuardSpec{
 	{"whiteboard_revisions", "direct", "snapshot_object_key"},
 	{"media_assets", "direct", "object_key,status"},
 	{"storage_upload_ownership", "direct", "object_key,state"},
+	{"utility_content", "direct", "object_key"},
+	{"utility_vault", "direct", "object_key"},
+	{"utility_objects", "direct", "object_key,state"},
 }
 
 func storageSelfServiceReferenceGuardMigrations() []string {
@@ -137,6 +140,7 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		 IF table_name='media_assets' AND COALESCE(item->>'status','active')<>'active' THEN RETURN result; END IF;
 		 IF table_name='survey_file_uploads' AND COALESCE(item->>'status','staged') IN ('deleted','deleting') THEN RETURN result; END IF;
 		 IF table_name='storage_upload_ownership' AND COALESCE(item->>'state','active')<>'active' THEN RETURN result; END IF;
+		 IF table_name='utility_objects' AND COALESCE(item->>'state','uploading') NOT IN ('active','uploading') THEN RETURN result; END IF;
 		 IF table_name='task_attachments' AND NULLIF(item->>'storage_removed_at','') IS NOT NULL THEN RETURN result; END IF;
 		 FOREACH field IN ARRAY string_to_array(fields,',') LOOP
 		   IF table_name='messages' AND field IN ('media_url','media_asset_id') AND COALESCE((item->>'media_deleted')::boolean,FALSE) THEN CONTINUE; END IF;

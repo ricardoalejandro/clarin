@@ -1,9 +1,9 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from 'react'
 import {
   ArrowDownToLine, Braces, Brackets, Check, ChevronLeft, ChevronRight, Copy, Eraser, FileUp, GitCompare,
-  Loader2, PanelRightOpen, Quote, Redo2, Settings2, Shrink, Sparkles, Undo2, WrapText, Wrench, X,
+  Loader2, PanelRightOpen, Quote, Redo2, Search, Settings2, Shrink, Sparkles, Undo2, WrapText, Wrench, X,
 } from 'lucide-react'
 import { editor } from 'monaco-editor'
 import { DocumentCodeEditor, DocumentDiff, registerDocumentCompletions, type DiffDocument } from './JsonCodeEditor'
@@ -12,13 +12,24 @@ import {
   PANEL_BREAKPOINT, repairPreview, TRAM_LENGTH, visiblePanels, type DocumentFormat, type Panel,
 } from './editorWorkspaceState'
 import { useEditorDocuments, type DocumentSnapshot } from './useEditorDocuments'
-import { getXmlDeclaredEncoding, JSON_INPUT_LIMIT, JSON_REPAIR_LIMIT, measureDocument } from './jsonLimits'
+import { JSON_INPUT_LIMIT, JSON_REPAIR_LIMIT, measureDocument } from './jsonLimits'
 import type { DocumentWorkerRequest, DocumentWorkerResponse, JsonOperation, JsonRequest } from './jsonOperations'
+import { DOCUMENT_ENCODINGS, originalDocumentAsset, prepareUtf8XmlDownload } from './documentFile'
+import { useDocumentSearch } from './useDocumentSearch'
+import type { DocumentMatch } from './documentSearch'
+import { useUtilityDocument, useUtilityDocumentState } from '../library/UtilityDocumentContext'
+import { editorViewsNeedCompaction, projectEditorViewState, safeJsonViews, validJsonPreference } from './editorPreferences'
 
 const button = 'inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--editor-ink)] outline-none hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-40 pointer-fine:min-h-8 pointer-fine:min-w-8'
 const select = 'min-h-11 rounded-md border border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-xs text-[var(--editor-ink)] pointer-fine:min-h-8'
 const menuClass = 'fixed inset-auto m-0 max-h-[calc(100dvh-1rem)] w-64 max-w-[calc(100vw-1rem)] overflow-auto rounded-lg border border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-[var(--editor-ink)] shadow-xl'
 const panels: Panel[] = ['a', 'b']
+
+function useJsonPreference<T,>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
+  const [stored, setStored] = useUtilityDocumentState(key, initial)
+  const value = validJsonPreference(key, stored) ? stored : initial
+  return [value, next => setStored(previous => typeof next === 'function' ? (next as (previous: T) => T)(validJsonPreference(key, previous) ? previous : initial) : next)]
+}
 
 function Action({ label, title = label, children, ...props }: ComponentPropsWithRef<'button'> & { label: string; children: ReactNode }) {
   return <button {...props} type="button" className={`${button} ${props.className ?? ''}`} aria-label={label} title={title}>{children}</button>
@@ -50,25 +61,43 @@ interface ProposedEdit extends DocumentSnapshot { before: string; after: string;
 interface Work { panel: Panel; worker: Worker; timer: number }
 
 export default function JsonUtility() {
+  const utility = useUtilityDocument()
+  const hydrated = useRef(true)
+  const [restoring, setRestoring] = useState(Boolean(utility))
+  const librarySearch = useRef<{ request: number; attempted: Set<Panel>; located: boolean } | null>(null)
   const host = useRef<HTMLElement>(null)
   const preferences = useRef<HTMLDivElement>(null)
   const compareButton = useRef<HTMLButtonElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const fileTarget = useRef<Panel>('a')
   const task = useRef<Work | null>(null)
+  const cancelRestore = useRef<(() => void) | null>(null)
+  const deactivated = useRef(false)
+  const beforeDeactivate = useRef<() => void>(() => {})
   const urls = useRef(new Map<string, number>())
   const alive = useRef(false)
   const [width, setWidth] = useState(0)
-  const [split, setSplit] = useState(false)
-  const [active, setActive] = useState<Panel>('a')
-  const [dark, setDark] = useState(true)
-  const [font, setFont] = useState(DEFAULT_FONT)
-  const [wrap, setWrap] = useState<Record<Panel, boolean>>({ a: false, b: false })
-  const [indent, setIndent] = useState<JsonRequest['indent']>('2')
-  const [structuralXml, setStructuralXml] = useState(false)
-  const [formats, setFormats] = useState<Record<Panel, DocumentFormat>>({ a: 'strict', b: 'strict' })
+  const [split, setSplit] = useJsonPreference('json.split', false)
+  const [active, setActive] = useJsonPreference<Panel>('json.active', 'a')
+  const [dark, setDark] = useJsonPreference('json.dark', true)
+  const [font, setFont] = useJsonPreference('json.font', DEFAULT_FONT)
+  const [wrap, setWrap] = useJsonPreference<Record<Panel, boolean>>('json.wrap', { a: false, b: false })
+  const [indent, setIndent] = useJsonPreference<JsonRequest['indent']>('json.indent', '2')
+  const [structuralXml, setStructuralXml] = useJsonPreference('json.structuralXml', false)
+  const [formats, setFormats] = useJsonPreference<Record<Panel, DocumentFormat>>('json.formats', { a: 'strict', b: 'strict' })
+  const [plainText, setPlainText] = useJsonPreference<Record<Panel, boolean>>('json.plainText', { a: false, b: false })
   const [signedXml, setSignedXml] = useState<Partial<Record<Panel, boolean>>>({})
-  const [chunks, setChunks] = useState<Record<Panel, number>>({ a: 0, b: 0 })
+  const [chunks, setChunks] = useJsonPreference<Record<Panel, number>>('json.chunks', { a: 0, b: 0 })
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const [revealMatch, setRevealMatch] = useState<{ panel: Panel; offset: number; length: number; nonce: number }>()
+  const revealSequence = useRef(0)
+  const [encodingChoice, setEncodingChoice] = useState('utf-8')
+  const [pendingEncoding, setPendingEncoding] = useState<{ panel: Panel; file: File }>()
+  const originals = useRef<Partial<Record<Panel, Blob>>>({})
+  const [originalNames, setOriginalNames] = useJsonPreference<Partial<Record<Panel, string>>>('json.originalNames', {})
+  const [initialViews] = useState(() => safeJsonViews(utility?.initialState['json.views']))
+  const savedViews = useRef(initialViews)
   const [notices, setNotices] = useState<Partial<Record<Panel, Notice>>>({})
   const [proposal, setProposal] = useState<Partial<Record<Panel, ProposedEdit>>>({})
   const [oversized, setOversized] = useState<Partial<Record<Panel, { source: string; extension: string }>>>({})
@@ -85,20 +114,22 @@ export default function JsonUtility() {
     task.current = null
   }
 
-  const documents = useEditorDocuments((panel, formatHint) => {
+  const documents = useEditorDocuments((panel, formatHint, error, textOnly) => {
     if (task.current?.panel === panel) {
       stop()
       setBusy(null)
     }
-    setNotices(current => ({ ...current, [panel]: undefined }))
+    setNotices(current => ({ ...current, [panel]: error ? { message: error, error: true } : undefined }))
     setProposal(current => ({ ...current, [panel]: undefined }))
     setOversized(current => ({ ...current, [panel]: undefined }))
     setSignedXml(current => current[panel] ? { ...current, [panel]: undefined } : current)
     if (formatHint) setFormats(current => current[panel] === formatHint ? current : { ...current, [panel]: formatHint })
-    setChunks(current => current[panel] ? { ...current, [panel]: 0 } : current)
+    if (textOnly !== undefined) setPlainText(current => current[panel] === textOnly ? current : { ...current, [panel]: textOnly })
+    if (hydrated.current && !error) utility?.setSlot(`panel-${panel}`, () => documents.source(panel))
   })
   const { states, models, runtimes } = documents
   const state = states[active]
+  const search = useDocumentSearch(searchOpen, active, state.revision, () => documents.source(active))
   const format = formats[active]
   const pendingRepair = proposal[active]
   const pendingDownload = oversized[active]
@@ -107,6 +138,115 @@ export default function JsonUtility() {
   const canRun = Boolean(state.length && !working && !diff)
   const canTransform = canRun && !(format === 'xml' && signedXml[active])
   const selectClass = dark ? `${select} dark-input` : select
+
+  function rememberView(panel: Panel, view: editor.ICodeEditorViewState | null) {
+    const projected = projectEditorViewState(view)
+    // A temporarily hidden Monaco model reports null; retain its last reading position.
+    if (!projected) return
+    savedViews.current = { ...savedViews.current, [panel]: projected }
+    utility?.setState({ 'json.views': savedViews.current })
+  }
+
+  useLayoutEffect(() => {
+    beforeDeactivate.current = () => {
+      deactivated.current = true
+      stop()
+      search.suspend()
+      cancelRestore.current?.()
+      librarySearch.current = null
+      for (const panel of panels) {
+        const view = runtimes.current[panel]?.view
+        if (view?.getModel()) rememberView(panel, view.saveViewState())
+      }
+      setBusy(null)
+      setRestoring(false)
+      setSearchOpen(false)
+    }
+  })
+  useLayoutEffect(() => utility?.registerBeforeDeactivate?.(() => beforeDeactivate.current()), [utility?.documentId, utility?.registerBeforeDeactivate])
+  useLayoutEffect(() => {
+    // Replace legacy oversized folding state before the next autosave attempts
+    // to send configuration. Text retains its existing independent slot path.
+    if (utility && editorViewsNeedCompaction(utility.initialState['json.views'])) utility.setState({ 'json.views': savedViews.current })
+  }, [utility?.documentId])
+
+  useLayoutEffect(() => {
+    documents.ensure(active)
+    if (split) documents.ensure(otherPanel(active))
+  }, [active, split, documents.ensure])
+
+  useEffect(() => {
+    if (!utility || deactivated.current) return
+    let cancelled = false
+    const workers = new Set<Worker>()
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    const cancel = () => { cancelled = true; workers.forEach(worker => worker.terminate()); timers.forEach(timer => clearTimeout(timer)) }
+    cancelRestore.current = cancel
+    const revisions = { a: runtimes.current.a?.model.getVersionId(), b: runtimes.current.b?.model.getVersionId() }
+    const restore = async () => {
+      try {
+        for (const panel of panels) {
+          if (cancelled || deactivated.current) break
+          const blob = await utility.readSlot(`panel-${panel}`)
+          if (cancelled || deactivated.current || !blob) continue
+          documents.ensure(panel)
+          const runtime = runtimes.current[panel]
+          if (!runtime || revisions[panel] !== undefined && runtime.model.getVersionId() !== revisions[panel]) continue
+          const revision = runtime.model.getVersionId()
+          const result = await new Promise<DocumentWorkerResponse>((resolve, reject) => {
+            const worker = new Worker(new URL('./json.worker.ts', import.meta.url), { type: 'module' })
+            workers.add(worker)
+            const timer = setTimeout(() => { timers.delete(timer); worker.terminate(); workers.delete(worker); reject(new Error('timeout')) }, 60_000)
+            timers.add(timer)
+            worker.onmessage = event => { clearTimeout(timer); timers.delete(timer); worker.terminate(); workers.delete(worker); resolve(event.data) }
+            worker.onerror = () => { clearTimeout(timer); timers.delete(timer); worker.terminate(); workers.delete(worker); reject(new Error('read')) }
+            worker.postMessage({ kind: 'read-file', file: new File([blob], `panel-${panel}.txt`) })
+          })
+          if (cancelled || deactivated.current || result.kind !== 'read-file' || runtime.model.getVersionId() !== revision) continue
+          if (!result.result.ok) throw new Error(result.result.message)
+          hydrated.current = false
+          try { documents.replace(panel, { ...result.result, plainText: plainText[panel] }) } finally { hydrated.current = true }
+        }
+      } catch {
+        if (!cancelled) announce('a', 'No se pudo restaurar el contenido. Vuelve a abrir el documento para reintentar.', true)
+      } finally {
+        if (!cancelled) { hydrated.current = true; setRestoring(false) }
+      }
+    }
+    void restore()
+    return () => { cancel(); if (cancelRestore.current === cancel) cancelRestore.current = null }
+    // A provider is keyed by document ID. Its session stays stable while editing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [utility?.documentId])
+
+  function find() {
+    search.resume()
+    setSearchOpen(true)
+    requestAnimationFrame(() => searchInput.current?.focus())
+  }
+
+  function showMatch(match: DocumentMatch) {
+    setChunks(current => ({ ...current, [active]: Math.floor(match.offset / TRAM_LENGTH) }))
+    setRevealMatch({ panel: active, offset: match.offset, length: match.length, nonce: ++revealSequence.current })
+  }
+
+  useEffect(() => {
+    if (restoring || !utility?.searchQuery || utility.searchRequest === undefined || librarySearch.current?.request === utility.searchRequest) return
+    librarySearch.current = { request: utility.searchRequest, attempted: new Set(), located: false }
+    setSearchOpen(true)
+    search.setCaseSensitive(false)
+    search.setQuery(utility.searchQuery)
+  }, [restoring, utility?.searchQuery, utility?.searchRequest])
+
+  useEffect(() => {
+    const navigation = librarySearch.current
+    if (!navigation || navigation.located || !search.completed || search.working || search.pending || search.error || restoring) return
+    if (search.matches.length) { navigation.located = true; showMatch(search.matches[0]); return }
+    navigation.attempted.add(active)
+    const next = otherPanel(active)
+    if (!navigation.attempted.has(next) && states[next].length) setActive(next)
+    else navigation.located = true
+  }, [restoring, active, search.completed, search.working, search.pending, search.error, search.matches, states])
 
   useLayoutEffect(() => {
     const element = host.current
@@ -160,7 +300,7 @@ export default function JsonUtility() {
   }
 
   function launch(panel: Panel, request: DocumentWorkerRequest, receive: (response: DocumentWorkerResponse) => void) {
-    if (task.current) return false
+    if (task.current || host.current?.closest('[inert]')) return false
     const model = runtimes.current[panel]?.model
     if (!model) return false
     const revision = model.getVersionId()
@@ -221,7 +361,7 @@ export default function JsonUtility() {
         const snapshot = { source: result.text, metrics: result.metrics, plainText: result.extension === 'txt' }
         if (result.metrics.bytes > JSON_INPUT_LIMIT) {
           setOversized(current => ({ ...current, [panel]: { source: result.text!, extension: result.extension ?? 'txt' } }))
-          announce(panel, 'El resultado supera 25 MiB. Puedes descargarlo y conservar el documento abierto.', false, result.warnings)
+          announce(panel, 'El resultado supera 60 MiB. Se conservó el documento abierto.', true, result.warnings)
           return
         }
         if (operation === 'repair') {
@@ -250,7 +390,7 @@ export default function JsonUtility() {
     event.preventDefault()
     event.stopPropagation()
     if (projected > JSON_INPUT_LIMIT) {
-      announce(panel, 'El texto pegado supera 25 MiB. Se conservó el documento.', true)
+      announce(panel, 'El texto pegado supera 60 MiB. Se conservó el documento.', true)
       return
     }
     if (task.current) {
@@ -261,7 +401,7 @@ export default function JsonUtility() {
     const source = entire ? text : original.slice(0, start) + text + original.slice(end)
     const apply = (metrics: DocumentSnapshot['metrics']) => {
       if (metrics.bytes > JSON_INPUT_LIMIT) {
-        announce(panel, 'El texto pegado supera 25 MiB. Se conservó el documento.', true)
+        announce(panel, 'El texto pegado supera 60 MiB. Se conservó el documento.', true)
         return
       }
       documents.replace(panel, { source, metrics })
@@ -272,23 +412,27 @@ export default function JsonUtility() {
     })
   }
 
-  function openFile(file: File | undefined) {
-    const panel = fileTarget.current
+  function openFile(file: File | undefined, encoding?: string, panel = fileTarget.current) {
     if (!file) return
     if (file.size > JSON_INPUT_LIMIT) {
-      announce(panel, 'El archivo supera 25 MiB. Se conservó el documento abierto.', true)
+      announce(panel, 'El archivo supera 60 MiB. Se conservó el documento abierto.', true)
       return
     }
-    launch(panel, { kind: 'read-file', file }, response => {
+    launch(panel, { kind: 'read-file', file, encoding }, response => {
       if (response.kind !== 'read-file') return
       const { result } = response
       if (!result.ok) {
+        if (result.encodingConflict) setPendingEncoding({ panel, file })
         announce(panel, result.message, true)
         return
       }
       documents.replace(panel, { ...result, formatHint: result.syntaxHint }, formats[panel])
+      originals.current[panel] = file
+      utility?.setSlot(`original-${panel}`, originalDocumentAsset(file))
+      setOriginalNames(current => ({ ...current, [panel]: file.name }))
+      setPendingEncoding(undefined)
       if (result.syntaxHint) setFormats(current => ({ ...current, [panel]: result.syntaxHint! }))
-      announce(panel, 'Archivo local abierto.')
+      announce(panel, result.converted ? `Archivo abierto como ${result.encoding}. La descarga editada usará UTF-8; el original se conserva.` : 'Archivo local abierto.')
     })
   }
 
@@ -353,11 +497,12 @@ export default function JsonUtility() {
 
   function download(source: string, extension: string) {
     if (extension === 'xml') {
-      const encoding = getXmlDeclaredEncoding(source)
-      if (encoding && !/^utf-8$/i.test(encoding)) {
-        announce(active, `El XML declara ${encoding}. Cambia la declaración a UTF-8 antes de descargar o copia el texto.`, true)
+      const prepared = prepareUtf8XmlDownload(source, Boolean(signedXml[active]) || source.includes('http://www.w3.org/2000/09/xmldsig#'))
+      if (!prepared.ok) {
+        announce(active, prepared.message, true)
         return
       }
+      source = prepared.source
     }
     const type = extension === 'xml' ? 'application/xml' : extension === 'json' ? 'application/json' : 'text/plain'
     const url = URL.createObjectURL(new Blob([source], { type: `${type};charset=utf-8` }))
@@ -369,6 +514,23 @@ export default function JsonUtility() {
       URL.revokeObjectURL(url)
       urls.current.delete(url)
     }, 1000))
+  }
+
+  async function downloadOriginal() {
+    const panel = active
+    try {
+      const blob = originals.current[panel] ?? await utility?.readSlot(`original-${panel}`)
+      if (!alive.current) return
+      if (!blob) { announce(panel, 'No se pudo recuperar el archivo original.', true); return }
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = originalNames[panel] ?? 'documento-original'
+      link.click()
+      urls.current.set(url, window.setTimeout(() => { URL.revokeObjectURL(url); urls.current.delete(url) }, 1000))
+    } catch {
+      if (alive.current) announce(panel, 'No se pudo descargar el original. Revisa la conexión y vuelve a intentarlo.', true)
+    }
   }
 
   const zoom = (delta: number) => setFont(current => adjustFont(current, delta))
@@ -408,6 +570,7 @@ export default function JsonUtility() {
               <Action label="Desescapar" disabled={!canRun} onClick={() => run('unescape')}><Brackets size={15} aria-hidden /></Action>
             </>}
             <Action label="Copiar documento" disabled={!state.length} onClick={() => void copy()}><Copy size={15} aria-hidden /></Action>
+            <Action label="Buscar en todo el documento" disabled={!state.length} onClick={find}><Search size={15} aria-hidden /></Action>
             <Action label="Descargar documento" disabled={!state.length} onClick={() => download(documents.source(active), state.plainText ? 'txt' : format === 'strict' ? 'json' : format)}><ArrowDownToLine size={15} aria-hidden /></Action>
             <Action label="Limpiar documento" title="Limpiar documento · Se puede deshacer" disabled={!state.length} onClick={() => documents.replace(active, { source: '', metrics: measureDocument('') })}><Eraser size={15} aria-hidden /></Action>
           </div>
@@ -415,6 +578,7 @@ export default function JsonUtility() {
             <Action label="Deshacer" disabled={!state.undo} onClick={() => history('undo')}><Undo2 size={15} aria-hidden /></Action>
             <Action label="Rehacer" disabled={!state.redo} onClick={() => history('redo')}><Redo2 size={15} aria-hidden /></Action>
             <Action label="Abrir archivo" disabled={working} onClick={() => { fileTarget.current = active; fileInput.current?.click() }}><FileUp size={15} aria-hidden /></Action>
+            {originalNames[active] && <Action label="Descargar archivo original" title={`Descargar original · ${originalNames[active]}`} onClick={() => void downloadOriginal()}><ArrowDownToLine size={15} aria-hidden /><span className="hidden xl:inline">Original</span></Action>}
             <input ref={fileInput} aria-label="Abrir archivo local" type="file" accept=".json,.jsonc,.xml,.txt,application/json,application/xml,text/xml,text/plain" hidden
               onChange={event => { openFile(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
           </div>
@@ -444,6 +608,25 @@ export default function JsonUtility() {
           </div>
         </div>
       </div>
+      {pendingEncoding && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-xs" role="group" aria-label="Elegir codificación del archivo">
+        <span>Se conservó el documento. Abrir {pendingEncoding.file.name} como:</span>
+        <select aria-label="Codificación del archivo" className={selectClass} value={encodingChoice} onChange={event => setEncodingChoice(event.target.value)}>{DOCUMENT_ENCODINGS.map(encoding => <option key={encoding} value={encoding}>{encoding.toUpperCase()}</option>)}</select>
+        <Action label="Abrir con esta codificación" disabled={working} onClick={() => openFile(pendingEncoding.file, encodingChoice, pendingEncoding.panel)}>Abrir</Action>
+        <Action label="Cancelar apertura" onClick={() => setPendingEncoding(undefined)}><X size={15} aria-hidden /></Action>
+      </div>}
+      {searchOpen && !diff && <div className="shrink-0 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-1 text-xs">
+        <div className="flex min-w-0 flex-wrap items-center gap-1" role="search" aria-label="Buscar en todo el documento">
+          <Search size={15} aria-hidden />
+          <input ref={searchInput} aria-label="Texto para buscar en todo el documento" maxLength={1024} value={search.query} onChange={event => search.setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false); if (event.key === 'Enter' && search.matches[0]) showMatch(search.matches[0]) }} className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--editor-border)] bg-[var(--editor-canvas)] px-2 text-[var(--editor-ink)] outline-none focus:ring-2 focus:ring-emerald-500 pointer-fine:min-h-8" placeholder="Busca en el documento completo…" />
+          <Action label="Distinguir mayúsculas" aria-pressed={search.caseSensitive} onClick={() => search.setCaseSensitive(value => !value)}>Aa</Action>
+          <span role="status">{search.working || search.pending ? 'Buscando…' : search.error || (search.query ? `${search.matches.length}${search.nextOffset !== null ? '+' : ''} coincidencias` : 'Texto literal · Todo el documento')}</span>
+          <Action label="Cerrar búsqueda" onClick={() => { setSearchOpen(false); runtimes.current[active]?.view?.focus() }}><X size={15} aria-hidden /></Action>
+        </div>
+        {search.matches.length > 0 && <div className="max-h-28 overflow-auto" aria-label="Coincidencias del documento">
+          {search.matches.map(match => <button type="button" key={match.offset} disabled={search.pending || search.working} onClick={() => showMatch(match)} className="block min-h-8 w-full truncate rounded px-2 text-left font-mono hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-emerald-500">{match.preview}</button>)}
+          {search.nextOffset !== null && <Action label="Más coincidencias" disabled={search.working || search.pending} onClick={search.more}>Más coincidencias</Action>}
+        </div>}
+      </div>}
       {split && !wide && !diff && <div className="flex shrink-0 gap-1 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] px-1" role="group" aria-label="Documento visible">
         {panels.map(panel => <Action key={panel} label={`Ver documento ${panel.toUpperCase()}`} aria-pressed={active === panel} onClick={() => setActive(panel)} className="aria-pressed:bg-[var(--editor-hover)]">{`Documento ${panel.toUpperCase()}`}</Action>)}
       </div>}
@@ -469,6 +652,9 @@ export default function JsonUtility() {
             <DocumentCodeEditor id={`document-editor-${panel}`} label={label} model={model} visible={shown}
               font={font} wrap={wrap[panel]} reduced={data.reduced} chunk={chunk} revision={data.revision} onZoom={zoom}
               onToggleWrap={() => toggleWrap(panel)}
+              onFind={find} reveal={revealMatch?.panel === panel ? revealMatch : undefined}
+              initialViewState={savedViews.current[panel]}
+              onViewState={view => rememberView(panel, view)}
               onFocus={() => setActive(panel)} onPaste={(event, start, end) => paste(panel, event, start, end)}
               onReady={view => { const runtime = runtimes.current[panel]; if (runtime) runtime.view = view }} />
           </div>
@@ -498,7 +684,7 @@ export default function JsonUtility() {
       <footer className="flex min-h-6 shrink-0 flex-wrap items-center gap-x-2 border-t border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-[11px] leading-5 text-[var(--editor-muted)]">
         <span role="status" aria-live="polite" className={activeNotice?.error && !diff ? 'text-rose-700 data-[theme=dark]:text-rose-300' : ''} data-theme={dark ? 'dark' : 'light'}>
           {diff ? diffStatus : busy ? <span className="inline-flex items-center gap-1"><Loader2 size={12} className="motion-safe:animate-spin" aria-hidden /> Procesando documento {busy.toUpperCase()}…</span>
-            : activeNotice?.message || (state.huge ? 'Línea extensa · Vista por tramos. Formatear procesa el documento completo.' : state.reduced ? 'Documento grande · Resaltado simplificado.' : 'Procesamiento local · Hasta 25 MiB por documento.')}
+            : activeNotice?.message || (state.huge ? 'Línea extensa · Tramos editables. Buscar y formatear recorren el documento completo.' : state.reduced ? 'Documento grande · Resaltado simplificado. Recomendado hasta 30 MiB; máximo 60 MiB.' : 'Procesamiento local · Recomendado hasta 30 MiB; máximo 60 MiB por documento.')}
         </span>
         {!diff && !busy && activeNotice?.warnings?.map(warning => <span key={warning}>{warning}</span>)}
         {busy && <Action label="Cancelar operación" onClick={() => { const panel = busy; stop(); setBusy(null); announce(panel, 'Operación cancelada.') }}>Cancelar</Action>}

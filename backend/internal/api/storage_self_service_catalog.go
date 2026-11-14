@@ -241,6 +241,9 @@ var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
 	{"private_whiteboards", `SELECT a.id::text,b.name||' · Historial','/dashboard/whiteboards/'||b.id::text,ma.filename,jsonb_build_array(ma.object_key)::text FROM whiteboard_revision_assets a JOIN whiteboards b ON b.id=a.board_id AND b.account_id=a.account_id JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
 	{"private_whiteboards", `SELECT id::text,'','','',jsonb_build_array(snapshot_object_key)::text FROM whiteboard_revisions WHERE account_id=$1`},
 	{"private_upload_claims", `SELECT id::text,'','','',jsonb_build_array(object_key)::text FROM storage_upload_ownership WHERE account_id=$1 AND state='active'`},
+	{"private_utilities", `SELECT id::text,'','','',jsonb_build_array(object_key)::text FROM utility_content WHERE account_id=$1`},
+	{"private_utilities", `SELECT id::text,'','','',jsonb_build_array(object_key)::text FROM utility_vault WHERE account_id=$1`},
+	{"private_utilities", `SELECT id::text,'','','',jsonb_build_array(object_key)::text FROM utility_objects WHERE account_id=$1 AND state IN ('active','uploading')`},
 }
 
 func storageSelfServiceReferences(ctx context.Context, q storageSelfServiceQuerier, accountID uuid.UUID, stores ...*storage.Storage) (map[string][]storageSelfServiceReference, error) {

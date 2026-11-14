@@ -2,6 +2,11 @@
 
 import { Children, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ArrowDownToLine, Binary, Copy, Eye, EyeOff, Hash, KeyRound, Loader2, LockKeyhole } from 'lucide-react'
+import { subscribeWebSocket } from '@/lib/api'
+import { useUtilityDocumentState } from '../library/UtilityDocumentContext'
+import { libraryRequest, UtilityRequestError } from '../library/libraryApi'
+import { VaultPanel, type VaultSelection } from './VaultPanel'
+import type { KeyMaterial } from './pkiOperations'
 import {
   CryptoInputError, decodeBase64, decodeUtf8, decryptJwe, encodeBase64, encodeHex, encodeUtf8, encryptJwe,
   generateAesKey, generateRsaKeys, hashText, MAX_CRYPTO_ENCODED_CHARS, MAX_CRYPTO_PEM_CHARS,
@@ -41,13 +46,13 @@ function useOperation<T>() {
     setError(message)
   }
 
-  async function run(work: () => T | Promise<T>) {
+  async function run(work: (isCurrent: () => boolean) => T | Promise<T>) {
     const current = ++generation.current
     setResult(undefined)
     setError('')
     setBusy(true)
     try {
-      const value = await work()
+      const value = await work(() => generation.current === current)
       if (generation.current === current) setResult(value)
     } catch (error) {
       if (generation.current === current) setError(error instanceof CryptoInputError ? error.message : 'No se pudo completar la operación. Puedes reintentar.')
@@ -163,12 +168,21 @@ function changeBounded(value: string, limit: number, setValue: (value: string) =
   setValue(value)
 }
 
-function CipherPanel() {
-  const [mode, setMode] = useState<'encrypt' | 'decrypt'>('encrypt')
-  const [algorithm, setAlgorithm] = useState<CipherAlgorithm>('aes256')
+function CipherPanel({ savedKey, onKeyUnavailable }: { savedKey?: VaultSelection; onKeyUnavailable?: (id: string) => void }) {
+  const [mode, setMode] = useUtilityDocumentState<'encrypt' | 'decrypt'>('cipher_mode', 'encrypt')
+  const [algorithm, setAlgorithm] = useUtilityDocumentState<CipherAlgorithm>('cipher_algorithm', 'aes256')
   const [source, setSource] = useState('')
   const [key, setKey] = useState('')
   const operation = useOperation<string>()
+  const [useSaved, setUseSaved] = useState(Boolean(savedKey))
+  useEffect(() => {
+    operation.reset()
+    if (!savedKey) { setUseSaved(false); return }
+    setUseSaved(true)
+    setAlgorithm(savedKey.kind === 'rsa' ? 'rsa' : savedKey.bits === 128 ? 'aes128' : 'aes256')
+    // A saved entry determines the compatible profile without copying private material into React state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey?.id])
   const encrypting = mode === 'encrypt'
   const rsa = algorithm === 'rsa'
   const updateKey = (value: string) => changeBounded(value, rsa ? MAX_CRYPTO_PEM_CHARS : 256, setKey, operation)
@@ -182,18 +196,34 @@ function CipherPanel() {
           </select>
         </LabeledField>
         <LabeledField label="Algoritmo">
-          <select value={algorithm} className={field} onChange={(event) => { operation.reset(); setKey(''); setAlgorithm(event.target.value as CipherAlgorithm) }}>
+          <select value={algorithm} disabled={useSaved} className={field} onChange={(event) => { operation.reset(); setKey(''); setAlgorithm(event.target.value as CipherAlgorithm) }}>
             <option value="aes128">AES-128-GCM</option><option value="aes256">AES-256-GCM</option><option value="rsa">RSA híbrido</option>
           </select>
         </LabeledField>
       </div>
       <SourceField label={encrypting ? 'Texto para cifrar (UTF-8)' : 'JWE compacto'} value={source} onChange={(value) => changeBounded(value, MAX_CRYPTO_ENCODED_CHARS, setSource, operation)} />
-      {rsa
+      {savedKey && <label className="flex min-h-11 items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={useSaved} onChange={event => { operation.reset(); setUseSaved(event.target.checked) }} />Usar la clave seleccionada de Mis claves ({savedKey.algorithm})</label>}
+      {!useSaved && (rsa
         ? <SourceField rows={4} label={encrypting ? 'Clave pública RSA (PEM SPKI)' : 'Clave privada RSA (PEM PKCS#8)'} value={key} onChange={updateKey} />
-        : <LabeledField label={`Clave AES de ${algorithm === 'aes128' ? '128' : '256'} bits (Base64)`}><input type="password" autoComplete="off" value={key} className={`${field} font-mono font-normal`} onChange={(event) => updateKey(event.target.value)} /></LabeledField>}
+        : <LabeledField label={`Clave AES de ${algorithm === 'aes128' ? '128' : '256'} bits (Base64)`}><input type="password" autoComplete="off" value={key} className={`${field} font-mono font-normal`} onChange={(event) => updateKey(event.target.value)} /></LabeledField>)}
       <p className="text-xs text-slate-600">Formato JWE compacto. {rsa ? 'RSA-OAEP-256 protege una clave nueva de AES-256-GCM en cada operación.' : 'La clave Base64 puede generarse en Claves.'} Límite de texto de 1 MiB.</p>
-      <TaskActions label={encrypting ? 'Cifrar' : 'Descifrar'} busy={operation.busy} error={operation.error} disabled={!key.trim() || (!encrypting && !source.trim())}
-        onRun={() => void operation.run(() => encrypting ? encryptJwe(source, algorithm, key) : decryptJwe(source, algorithm, key))}
+      <TaskActions label={encrypting ? 'Cifrar' : 'Descifrar'} busy={operation.busy} error={operation.error} disabled={(!useSaved && !key.trim()) || (!encrypting && !source.trim())}
+        onRun={() => void operation.run(async isCurrent => {
+          let value = key
+          if (useSaved && savedKey) {
+            let stored: { material: string }
+            try {
+              stored = await libraryRequest<{ material: string }>(`/vault/${savedKey.id}/material`)
+            } catch (error) {
+              if (isCurrent() && error instanceof UtilityRequestError && error.status === 404) onKeyUnavailable?.(savedKey.id)
+              throw error
+            }
+            if (!isCurrent()) throw new DOMException('Operación cancelada', 'AbortError')
+            const material = JSON.parse(stored.material) as KeyMaterial
+            value = rsa ? (encrypting ? material.publicKey : material.privateKey) || '' : material.secret || ''
+          }
+          return encrypting ? encryptJwe(source, algorithm, value) : decryptJwe(source, algorithm, value)
+        })}
         onClear={() => { operation.reset(); if (!operation.busy) { setSource(''); setKey('') } }} />
     </div>
     <ResultPanel busy={operation.busy}>{operation.result !== undefined && <ResultText title={encrypting ? 'JWE cifrado' : 'Texto descifrado'} value={operation.result} fileName={encrypting ? 'resultado.jwe' : 'resultado.txt'} />}</ResultPanel>
@@ -201,9 +231,9 @@ function CipherPanel() {
 }
 
 function HashPanel() {
-  const [mode, setMode] = useState<'hash' | 'hmac'>('hash')
-  const [algorithm, setAlgorithm] = useState<HashAlgorithm>('SHA-256')
-  const [format, setFormat] = useState<'hex' | 'base64'>('hex')
+  const [mode, setMode] = useUtilityDocumentState<'hash' | 'hmac'>('hash_mode', 'hash')
+  const [algorithm, setAlgorithm] = useUtilityDocumentState<HashAlgorithm>('hash_algorithm', 'SHA-256')
+  const [format, setFormat] = useUtilityDocumentState<'hex' | 'base64'>('hash_format', 'hex')
   const [keyFormat, setKeyFormat] = useState<'utf8' | 'base64'>('utf8')
   const [source, setSource] = useState('')
   const [key, setKey] = useState('')
@@ -251,7 +281,7 @@ type GeneratedKeys = { kind: 'aes'; key: string } | { kind: 'rsa'; publicKey: st
 function KeyPanel() {
   const [mode, setMode] = useState<'aes' | 'rsa'>('aes')
   const [aesLength, setAesLength] = useState<128 | 256>(256)
-  const [rsaLength, setRsaLength] = useState<2048 | 3072>(3072)
+  const [rsaLength, setRsaLength] = useState<2048 | 3072 | 4096>(3072)
   const operation = useOperation<GeneratedKeys>()
 
   return <div className={pair} style={columns('24rem')}>
@@ -262,7 +292,7 @@ function KeyPanel() {
       {mode === 'aes' ? <LabeledField label="Tamaño">
         <select value={aesLength} className={field} onChange={(event) => { operation.reset(); setAesLength(Number(event.target.value) as typeof aesLength) }}><option value="128">128 bits</option><option value="256">256 bits</option></select>
       </LabeledField> : <LabeledField label="Tamaño">
-        <select value={rsaLength} className={field} onChange={(event) => { operation.reset(); setRsaLength(Number(event.target.value) as typeof rsaLength) }}><option value="2048">2048 bits</option><option value="3072">3072 bits</option></select>
+        <select value={rsaLength} className={field} onChange={(event) => { operation.reset(); setRsaLength(Number(event.target.value) as typeof rsaLength) }}><option value="2048">2048 bits</option><option value="3072">3072 bits</option><option value="4096">4096 bits</option></select>
       </LabeledField>}
       <p className="text-xs text-slate-600">{mode === 'aes' ? 'Genera una clave secreta en Base64.' : 'Genera una clave pública SPKI y una clave privada PKCS#8 en PEM.'} Guarda la clave secreta o privada en un lugar seguro si necesitas usarla después.</p>
       <TaskActions label={mode === 'aes' ? 'Generar clave AES' : 'Generar par RSA'} busy={operation.busy} error={operation.error}
@@ -282,9 +312,9 @@ function KeyPanel() {
 type Base64Result = { kind: 'text'; value: string } | { kind: 'binary'; value: Uint8Array<ArrayBuffer> }
 
 function Base64Panel() {
-  const [mode, setMode] = useState<'encode' | 'decode'>('encode')
-  const [format, setFormat] = useState<Base64Format>('base64')
-  const [output, setOutput] = useState<'text' | 'binary'>('text')
+  const [mode, setMode] = useUtilityDocumentState<'encode' | 'decode'>('base64_mode', 'encode')
+  const [format, setFormat] = useUtilityDocumentState<Base64Format>('base64_format', 'base64')
+  const [output, setOutput] = useUtilityDocumentState<'text' | 'binary'>('base64_output', 'text')
   const [source, setSource] = useState('')
   const operation = useOperation<Base64Result>()
   const download = useDownload()
@@ -331,13 +361,54 @@ const areas = [
 ] as const
 
 export default function CryptoUtility() {
-  const [active, setActive] = useState<(typeof areas)[number]['id']>('cipher')
-  const Component = areas.find(({ id }) => id === active)?.Component ?? CipherPanel
+  const [active, setActive] = useUtilityDocumentState<(typeof areas)[number]['id'] | 'vault'>('active', 'cipher')
+  const [keyId, setKeyId] = useUtilityDocumentState<string>('key_id', '')
+  const keyIdRef = useRef(keyId)
+  keyIdRef.current = keyId
+  const [savedKey, setSavedKey] = useState<VaultSelection>()
+  const [keyNotice, setKeyNotice] = useState('')
+  function forgetUnavailableKey(id: string) {
+    if (keyIdRef.current !== id) return
+    keyIdRef.current = ''
+    setKeyId('')
+    setSavedKey(undefined)
+    setKeyNotice('La clave guardada ya no está disponible. Puedes elegir otra en Mis claves.')
+  }
+  const [visited, setVisited] = useState(() => new Set([active]))
+  useEffect(() => { setVisited(previous => new Set([...previous, active])) }, [active])
+  useEffect(() => {
+    if (!keyId) { setSavedKey(undefined); return }
+    let controller: AbortController | undefined
+    function reloadKey() {
+      if (keyIdRef.current !== keyId) return
+      controller?.abort()
+      const current = new AbortController()
+      controller = current
+      void libraryRequest<{ item: VaultSelection }>(`/vault/${keyId}`, { signal: current.signal }).then(result => {
+        if (current.signal.aborted || keyIdRef.current !== keyId) return
+        setSavedKey(result.item.kind === 'rsa' || result.item.kind === 'aes' ? result.item : undefined)
+        setKeyNotice('')
+      }).catch(error => {
+        if (current.signal.aborted || keyIdRef.current !== keyId) return
+        if (error instanceof UtilityRequestError && error.status === 404) forgetUnavailableKey(keyId)
+      })
+    }
+    reloadKey()
+    const release = subscribeWebSocket(message => {
+      const event = message as { event?: string; type?: string; data?: { kind?: string; id?: string } }
+      if ((event.event || event.type) === 'utility_updated' && event.data?.kind === 'vault' && event.data.id === keyId) reloadKey()
+    })
+    return () => { controller?.abort(); release() }
+  }, [keyId])
 
   return <section aria-label="Criptografía y codificación" className="space-y-3">
     <div role="group" aria-label="Herramientas de criptografía" className="flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-3">
       {areas.map(({ id, label, icon: Icon }) => <button type="button" key={id} aria-pressed={active === id} className={active === id ? selectedControl : control} onClick={() => setActive(id)}><Icon className="h-4 w-4" aria-hidden />{label}</button>)}
+      <button type="button" aria-pressed={active === 'vault'} className={active === 'vault' ? selectedControl : control} onClick={() => setActive('vault')}><KeyRound aria-hidden className="size-4" />Mis claves</button>
     </div>
-    <Component />
+    {keyNotice && <p role="status" className="text-sm text-slate-600">{keyNotice}</p>}
+    {areas.map(({ id, Component }) => visited.has(id) && <div key={id} hidden={active !== id}>{id === 'cipher' ? <CipherPanel savedKey={savedKey} onKeyUnavailable={forgetUnavailableKey} /> : <Component />}</div>)}
+    {active === 'vault' && <VaultPanel onDeleted={forgetUnavailableKey} onUse={item => { keyIdRef.current = item.id; setKeyNotice(''); setKeyId(item.id); setSavedKey(item); if (item.kind === 'rsa' || item.kind === 'aes') setActive('cipher') }} />}
+    <p className="text-xs leading-5 text-slate-500">Se guardan las preferencias y referencias de la hoja. Las contraseñas, entradas de texto criptográficas y resultados descifrados son temporales. Guarda las claves mediante Mis claves.</p>
   </section>
 }

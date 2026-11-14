@@ -1,7 +1,9 @@
 'use client'
 
 import { Download, QrCode, ScanLine, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef } from 'react'
+import { useUtilityDocumentState, useUtilityDocumentText } from '../library/UtilityDocumentContext'
+import { useSavedImage } from './useSavedImage'
 import { CopyImageResult, ImageInput, ImageModePicker, InlineStatus, downloadLocalFile, imageGrid, imagePanel, primaryButton, secondaryButton, textField } from './ImageControls'
 import { validateLocalImage, type LocalImage } from './localImages'
 import { readLocalQr } from './qrReader'
@@ -31,8 +33,15 @@ async function generateQr(text: string, signal: AbortSignal): Promise<GeneratedQ
 }
 
 function GenerateQr() {
-  const [text, setText] = useState('')
+  const [text, setText] = useUtilityDocumentText('qr-text')
+  const [generated, setGenerated] = useUtilityDocumentState('qr_generated', false)
   const result = useLocalJob<GeneratedQr>()
+  const restored = useRef(false)
+  useEffect(() => {
+    if (!text || !generated || restored.current) return
+    restored.current = true
+    void result.run(signal => generateQr(text, signal))
+  }, [text, generated])
 
   return (
     <div className={imageGrid}>
@@ -40,13 +49,14 @@ function GenerateQr() {
         <label htmlFor="qr-text" className="block text-sm font-semibold text-slate-800">Texto o enlace</label>
         <textarea id="qr-text" className={`${textField} min-h-36`} placeholder="Escribe o pega el contenido del QR" value={text} autoComplete="off" spellCheck={false} onChange={event => {
           result.clear()
+          setGenerated(false)
           setText(event.target.value)
         }} />
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={primaryButton} disabled={!text || result.state.status === 'pending'} onClick={() => void result.run(signal => generateQr(text, signal))}>
+          <button type="button" className={primaryButton} disabled={!text || result.state.status === 'pending'} onClick={() => { restored.current = true; setGenerated(true); void result.run(signal => generateQr(text, signal)) }}>
             <QrCode aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Generando…' : 'Generar QR'}
           </button>
-          {text && <button type="button" className={secondaryButton} onClick={() => { result.clear(); setText('') }}><X aria-hidden="true" className="h-4 w-4" />Limpiar</button>}
+          {text && <button type="button" className={secondaryButton} onClick={() => { result.clear(); setGenerated(false); setText('') }}><X aria-hidden="true" className="h-4 w-4" />Limpiar</button>}
         </div>
       </section>
       <section className={`${imagePanel} space-y-3`}>
@@ -74,8 +84,23 @@ function GeneratedQrOutput({ value }: { value: GeneratedQr }) {
 
 function DecodeQr() {
   const source = useLocalJob<LocalImage>()
+  const savedImage = useSavedImage('source', source)
   const result = useLocalJob<string>()
+  const [decoded, setDecoded] = useUtilityDocumentState('qr_decoded', false)
+  const restored = useRef(false)
   const image = source.state.status === 'ready' ? source.state.value : null
+
+  async function decode(signal: AbortSignal) {
+    if (!image) throw new Error('Selecciona una imagen.')
+    const value = await readLocalQr(image, signal)
+    if (value.kind !== 'found') throw new Error('No encontramos un código QR. Prueba con una imagen nítida o recorta alrededor del código.')
+    if (!value.text) throw new Error('El código QR encontrado no contiene texto legible.')
+    return value.text
+  }
+  useEffect(() => {
+    if (!image || !decoded || restored.current) return
+    restored.current = true; void result.run(decode)
+  }, [image, decoded])
 
   return (
     <div className={imageGrid}>
@@ -83,15 +108,11 @@ function DecodeQr() {
         <h2 className="text-sm font-semibold text-slate-800">Imagen del QR</h2>
         <ImageInput source={source.state} onSelect={file => {
           result.clear()
-          void source.run(signal => validateLocalImage(file, signal))
-        }} onClear={() => { result.clear(); source.clear() }} />
+          setDecoded(false)
+          savedImage.select(file)
+        }} onClear={() => { result.clear(); setDecoded(false); savedImage.clear() }} />
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={primaryButton} disabled={!image || result.state.status === 'pending'} onClick={() => image && void result.run(async signal => {
-            const decoded = await readLocalQr(image, signal)
-            if (decoded.kind !== 'found') throw new Error('No encontramos un código QR. Prueba con una imagen nítida o recorta alrededor del código.')
-            if (!decoded.text) throw new Error('El código QR encontrado no contiene texto legible.')
-            return decoded.text
-          })}>
+          <button type="button" className={primaryButton} disabled={!image || result.state.status === 'pending'} onClick={() => { restored.current = true; setDecoded(true); if (image) void result.run(decode) }}>
             <ScanLine aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Leyendo…' : 'Leer QR'}
           </button>
           {result.state.status === 'pending' && <button type="button" className={secondaryButton} onClick={result.clear}>Cancelar lectura</button>}
@@ -114,7 +135,7 @@ function DecodeQr() {
 }
 
 export default function QrUtility() {
-  const [mode, setMode] = useState<QrMode>('create')
+  const [mode, setMode] = useUtilityDocumentState<QrMode>('qr_mode', 'create')
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <ImageModePicker label="Operación de QR" mode={mode} onChange={setMode} options={modes} />

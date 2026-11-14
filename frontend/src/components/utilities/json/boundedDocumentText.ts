@@ -13,7 +13,7 @@ export class BoundedDocumentText {
   append(text: string) {
     if (!text) return
     this.bytes += utf8ByteLength(text)
-    if (this.bytes > JSON_OUTPUT_LIMIT) throw new DocumentLimitError('El resultado supera el límite de 50 MiB. Reduce la sangría o procesa una parte del documento.')
+    if (this.bytes > JSON_OUTPUT_LIMIT) throw new DocumentLimitError('El resultado supera el límite de 60 MiB. Reduce la sangría o procesa una parte del documento.')
     if (text.length >= CHUNK_LENGTH) {
       this.flush()
       this.chunks.push(text)

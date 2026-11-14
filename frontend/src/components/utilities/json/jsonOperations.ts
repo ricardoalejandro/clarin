@@ -26,12 +26,12 @@ export interface JsonRequest {
 }
 
 export type DocumentFileResult =
-  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: JsonMode | 'xml'; xmlEncoding?: string }
-  | { ok: false; message: string }
+  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: JsonMode | 'xml'; xmlEncoding?: string; encoding?: string; converted?: boolean }
+  | { ok: false; message: string; encodingConflict?: true }
 
 export type DocumentWorkerRequest =
   | ({ kind: 'transform' } & JsonRequest)
-  | { kind: 'read-file'; file: File }
+  | { kind: 'read-file'; file: File; encoding?: string }
   | { kind: 'measure'; source: string }
 
 export type DocumentWorkerResponse =
@@ -285,7 +285,7 @@ function excerptBeforeChange(before: string, after: string) {
 export function processJson(request: JsonRequest): JsonResult {
   const { source, mode, indent, operation, language } = request
   const bytes = source.length <= JSON_INPUT_LIMIT ? utf8ByteLength(source) : source.length
-  if (bytes > JSON_INPUT_LIMIT) return { ok: false, message: 'La entrada supera el límite de 25 MiB.' }
+  if (bytes > JSON_INPUT_LIMIT) return { ok: false, message: 'La entrada supera el límite de 60 MiB.' }
   if (language === 'xml') return processXml(request)
   if (operation === 'repair' && bytes > JSON_REPAIR_LIMIT) return { ok: false, message: 'Reparar admite documentos de hasta 2 MiB.' }
   try {
@@ -312,7 +312,7 @@ export function processJson(request: JsonRequest): JsonResult {
 
     const text = operation === 'repair' ? content : writeJson(content, operation === 'format' || operation === 'smart' ? indent : undefined, operation === 'smart')
     const metrics = measureDocument(text)
-    if (metrics.bytes > JSON_OUTPUT_LIMIT) return { ok: false, message: 'El resultado supera el límite de 50 MiB.' }
+    if (metrics.bytes > JSON_OUTPUT_LIMIT) return { ok: false, message: 'El resultado supera el límite de 60 MiB.' }
 
     const message = operation === 'repair'
       ? text === source ? 'El documento ya es JSON válido.' : 'Propuesta de reparación. Revisa los cambios antes de aplicarla.'

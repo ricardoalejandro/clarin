@@ -1,7 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
-import { editor, MarkerSeverity } from 'monaco-editor'
+import { editor, MarkerSeverity, Range } from 'monaco-editor'
 import { documentLanguage, LARGE_DOCUMENT, LONG_LINE, type DocumentFormat, type Panel } from './editorWorkspaceState'
 import { type DocumentMetrics } from './jsonLimits'
+import { DocumentBuffer } from './documentBuffer'
 
 export interface DocumentSnapshot {
   source: string
@@ -26,11 +27,13 @@ interface DocumentRuntime {
   versions: Map<number, { metrics: DocumentMetrics; raw?: string; plainText?: boolean }>
   formatHistory: Map<number, DocumentFormat>
   applying: DocumentSnapshot | undefined
+  buffer: DocumentBuffer
+  reverting: boolean
 }
 
 const initialState: DocumentState = { revision: 0, length: 0, reduced: false, huge: false, plainText: false, undo: false, redo: false }
 
-export function useEditorDocuments(onChange: (panel: Panel, formatHint?: DocumentFormat) => void) {
+export function useEditorDocuments(onChange: (panel: Panel, formatHint?: DocumentFormat, error?: string, plainText?: boolean) => void) {
   const [models, setModels] = useState<Partial<Record<Panel, editor.ITextModel>>>({})
   const [states, setStates] = useState({ a: initialState, b: initialState })
   const runtimes = useRef<Partial<Record<Panel, DocumentRuntime>>>({})
@@ -43,12 +46,30 @@ export function useEditorDocuments(onChange: (panel: Panel, formatHint?: Documen
     const model = editor.createModel('', 'json')
     // Keep LF input the same size on Windows and Linux. Imported CR/CRLF stays in its raw snapshot.
     model.setEOL(editor.EndOfLineSequence.LF)
-    const runtime: DocumentRuntime = { model, view: null, versions: new Map(), formatHistory: new Map(), applying: undefined }
+    const runtime: DocumentRuntime = { model, view: null, versions: new Map(), formatHistory: new Map(), applying: undefined, buffer: new DocumentBuffer(), reverting: false }
     runtimes.current[panel] = runtime
     const update = (change: editor.IModelContentChangedEvent) => {
+      if (runtime.reverting) return
       const revision = model.getVersionId()
       const version = model.getAlternativeVersionId()
       const applied = runtime.applying
+      if (applied) runtime.buffer = new DocumentBuffer(model.getValue(undefined, true))
+      else {
+        const ordered = [...change.changes].sort((a, b) => a.rangeOffset - b.rangeOffset)
+        let shift = 0
+        const inverse = ordered.map(edit => {
+          const start = edit.rangeOffset + shift
+          shift += edit.text.length - edit.rangeLength
+          return { range: Range.fromPositions(model.getPositionAt(start), model.getPositionAt(start + edit.text.length)), text: runtime.buffer.slice(edit.rangeOffset, edit.rangeOffset + edit.rangeLength) }
+        })
+        if (!runtime.buffer.apply(change.changes)) {
+          runtime.reverting = true
+          try { model.applyEdits(inverse) } finally { runtime.reverting = false }
+          setStates(current => ({ ...current, [panel]: { ...current[panel], revision: model.getVersionId() } }))
+          changed.current(panel, undefined, 'El cambio supera 60 MiB o divide un carácter Unicode. Se conservó el documento.')
+          return
+        }
+      }
       if (applied) {
         // Monaco normalizes line endings. Keep the original XML/text for transformations and export.
         const raw = applied.source.includes('\r') ? applied.source : undefined
@@ -78,7 +99,7 @@ export function useEditorDocuments(onChange: (panel: Panel, formatHint?: Documen
       setStates(current => ({ ...current, [panel]: {
         revision, length, reduced, huge, plainText: saved?.plainText ?? false, undo: model.canUndo(), redo: model.canRedo(),
       } }))
-      changed.current(panel, runtime.formatHistory.get(version))
+      changed.current(panel, runtime.formatHistory.get(version), undefined, saved?.plainText ?? false)
     }
     subscriptions.current.push(model.onDidChangeContent(update))
     setModels(current => ({ ...current, [panel]: model }))
@@ -118,7 +139,7 @@ export function useEditorDocuments(onChange: (panel: Panel, formatHint?: Documen
 
   function source(panel: Panel) {
     const runtime = runtimes.current[panel]
-    return runtime?.versions.get(runtime.model.getAlternativeVersionId())?.raw ?? runtime?.model.getValue(undefined, true) ?? ''
+    return runtime?.versions.get(runtime.model.getAlternativeVersionId())?.raw ?? runtime?.buffer.snapshot() ?? ''
   }
 
   function syncLanguage(panel: Panel, format: DocumentFormat, reduced: boolean) {

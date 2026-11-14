@@ -156,7 +156,7 @@ function encodePem(label: 'PUBLIC KEY' | 'PRIVATE KEY', bytes: Uint8Array) {
   return `-----BEGIN ${label}-----\n${lines}\n-----END ${label}-----\n`
 }
 
-export async function generateRsaKeys(modulusLength: 2048 | 3072) {
+export async function generateRsaKeys(modulusLength: 2048 | 3072 | 4096) {
   const subtle = webCrypto()
   const keyPair = await subtle.generateKey({ name: 'RSA-OAEP', modulusLength, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['encrypt', 'decrypt'])
   const publicKey = new Uint8Array(await subtle.exportKey('spki', keyPair.publicKey))

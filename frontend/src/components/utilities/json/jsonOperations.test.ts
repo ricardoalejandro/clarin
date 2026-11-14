@@ -44,23 +44,29 @@ describe('JSON operations', () => {
   })
 
   it('bounds byte size and nesting', () => {
-    expect(process('validate', 'ñ'.repeat(JSON_INPUT_LIMIT / 2 + 1))).toMatchObject({ ok: false, message: expect.stringContaining('25 MiB') })
+    expect(process('validate', 'ñ'.repeat(JSON_INPUT_LIMIT / 2 + 1))).toMatchObject({ ok: false, message: expect.stringContaining('60 MiB') })
     expect(process('format', `${'['.repeat(161)}0${']'.repeat(161)}`)).toMatchObject({ ok: false, message: expect.stringContaining('160 niveles') })
     expect(process('repair', ' '.repeat(2 * 1024 * 1024 + 1))).toMatchObject({ ok: false, message: expect.stringContaining('2 MiB') })
-    expect(process('escape', '\0'.repeat(9 * 1024 * 1024))).toMatchObject({ ok: false, message: expect.stringContaining('50 MiB') })
+    expect(process('escape', '\0'.repeat(11 * 1024 * 1024))).toMatchObject({ ok: false, message: expect.stringContaining('60 MiB') })
   }, 20_000)
 
-  it('formats an input of exactly 25 MiB and reports the resulting longest line', () => {
+  it('formats an input of exactly 30 MiB and reports the resulting longest line', () => {
     const prefix = '{"id":9007199254740993,"value":"'
     const suffix = '"}'
-    const source = prefix + 'x'.repeat(JSON_INPUT_LIMIT - prefix.length - suffix.length) + suffix
+    const source = prefix + 'x'.repeat(30 * 1024 * 1024 - prefix.length - suffix.length) + suffix
     const result = process('format', source)
     expect(result).toMatchObject({ ok: true, metrics: { lines: 4, longestLine: expect.any(Number) } })
     if (!result.ok || !result.text || !result.metrics) throw new Error('Expected formatted document')
     expect(result.text.startsWith('{\n  "id": 9007199254740993,\n  "value": "')).toBe(true)
-    expect(result.metrics.bytes).toBeGreaterThan(JSON_INPUT_LIMIT)
+    expect(result.metrics.bytes).toBeGreaterThan(30 * 1024 * 1024)
     expect(result.metrics.longestLine).toBeGreaterThan(100_000)
   }, 20_000)
+
+  it('accepts exactly 60 MiB and rejects a transformation beyond the same durable limit', () => {
+    const source = '"' + 'x'.repeat(JSON_INPUT_LIMIT - 2) + '"'
+    expect(process('validate', source)).toMatchObject({ ok: true })
+    expect(process('escape', source)).toMatchObject({ ok: false, message: expect.stringContaining('60 MiB') })
+  }, 60_000)
 
   it('formats comments around colons and commas without changing the JSONC tokens', () => {
     const source = '{ /* start */ "a" // key\n: 1 // value\n, "b": [/* nested */ 2,], } // end'

@@ -1,7 +1,9 @@
 'use client'
 
 import { ArrowLeftRight, Download, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef } from 'react'
+import { useUtilityDocumentState, useUtilityDocumentText } from '../library/UtilityDocumentContext'
+import { useSavedImage } from './useSavedImage'
 import { CopyImageResult, ImageInput, ImageModePicker, ImagePreview, InlineStatus, downloadLocalFile, imageGrid, imagePanel, primaryButton, secondaryButton, textField } from './ImageControls'
 import { decodeImageBase64, encodeImageBase64, validateLocalImage, type LocalImage } from './localImages'
 import { useLocalJob } from './useLocalJob'
@@ -13,7 +15,7 @@ type ImageMode = typeof modes[number]['value']
 type Encoding = typeof encodings[number]['value']
 
 function Base64Output({ dataUrl }: { dataUrl: string }) {
-  const [format, setFormat] = useState<Encoding>('raw')
+  const [format, setFormat] = useUtilityDocumentState<Encoding>('image_output_format', 'raw')
   const value = format === 'url' ? dataUrl : dataUrl.slice(dataUrl.indexOf(',') + 1)
   const truncated = value.length > PREVIEW_CHARACTERS
   return (
@@ -31,8 +33,15 @@ function Base64Output({ dataUrl }: { dataUrl: string }) {
 
 function EncodeImage() {
   const source = useLocalJob<LocalImage>()
+  const savedImage = useSavedImage('source', source)
   const result = useLocalJob<string>()
+  const [encoded, setEncoded] = useUtilityDocumentState('image_encoded', false)
+  const restored = useRef(false)
   const image = source.state.status === 'ready' ? source.state.value : null
+  useEffect(() => {
+    if (!image || !encoded || restored.current) return
+    restored.current = true; void result.run(signal => encodeImageBase64(image.blob, signal))
+  }, [image, encoded])
 
   return (
     <div className={imageGrid}>
@@ -40,9 +49,10 @@ function EncodeImage() {
         <h2 className="text-sm font-semibold text-slate-800">Imagen original</h2>
         <ImageInput source={source.state} onSelect={file => {
           result.clear()
-          void source.run(signal => validateLocalImage(file, signal))
-        }} onClear={() => { result.clear(); source.clear() }} />
-        <button type="button" className={primaryButton} disabled={!image || result.state.status === 'pending'} onClick={() => image && void result.run(signal => encodeImageBase64(image.blob, signal))}>
+          setEncoded(false)
+          savedImage.select(file)
+        }} onClear={() => { result.clear(); setEncoded(false); savedImage.clear() }} />
+        <button type="button" className={primaryButton} disabled={!image || result.state.status === 'pending'} onClick={() => { restored.current = true; setEncoded(true); if (image) void result.run(signal => encodeImageBase64(image.blob, signal)) }}>
           <ArrowLeftRight aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Convirtiendo…' : 'Convertir a Base64'}
         </button>
       </section>
@@ -58,20 +68,26 @@ function EncodeImage() {
 }
 
 function DecodeImage() {
-  const [text, setText] = useState('')
+  const [text, setText] = useUtilityDocumentText('base64-text')
   const result = useLocalJob<LocalImage>()
+  const [decoded, setDecoded] = useUtilityDocumentState('image_decoded', false)
+  const restored = useRef(false)
+  useEffect(() => {
+    if (!text || !decoded || restored.current) return
+    restored.current = true; void result.run(signal => decodeImageBase64(text, signal))
+  }, [text, decoded])
 
   return (
     <div className={imageGrid}>
       <section className={`${imagePanel} space-y-3`}>
         <label htmlFor="base64-image-text" className="block text-sm font-semibold text-slate-800">Texto Base64 o Data URL</label>
-        <textarea id="base64-image-text" className={`${textField} min-h-36 break-all`} value={text} autoComplete="off" spellCheck={false} placeholder="Pega Base64 o data:image/png;base64,…" onChange={event => { result.clear(); setText(event.target.value) }} />
+        <textarea id="base64-image-text" className={`${textField} min-h-36 break-all`} value={text} autoComplete="off" spellCheck={false} placeholder="Pega Base64 o data:image/png;base64,…" onChange={event => { result.clear(); setDecoded(false); setText(event.target.value) }} />
         <p className="text-xs text-slate-600">PNG, JPG o WebP · Hasta 10 MiB y 16 megapíxeles después de decodificar.</p>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={primaryButton} disabled={!text || result.state.status === 'pending'} onClick={() => void result.run(signal => decodeImageBase64(text, signal))}>
+          <button type="button" className={primaryButton} disabled={!text || result.state.status === 'pending'} onClick={() => { restored.current = true; setDecoded(true); void result.run(signal => decodeImageBase64(text, signal)) }}>
             <ArrowLeftRight aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Convirtiendo…' : 'Convertir a imagen'}
           </button>
-          {text && <button type="button" className={secondaryButton} onClick={() => { result.clear(); setText('') }}><X aria-hidden="true" className="h-4 w-4" />Limpiar</button>}
+          {text && <button type="button" className={secondaryButton} onClick={() => { result.clear(); setDecoded(false); setText('') }}><X aria-hidden="true" className="h-4 w-4" />Limpiar</button>}
         </div>
       </section>
       <section className={`${imagePanel} space-y-3`}>
@@ -95,7 +111,7 @@ function DecodedImageOutput({ image }: { image: LocalImage }) {
 }
 
 export default function ImageBase64Utility() {
-  const [mode, setMode] = useState<ImageMode>('encode')
+  const [mode, setMode] = useUtilityDocumentState<ImageMode>('image_mode', 'encode')
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <ImageModePicker label="Conversión de imagen" mode={mode} onChange={setMode} options={modes} />

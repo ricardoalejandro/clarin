@@ -37,6 +37,7 @@ import (
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
+	"github.com/naperu/clarin/internal/utilities"
 	"github.com/naperu/clarin/internal/whatsapp"
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
 	"github.com/naperu/clarin/internal/ws"
@@ -66,6 +67,8 @@ type Server struct {
 	hub                    *ws.Hub
 	pool                   *whatsapp.DevicePool
 	storage                *storage.Storage
+	utilities              *utilities.Service
+	utilityWorkerCancel    context.CancelFunc
 	kommoSync              *kommo.SyncService
 	kommoManager           *kommo.Manager
 	cache                  *cache.Cache
@@ -90,7 +93,7 @@ type Server struct {
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
-		BodyLimit:             52 * 1024 * 1024, // task files (50 MB) + multipart overhead
+		BodyLimit:             64 * 1024 * 1024, // utility objects (60 MiB) + protocol overhead; route limits still apply
 		DisableStartupMessage: false,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			if errors.Is(err, repository.ErrChatBindingChanged) {
@@ -113,6 +116,12 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 
 	// Middleware
 	app.Use(fiberRecover.New())
+	app.Use(func(c *fiber.Ctx) error {
+		if len(c.Body()) > 52*1024*1024 && !(strings.HasPrefix(c.Path(), "/api/utilities/documents/") && strings.Contains(c.Path(), "/content/")) {
+			return fiber.ErrRequestEntityTooLarge
+		}
+		return c.Next()
+	})
 	app.Use(compress.New(compress.Config{
 		Level: compress.LevelBestSpeed,
 	}))
@@ -219,6 +228,23 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	}
 
 	app.Use(server.validateBrowserOrigin)
+	// Personal utility storage is additive. Missing vault keys disable only
+	// protected key storage; JSON/XML and existing authentication still work.
+	if repos != nil && repos.DB() != nil {
+		server.utilities = &utilities.Service{Store: &utilities.Store{DB: repos.DB()}}
+		server.utilities.ReferenceCheck = func(ctx context.Context, tx pgx.Tx, account uuid.UUID, key string) (bool, error) {
+			return utilityStorageReferences(ctx, tx, account, key, store)
+		}
+		if store != nil {
+			server.utilities.Objects = utilityObjectStore{store}
+		}
+		if cfg != nil {
+			server.utilities.Cipher, _ = utilities.NewCipher(cfg.UtilitiesVaultActiveKeyID, cfg.UtilitiesVaultMasterKeys)
+		}
+		utilityCtx, cancel := context.WithCancel(context.Background())
+		server.utilityWorkerCancel = cancel
+		go server.utilities.RunWorkers(utilityCtx)
+	}
 
 	// Version header middleware — adds X-Clarin-Version to all API responses
 	app.Use(func(c *fiber.Ctx) error {
@@ -423,6 +449,7 @@ func (s *Server) setupRoutes() {
 	protected.Get("/utilities/access", s.requirePermission(domain.PermUtilities), func(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
+	s.registerUtilityRoutes(protected)
 	protected.Post("/auth/logout", s.handleLogout)
 	protected.Post("/auth/activity", s.handleAuthActivity)
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
@@ -15515,6 +15542,9 @@ func (s *Server) Listen(addr string) error {
 }
 
 func (s *Server) Shutdown() error {
+	if s.utilityWorkerCancel != nil {
+		s.utilityWorkerCancel()
+	}
 	if s.whiteboardFanoutCancel != nil {
 		s.whiteboardFanoutCancel()
 	}

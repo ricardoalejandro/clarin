@@ -11,6 +11,17 @@ export const MIN_FONT = 10
 export const MAX_FONT = 70
 export const TRAM_LENGTH = 24_000
 
+export interface DocumentRevealTarget { offset: number; length: number; nonce: number }
+
+/** A search navigation selects once; subsequent edits must retain their cursor. */
+export function documentRevealSelection(consumed: number | null, target: DocumentRevealTarget | undefined, origin: number, modelLength: number) {
+  if (!target || target.nonce === consumed || !Number.isSafeInteger(target.nonce) || !Number.isSafeInteger(target.offset) || !Number.isSafeInteger(target.length) || target.length <= 0) return null
+  const start = target.offset - origin
+  const end = start + target.length
+  if (start < 0 || end > modelLength) return null
+  return { nonce: target.nonce, start, end }
+}
+
 export function otherPanel(panel: Panel): Panel {
   return panel === 'a' ? 'b' : 'a'
 }

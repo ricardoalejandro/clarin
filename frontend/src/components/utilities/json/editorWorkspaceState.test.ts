@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { acceptsEditorZoom, adjustFont, canCompare, DEFAULT_FONT, DIFF_LIMIT, documentWrapOptions, fontZoomPercent, MAX_FONT, MIN_FONT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
+import { acceptsEditorZoom, adjustFont, canCompare, DEFAULT_FONT, DIFF_LIMIT, documentRevealSelection, documentWrapOptions, fontZoomPercent, MAX_FONT, MIN_FONT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
 
 describe('estado del espacio de edición', () => {
+  it('consumes search selection once and never reselects it after typing or undo', () => {
+    const target = { offset: TRAM_LENGTH + 10, length: 6, nonce: 1 }
+    const selection = documentRevealSelection(null, target, TRAM_LENGTH, TRAM_LENGTH)
+    expect(selection).toEqual({ nonce: 1, start: 10, end: 16 })
+    // The document/model revision and length can change while the navigation
+    // request remains the same. The next keystroke must retain its own cursor.
+    expect(documentRevealSelection(selection!.nonce, target, TRAM_LENGTH, TRAM_LENGTH + 12)).toBeNull()
+    expect(documentRevealSelection(selection!.nonce, target, TRAM_LENGTH, TRAM_LENGTH - 3)).toBeNull()
+    expect(documentRevealSelection(selection!.nonce, { ...target, nonce: 2 }, TRAM_LENGTH, TRAM_LENGTH)).toEqual({ nonce: 2, start: 10, end: 16 })
+  })
+
+  it('defers a match until its complete range is visible without consuming it', () => {
+    const target = { offset: TRAM_LENGTH - 2, length: 8, nonce: 1 }
+    expect(documentRevealSelection(null, target, 0, TRAM_LENGTH)).toBeNull()
+    expect(documentRevealSelection(null, target, 0, TRAM_LENGTH + 6)).toEqual({ nonce: 1, start: TRAM_LENGTH - 2, end: TRAM_LENGTH + 6 })
+  })
   it('keeps the selected document visible when the available area is narrow', () => {
     expect(visiblePanels('b', false, 1300)).toEqual(['b'])
     expect(visiblePanels('b', true, 700)).toEqual(['b'])
