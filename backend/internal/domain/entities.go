@@ -9,19 +9,20 @@ import (
 
 // Account represents a tenant in the multi-tenant system
 type Account struct {
-	ID                     uuid.UUID  `json:"id"`
-	Name                   string     `json:"name"`
-	Slug                   string     `json:"slug"`
-	Plan                   string     `json:"plan"`
-	MaxDevices             int        `json:"max_devices"`
-	MaxUsersOverride       *int       `json:"max_users_override,omitempty"`
-	MaxUsersEffective      int        `json:"max_users_effective,omitempty"`
-	StorageLimitBytes      int64      `json:"storage_limit_bytes"`
-	IsActive               bool       `json:"is_active"`
-	KommoEnabled           bool       `json:"kommo_enabled"`
-	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	ID                        uuid.UUID  `json:"id"`
+	Name                      string     `json:"name"`
+	Slug                      string     `json:"slug"`
+	Plan                      string     `json:"plan"`
+	MaxDevices                int        `json:"max_devices"`
+	MaxUsersOverride          *int       `json:"max_users_override,omitempty"`
+	MaxUsersEffective         int        `json:"max_users_effective,omitempty"`
+	SessionIdleTimeoutMinutes int        `json:"session_idle_timeout_minutes"`
+	StorageLimitBytes         int64      `json:"storage_limit_bytes"`
+	IsActive                  bool       `json:"is_active"`
+	KommoEnabled              bool       `json:"kommo_enabled"`
+	DefaultIncomingStageID    *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 
 	// Google Contacts integration
 	GoogleEmail          *string    `json:"google_email,omitempty"`
@@ -172,6 +173,7 @@ const (
 	// itself. Account administrators always bypass the capability check.
 	PermTaskEnvironmentsCreate = "tasks.environments.create"
 	PermDocuments              = "documents"
+	PermUtilities              = "utilities"
 	PermWhiteboards            = "whiteboards"
 	PermReports                = "reports"
 	PermQuickRepliesManage     = "quick_replies_manage"
@@ -183,7 +185,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermTaskEnvironmentsCreate, PermDynamics,
-	PermDocuments, PermWhiteboards, PermReports, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermWhiteboards, PermReports, PermTags, PermUtilities, PermSettings, PermIntegrations,
 	PermQuickRepliesManage,
 }
 
@@ -1398,6 +1400,34 @@ func taskAccessPresentation(access *TaskEffectiveAccess) (string, *bool, *TaskEf
 	return access.Level, &canManageAccess, access
 }
 
+// TaskContainerLifecycleConstraints are full-tree facts, separate from the
+// actor-visible badge counts. They are never serialized: a private descendant
+// may prevent a lifecycle action without disclosing its identity or count.
+type TaskContainerLifecycleConstraints struct {
+	HasRetainedTasks      bool
+	HasOpenTasks          bool
+	HasRetainedWorkEvents bool
+	HasFutureWorkEvents   bool
+	RestrictedDescendants bool
+}
+
+func applyTaskContainerLifecycleAccess(access *TaskEffectiveAccess, lifecycle string, immutable bool, taskCount, openTaskCount int, constraints *TaskContainerLifecycleConstraints) {
+	if access == nil {
+		return
+	}
+	retained, open, events, future, restricted := taskCount > 0, openTaskCount > 0, false, false, false
+	if constraints != nil {
+		retained = retained || constraints.HasRetainedTasks
+		open = open || constraints.HasOpenTasks
+		events, future, restricted = constraints.HasRetainedWorkEvents, constraints.HasFutureWorkEvents, constraints.RestrictedDescendants
+	}
+	managed := access.Level == TaskAccessFull && !immutable && !restricted
+	access.CanArchive = managed && lifecycle == TaskLifecycleActive && !open && !future
+	access.CanTrash = managed && lifecycle != TaskLifecycleTrash && !retained && !events
+	access.CanRestore = managed && lifecycle != TaskLifecycleActive
+	access.CanDelete = access.CanTrash
+}
+
 // TaskEnvironment is the top-level collaboration boundary inside one account.
 // It intentionally does not replace accounts: one account owns any number of
 // environments, each with its own hierarchy, workflows and access policy.
@@ -1432,6 +1462,8 @@ type TaskEnvironment struct {
 	OpenTaskCount        int                  `json:"open_task_count"`
 	CompletedTaskCount   int                  `json:"completed_task_count"`
 	CancelledTaskCount   int                  `json:"cancelled_task_count"`
+
+	LifecycleConstraints *TaskContainerLifecycleConstraints `json:"-"`
 }
 
 func (environment *TaskEnvironment) SetEffectiveAccess(access *TaskEffectiveAccess) {
@@ -1441,13 +1473,7 @@ func (environment *TaskEnvironment) SetEffectiveAccess(access *TaskEffectiveAcce
 
 func (environment *TaskEnvironment) SetLifecycle() {
 	environment.Lifecycle = taskContainerLifecycle(environment.ArchivedAt, environment.DeletedAt)
-	if access := environment.Capabilities; access != nil {
-		managed := access.Level == TaskAccessFull
-		access.CanArchive = managed && !environment.IsDefault && environment.Lifecycle == TaskLifecycleActive && environment.OpenTaskCount == 0
-		access.CanTrash = managed && !environment.IsDefault && environment.Lifecycle != TaskLifecycleTrash && environment.TaskCount == 0
-		access.CanRestore = managed && !environment.IsDefault && environment.Lifecycle != TaskLifecycleActive
-		access.CanDelete = access.CanTrash
-	}
+	applyTaskContainerLifecycleAccess(environment.Capabilities, environment.Lifecycle, environment.IsDefault, environment.TaskCount, environment.OpenTaskCount, environment.LifecycleConstraints)
 }
 
 type TaskAccessGrant struct {
@@ -1507,6 +1533,8 @@ type TaskList struct {
 	CanManageAccess      *bool                `json:"can_manage_access,omitempty"`
 	Capabilities         *TaskEffectiveAccess `json:"capabilities,omitempty"`
 	Permissions          *TaskEffectiveAccess `json:"permissions,omitempty"`
+
+	LifecycleConstraints *TaskContainerLifecycleConstraints `json:"-"`
 }
 
 func (list *TaskList) SetEffectiveAccess(access *TaskEffectiveAccess) {
@@ -1516,13 +1544,7 @@ func (list *TaskList) SetEffectiveAccess(access *TaskEffectiveAccess) {
 
 func (list *TaskList) SetLifecycle() {
 	list.Lifecycle = taskContainerLifecycle(list.ArchivedAt, list.DeletedAt)
-	if access := list.Capabilities; access != nil {
-		managed := access.Level == TaskAccessFull
-		access.CanArchive = managed && !list.IsDefault && list.Lifecycle == TaskLifecycleActive && list.OpenTaskCount == 0
-		access.CanTrash = managed && !list.IsDefault && list.Lifecycle != TaskLifecycleTrash && list.TaskCount == 0
-		access.CanRestore = managed && !list.IsDefault && list.Lifecycle != TaskLifecycleActive
-		access.CanDelete = access.CanTrash
-	}
+	applyTaskContainerLifecycleAccess(list.Capabilities, list.Lifecycle, list.IsDefault, list.TaskCount, list.OpenTaskCount, list.LifecycleConstraints)
 }
 
 // TaskTrashPolicy is the account-wide manual trash policy. A nil retention
@@ -1633,6 +1655,8 @@ type TaskFolder struct {
 	CanManageAccess      *bool                `json:"can_manage_access,omitempty"`
 	Capabilities         *TaskEffectiveAccess `json:"capabilities,omitempty"`
 	Permissions          *TaskEffectiveAccess `json:"permissions,omitempty"`
+
+	LifecycleConstraints *TaskContainerLifecycleConstraints `json:"-"`
 }
 
 func (folder *TaskFolder) SetEffectiveAccess(access *TaskEffectiveAccess) {
@@ -1642,13 +1666,7 @@ func (folder *TaskFolder) SetEffectiveAccess(access *TaskEffectiveAccess) {
 
 func (folder *TaskFolder) SetLifecycle() {
 	folder.Lifecycle = taskContainerLifecycle(folder.ArchivedAt, folder.DeletedAt)
-	if access := folder.Capabilities; access != nil {
-		managed := access.Level == TaskAccessFull
-		access.CanArchive = managed && folder.Lifecycle == TaskLifecycleActive && folder.OpenTaskCount == 0
-		access.CanTrash = managed && folder.Lifecycle != TaskLifecycleTrash && folder.TaskCount == 0
-		access.CanRestore = managed && folder.Lifecycle != TaskLifecycleActive
-		access.CanDelete = access.CanTrash
-	}
+	applyTaskContainerLifecycleAccess(folder.Capabilities, folder.Lifecycle, false, folder.TaskCount, folder.OpenTaskCount, folder.LifecycleConstraints)
 }
 
 // TaskHierarchyCounts is the canonical account-scoped count snapshot returned

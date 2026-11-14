@@ -23,13 +23,24 @@ afterAll(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Clarin Mermaid local conversion security", () => {
+  const flowchartDefinition = "flowchart TD\n A[Inicio] --> B[Fin]";
   const parse = async (definition: string) => {
     const parser = await loadMermaidParser(true);
     return parser.parseMermaidToExcalidraw(definition);
   };
 
+  // The first conversion includes the parser import and Mermaid's lazy diagram
+  // initialization. Keep that cold path covered separately from warm conversions.
+  it("converts the first cold flowchart into editable elements without network or SVG fallback", async () => {
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const result = await parse(flowchartDefinition);
+    expect(result.elements.length).toBeGreaterThan(0);
+    expect(Object.keys(result.files || {})).toHaveLength(0);
+    expect(fetcher).not.toHaveBeenCalled();
+  }, 30_000);
+
   it.each([
-    ["flowchart", "flowchart TD\n A[Inicio] --> B[Fin]"],
+    ["warm flowchart", flowchartDefinition],
     ["sequence", "sequenceDiagram\n Alice->>Bob: Hola"],
     ["class", "classDiagram\n class Cuenta {\n +String nombre\n }"],
     ["ER", "erDiagram\n CUENTA ||--o{ CONTACTO : contiene"],
@@ -39,7 +50,7 @@ describe("Clarin Mermaid local conversion security", () => {
     expect(result.elements.length).toBeGreaterThan(0);
     expect(Object.keys(result.files || {})).toHaveLength(0);
     expect(fetcher).not.toHaveBeenCalled();
-  });
+  }, 5_000);
 
   it("does not emit executable links or active SVG payloads from hostile labels", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
@@ -55,5 +66,5 @@ describe("Clarin Mermaid local conversion security", () => {
       expect(payload).not.toMatch(/<script|onerror\s*=|javascript:/iu);
     }
     expect(fetcher).not.toHaveBeenCalled();
-  });
+  }, 5_000);
 });

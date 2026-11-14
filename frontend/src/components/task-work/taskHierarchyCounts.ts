@@ -27,13 +27,15 @@ export interface TaskHierarchyState {
 
 export type TaskHierarchyCountOperationState = 'optimistic' | 'canonical'
 
-/** Apply a realtime count snapshot first, then suppress the matching task echo
- * when the HTTP mutation has already reconciled that operation locally. */
+/** Apply counts first, then suppress ordinary task echoes already reconciled locally.
+ * Structural invalidations carry no canonical rows and must always reach refresh/queue handling. */
 export function shouldIgnoreTaskOperationEcho(
   operationID: string | undefined,
   operationPending: boolean,
   operationKnownBeforeSnapshot: boolean,
+  action?: string,
 ) {
+  if (action === 'container_removed' || action === 'container_restored') return false
   return Boolean(operationID && (operationPending || operationKnownBeforeSnapshot))
 }
 

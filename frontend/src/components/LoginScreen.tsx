@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import Script from 'next/script'
 import { ArrowRight, Eye, EyeOff, Lock, ShieldCheck, User, WifiOff } from 'lucide-react'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
-import { getLoginNoticeForLogoutReason, invalidateOfflineBeforeIdentityChange, markAuthTokenRefreshed } from '@/lib/api'
+import { getLoginNoticeForLogoutReason, invalidateOfflineBeforeIdentityChange, markAuthTokenRefreshed, withAuthCookieMutation } from '@/lib/api'
 import { WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH } from '@/lib/whiteboardPublicLibraries'
 import { classifyRemoteResponse } from '@/offline-v3/availability'
 import {
@@ -400,7 +400,7 @@ export default function LoginScreen() {
         return
       }
     }
-    try {
+    const performLogin = async (signal: AbortSignal) => {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -414,6 +414,7 @@ export default function LoginScreen() {
           } : {}),
         }),
         credentials: 'include',
+        signal,
       })
       const contentType = res.headers.get('content-type') || ''
       const data = contentType.includes('application/json') ? await res.json().catch(() => ({})) : {}
@@ -440,7 +441,7 @@ export default function LoginScreen() {
         return
       }
       if (reauthExpectation && (data.user?.id !== reauthExpectation.user_id || data.user?.account_id !== reauthExpectation.account_id)) {
-        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => null)
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', signal }).catch(() => null)
         await cancelFailedTransition()
         setError('Clarin no pudo confirmar la misma identidad y cuenta. La sesión online fue descartada.')
         setPassword('')
@@ -451,7 +452,7 @@ export default function LoginScreen() {
         try {
           await completeOfflineV5OnlineTransition()
         } catch {
-          await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => null)
+          await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', signal }).catch(() => null)
           await cancelFailedTransition()
           setError('La identidad fue validada, pero el navegador no pudo cerrar el modo offline de forma segura. Tu copia local continúa disponible.')
           setPassword('')
@@ -460,7 +461,7 @@ export default function LoginScreen() {
         }
       }
       if (reauthExpectation) clearOfflineReauthExpectation(window.sessionStorage)
-      markAuthTokenRefreshed()
+      markAuthTokenRefreshed(data.session)
       const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
       const safeNext = next && (
         next === WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH
@@ -473,6 +474,9 @@ export default function LoginScreen() {
       }
       router.push(safeNext)
       router.refresh()
+    }
+    try {
+      await withAuthCookieMutation(performLogin, 30_000)
     } catch {
       await cancelFailedTransition()
       showOfflineFallback('No se pudo conectar con Clarin')

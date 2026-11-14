@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
@@ -21,8 +21,16 @@ import {
   MobileUnavailableSurface,
 } from '@/components/mobile-app/MobileAppChrome'
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed, invalidateOfflineBeforeIdentityChange } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed, invalidateOfflineBeforeIdentityChange, getOnlineSessionNotice, subscribeOnlineSessionNotice, continueOnlineSession, retryOnlineSession, withAuthCookieMutation } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import { canUseUtilities, isUtilitiesPath, UTILITIES_HREF, UTILITIES_PERMISSION } from '@/components/utilities/catalog'
+import {
+  DashboardFocusEnterButton,
+  DashboardFocusProvider,
+  DashboardFocusRestoreBar,
+  DashboardFocusSidebar,
+  useDashboardFocus,
+} from '@/components/dashboard-focus/DashboardFocus'
 import { browserOfflineV5Client } from '@/offline-v5/client'
 import { shouldToggleErosFromKeyboard } from '@/lib/dashboardKeyboard'
 import {
@@ -63,6 +71,7 @@ import {
   BarChart3,
   CloudCog,
   PenTool,
+  Wrench,
 } from 'lucide-react'
 
 interface User {
@@ -106,6 +115,28 @@ function CollapsedSidebarExpandButton({ onExpand }: { onExpand: () => void }) {
   </>
 }
 
+function CompactDashboardFocusEntry() {
+  const focus = useDashboardFocus()
+  if (!focus?.available || focus.hidden || focus.specializedOwnerActive) return null
+  return <div className="hidden shrink-0 justify-center border-b border-slate-700/50 py-1 lg:flex"><DashboardFocusEnterButton /></div>
+}
+
+function OnlineSessionBlock({ checking }: { checking: boolean }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const retry = useRef<HTMLButtonElement>(null)
+  useLayoutEffect(() => {
+    const element = dialog.current
+    if (element && !element.open) element.showModal()
+    return () => { element?.close() }
+  }, [])
+  useEffect(() => { if (!checking) retry.current?.focus() }, [checking])
+  return <dialog ref={dialog} onCancel={event => event.preventDefault()} aria-labelledby="online-session-check-title" className="m-auto w-[calc(100%_-_2rem)] max-w-sm rounded-2xl border border-slate-200 bg-white p-5 text-slate-900 shadow-sm backdrop:bg-slate-50">
+    <h1 id="online-session-check-title" className="text-base font-semibold">{checking ? 'Verificando tu sesión' : 'Sesión en pausa'}</h1>
+    <p role="status" className="mt-3 text-sm text-slate-600">{checking ? 'Un momento mientras Clarin confirma el estado de tu sesión.' : 'Clarin no pudo comprobar tu sesión. Revisa tu conexión y vuelve a intentarlo.'}</p>
+    {!checking && <button ref={retry} type="button" onClick={() => void retryOnlineSession()} className="mt-3 min-h-11 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-800">Reintentar</button>}
+  </dialog>
+}
+
 export default function DashboardLayout({
   children,
 }: {
@@ -129,6 +160,8 @@ function DashboardLayoutContent({
   const pathname = usePathname()
   const { snapshot: offlineRuntime, isOffline, activity: registerOfflineActivity, requireOnline } = useClarinRuntime()
   const { ready: pwaReady, mobileApp: mobileAppMode } = usePwaRuntime()
+  const sessionNotice = useSyncExternalStore(subscribeOnlineSessionNotice, getOnlineSessionNotice, () => 'none' as const)
+  const sessionBlocked = !isOffline && (sessionNotice === 'checking' || sessionNotice === 'unavailable')
   const [user, setUser] = useState<User | null>(null)
   const [accountCount, setAccountCount] = useState(1)
   const [loading, setLoading] = useState(true)
@@ -306,16 +339,14 @@ function DashboardLayoutContent({
       }, 2_000)
     }
 
-    const acceptSession = (data: any) => {
-      if (disposed) return
+    const acceptSession = (data: any, requestedAt: number) => {
+      if (disposed || (!isOffline && !markAuthSessionDetected(data.session, requestedAt))) return false
       setUser(data.user)
       setAccountCount(Math.max(1, Number(data.account_count) || 1))
       localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
       if (isOffline) clearIdleTimeout()
-      else {
-        markAuthSessionDetected()
-        initIdleTimeout()
-      }
+      else initIdleTimeout()
+      return true
     }
 
     const checkAuth = async () => {
@@ -345,6 +376,7 @@ function DashboardLayoutContent({
           }
         }
 
+        const requestedAt = Date.now()
         const res = await fetch('/api/me', {
           credentials: 'include',
         })
@@ -366,6 +398,7 @@ function DashboardLayoutContent({
             return
           }
           if (refreshOutcome === 'refreshed') {
+            const retryRequestedAt = Date.now()
             const retryRes = await fetch('/api/me', {
               credentials: 'include',
             })
@@ -377,7 +410,7 @@ function DashboardLayoutContent({
             if (retryRes.ok) {
               const retryData = await retryRes.json()
               if (retryData.success) {
-                acceptSession(retryData)
+                if (!acceptSession(retryData, retryRequestedAt)) retryUnavailable()
                 return
               }
             }
@@ -389,7 +422,7 @@ function DashboardLayoutContent({
 
         const data = await res.json()
         if (data.success) {
-          acceptSession(data)
+          if (!acceptSession(data, requestedAt)) retryUnavailable()
         } else {
           if (isOffline) {
             retryUnavailable()
@@ -505,15 +538,19 @@ function DashboardLayoutContent({
     if (isOffline) return 'Para proteger la separación entre cuentas, cierra esta sesión offline e ingresa de nuevo para elegir otra cuenta autorizada.'
     try {
       await invalidateOfflineBeforeIdentityChange()
-      const res = await fetch('/api/auth/switch-account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account_id: accountId }),
-        credentials: 'include',
+      const data = await withAuthCookieMutation(async signal => {
+        const res = await fetch('/api/auth/switch-account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ account_id: accountId }),
+          credentials: 'include',
+          signal,
+        })
+        const response = await res.json()
+        if (response.success) markAuthTokenRefreshed(response.session)
+        return response
       })
-      const data = await res.json()
       if (data.success) {
-        markAuthTokenRefreshed()
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         window.location.href = '/dashboard'
@@ -546,6 +583,7 @@ function DashboardLayoutContent({
     '/dashboard/reports': 'reports',
     '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
+    [UTILITIES_HREF]: UTILITIES_PERMISSION,
   }
 
   function hasPermission(href: string): boolean {
@@ -578,6 +616,7 @@ function DashboardLayoutContent({
     { href: '/dashboard/documents', icon: Files, label: 'Plantillas', desc: 'Editor de plantillas' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas', desc: 'Organización por etiquetas' },
     { href: '/dashboard/storage', icon: Database, label: 'Almacenamiento', desc: 'Archivos y espacio' },
+    { href: UTILITIES_HREF, icon: Wrench, label: 'Utilitarios', desc: 'Edita, convierte y verifica datos' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración', desc: 'Ajustes del sistema' },
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin', desc: 'Administración global' }] : []),
   ].filter(item => hasPermission(item.href) && (!isOffline || offlineV5DashboardPathAllowed(item.href, offlineRuntime.authorizedModules)))
@@ -629,6 +668,7 @@ function DashboardLayoutContent({
   if (subscriptionBlocked) {
     return (
       <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
+        {sessionBlocked && <OnlineSessionBlock checking={sessionNotice === 'checking'} />}
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/30 p-6 sm:p-8 text-center">
             <div className="mb-5 flex items-center justify-center gap-2.5">
@@ -669,8 +709,16 @@ function DashboardLayoutContent({
   }
 
   return (
+    <DashboardFocusProvider scopeKey={JSON.stringify([user.id, user.account_id, pathname])} enabled={!mobileAppMode}>
     <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
     <ChatMobileChromeProvider value={chatMobileChromeContextValue}>
+    {sessionBlocked && <OnlineSessionBlock checking={sessionNotice === 'checking'} />}
+    {!isOffline && !sessionBlocked && sessionNotice !== 'none' && typeof document !== 'undefined' && createPortal(
+      <aside aria-label="Aviso de sesión" className="fixed inset-x-3 bottom-[max(5rem,env(safe-area-inset-bottom))] z-[400] ml-auto flex max-w-sm flex-wrap items-center gap-2 rounded-2xl border border-amber-200 bg-white p-3 shadow-lg sm:inset-x-5">
+        <p role="status" className="min-w-0 flex-1 text-sm text-slate-700">{sessionNotice === 'continue-error' ? 'No se pudo renovar la sesión. Inténtalo de nuevo.' : 'Tu sesión está por cerrarse por inactividad.'}</p>
+        <button type="button" disabled={sessionNotice === 'continuing'} onClick={() => void continueOnlineSession()} className="min-h-11 shrink-0 rounded-xl bg-emerald-700 px-3 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">{sessionNotice === 'continuing' ? 'Verificando…' : 'Continuar sesión'}</button>
+      </aside>, document.body,
+    )}
     <div className="app-viewport bg-slate-50 flex overflow-hidden">
       {/* Mobile sidebar overlay */}
       {!mobileAppMode && sidebarOpen && (
@@ -681,7 +729,7 @@ function DashboardLayoutContent({
       )}
 
       {/* Sidebar */}
-      {!mobileAppMode && <aside data-dashboard-sidebar className={`
+      {!mobileAppMode && <DashboardFocusSidebar className={`
         fixed lg:static inset-y-0 left-0 z-40
         ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
         bg-slate-800/95 backdrop-blur-md border-r border-slate-700/50
@@ -697,8 +745,10 @@ function DashboardLayoutContent({
             <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>
           </Link>}
           {sidebarHeader.showExpandControl && <CollapsedSidebarExpandButton onExpand={toggleSidebarCollapsed} />}
-          {sidebarHeader.showCollapseControl && <><button onClick={() => setSidebarOpen(false)} className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors" aria-label="Cerrar menú"><X className="w-5 h-5 text-slate-400" /></button><button onClick={toggleSidebarCollapsed} className="hidden rounded-lg p-1.5 text-slate-500 transition-all duration-200 hover:bg-slate-700/60 hover:text-slate-300 lg:flex" title="Colapsar menú" aria-label="Colapsar menú" aria-expanded="true"><PanelLeftClose className="h-[18px] w-[18px]" /></button></>}
+          {sidebarHeader.showCollapseControl && <div className="flex shrink-0 items-center gap-0.5"><DashboardFocusEnterButton /><button onClick={() => setSidebarOpen(false)} className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors" aria-label="Cerrar menú"><X className="w-5 h-5 text-slate-400" /></button><button onClick={toggleSidebarCollapsed} className="hidden rounded-lg p-1.5 text-slate-500 transition-all duration-200 hover:bg-slate-700/60 hover:text-slate-300 lg:flex" title="Colapsar menú" aria-label="Colapsar menú" aria-expanded="true"><PanelLeftClose className="h-[18px] w-[18px]" /></button></div>}
         </div>
+
+        {sidebarHeader.compact && <CompactDashboardFocusEntry />}
 
         {/* Navigation */}
         <nav className={`${isCollapsed ? 'px-2 py-3' : 'px-2.5 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
@@ -821,7 +871,7 @@ function DashboardLayoutContent({
             )}
           </button>
         </div>}
-      </aside>}
+      </DashboardFocusSidebar>}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
@@ -896,6 +946,8 @@ function DashboardLayoutContent({
         {user && <OfflineConnectionBannerV5 key={`${user.id}:${user.account_id}`} userId={user.id} accountId={user.account_id} username={user.username} />}
         <OfflineRuntimeIndicator />
 
+        <DashboardFocusRestoreBar />
+
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
           mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
@@ -904,6 +956,8 @@ function DashboardLayoutContent({
             <MobileUnavailableSurface returnHref="" noModules />
           ) : mobilePathUnavailable ? (
             <MobileUnavailableSurface returnHref={mobileDefaultHref} permissionDenied={mobilePermissionDenied} />
+          ) : isUtilitiesPath(pathname) && (!user || !canUseUtilities(user)) ? (
+            <MobileUnavailableSurface returnHref="/dashboard" permissionDenied />
           ) : children}
         </main>
 
@@ -1015,5 +1069,6 @@ function DashboardLayoutContent({
 
     </ChatMobileChromeProvider>
     </NotificationProvider>
+    </DashboardFocusProvider>
   )
 }

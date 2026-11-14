@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { operationalDateDayKey, operationalDateLocalValue } from '../operational-date/operationalDate'
-import TaskDateRangePicker, { taskAllDayBoundary, taskDateRangeIsValid, taskDateRangeSummary, taskDueDateOnlyValue } from './TaskDateRangePicker'
+import TaskDateRangePicker, { taskAllDayBoundary, taskDateRangeInitialDraft, taskDateRangeIsValid, taskDateRangeSummary, taskDueDateOnlyValue } from './TaskDateRangePicker'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
 const originalInnerWidth = window.innerWidth
@@ -56,7 +56,10 @@ describe('TaskDateRangePicker', () => {
     render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
     fireEvent.click(screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' }))
 
-    expect(screen.getByRole('button', { name: /Fecha de entrega.*Sin fecha/ })).toHaveAttribute('aria-pressed', 'true')
+    const today = new Date()
+    const todayLabel = today.toLocaleString('es-PE', { dateStyle: 'medium' })
+    expect(screen.getByRole('button', { name: `Fecha de entrega ${todayLabel}` })).toHaveAttribute('aria-pressed', 'true')
+    expect(document.querySelector(`[data-task-range-date="${operationalDateDayKey(today)}"]`)).toHaveAttribute('aria-pressed', 'true')
     expect(screen.queryByRole('button', { name: /Inicio opcional.*Sin fecha/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Añadir fecha de inicio' })).toBeInTheDocument()
 
@@ -72,6 +75,116 @@ describe('TaskDateRangePicker', () => {
       endAt: taskDueDateOnlyValue(operationalDateDayKey(tomorrow)),
       isAllDay: true,
     })
+  })
+
+  it('prepares today as an all-day delivery without changing the saved empty value before Apply', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 7, 25, 10, 30))
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
+    const trigger = screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' })
+
+    fireEvent.click(trigger)
+    const today = document.querySelector('[data-task-range-date="2026-08-25"]')
+    expect(today).toHaveAttribute('aria-current', 'date')
+    expect(today).toHaveAttribute('aria-pressed', 'true')
+    expect(today).toHaveClass('bg-emerald-600')
+    expect(document.querySelectorAll('[role="gridcell"][aria-pressed="true"]')).toHaveLength(1)
+    expect(trigger).toHaveAccessibleName('Fechas: Agregar fecha de entrega')
+    expect(screen.queryByLabelText('Hora de entrega')).not.toBeInTheDocument()
+    expect(onApply).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    expect(onApply).toHaveBeenCalledExactlyOnceWith({ startAt: '', endAt: '2026-08-25T23:59', isAllDay: true })
+  })
+
+  it.each(['Quitar entrega', 'Quitar fechas'])('does not reseed today after %s in the same opening', action => {
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' }))
+    fireEvent.click(screen.getByRole('button', { name: action }))
+
+    expect(screen.getByRole('button', { name: /Fecha de entrega.*Sin fecha/ })).toBeInTheDocument()
+    expect(document.querySelectorAll('[role="gridcell"][aria-pressed="true"]')).toHaveLength(0)
+    expect(onApply).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    expect(onApply).toHaveBeenCalledExactlyOnceWith({ startAt: '', endAt: '', isAllDay: false })
+  })
+
+  it.each(['cancel', 'escape', 'outside'])('discards the suggested delivery through %s and restores it only on reopening', async action => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 7, 25, 10, 30))
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
+    const trigger = screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('button', { name: 'Mañana' }))
+    if (action === 'cancel') fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    else if (action === 'escape') fireEvent.keyDown(window, { key: 'Escape' })
+    else fireEvent.mouseDown(screen.getByRole('button', { name: 'Cerrar Fechas' }))
+
+    expect(onApply).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(trigger).toHaveFocus())
+    fireEvent.click(trigger)
+    expect(document.querySelector('[data-task-range-date="2026-08-25"]')).toHaveAttribute('aria-pressed', 'true')
+    expect(onApply).not.toHaveBeenCalled()
+  })
+
+  it('recalculates today after reopening across midnight without replacing an open draft', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 11, 31, 23, 59))
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
+    const trigger = screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' })
+    fireEvent.click(trigger)
+    expect(document.querySelector('[data-task-range-date="2026-12-31"]')).toHaveAttribute('aria-pressed', 'true')
+
+    vi.setSystemTime(new Date(2027, 0, 1, 0, 1))
+    fireEvent.click(screen.getByRole('button', { name: 'Añadir fecha de inicio' }))
+    expect(document.querySelector('[data-task-range-date="2026-12-31"]')).toHaveAttribute('data-range-boundary', 'end')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    fireEvent.click(trigger)
+    expect(document.querySelector('[data-task-range-date="2027-01-01"]')).toHaveAttribute('aria-pressed', 'true')
+    expect(onApply).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes today from an existing selected delivery without replacing it', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 7, 25, 10, 30))
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="2026-08-26T17:15" allDay={false} onApply={onApply} />)
+    fireEvent.click(screen.getByRole('button', { name: /^Fechas: Entrega:/ }))
+    const today = document.querySelector('[data-task-range-date="2026-08-25"]')
+    const selected = document.querySelector('[data-task-range-date="2026-08-26"]')
+    expect(today).toHaveAttribute('aria-current', 'date')
+    expect(today).toHaveAttribute('aria-pressed', 'false')
+    expect(today).toHaveClass('underline')
+    expect(selected).toHaveAttribute('aria-pressed', 'true')
+    expect(selected).toHaveClass('bg-emerald-600')
+    expect(selected).not.toHaveClass('underline')
+    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    expect(onApply).toHaveBeenCalledExactlyOnceWith({ startAt: '', endAt: '2026-08-26T17:15', isAllDay: false })
+  })
+
+  it('moves focus across a month from the suggested day and selects only with Enter', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 7, 31, 10, 30))
+    const onApply = vi.fn()
+    render(<TaskDateRangePicker label="Fechas" startValue="" endValue="" allDay={false} onApply={onApply} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fechas: Agregar fecha de entrega' }))
+    const today = document.querySelector('[data-task-range-date="2026-08-31"]') as HTMLButtonElement
+    today.focus()
+    fireEvent.keyDown(today, { key: 'ArrowRight' })
+    const tomorrow = document.querySelector('[data-task-range-date="2026-09-01"]') as HTMLButtonElement
+    await waitFor(() => expect(tomorrow).toHaveFocus())
+    expect(today).toHaveAttribute('aria-pressed', 'true')
+    expect(tomorrow).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.keyDown(tomorrow, { key: 'Enter' })
+    expect(tomorrow).toHaveAttribute('aria-pressed', 'true')
+    expect(onApply).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    expect(onApply).toHaveBeenCalledExactlyOnceWith({ startAt: '', endAt: '2026-09-01T23:59', isAllDay: true })
   })
 
   it('preserves an existing start-only task without filling its delivery', () => {
@@ -243,6 +356,26 @@ describe('TaskDateRangePicker', () => {
 })
 
 describe('task date range rules', () => {
+  it.each([
+    new Date(2026, 0, 1, 0, 5),
+    new Date(2026, 11, 31, 23, 55),
+    new Date(2028, 1, 29, 23, 55),
+  ])('seeds the local calendar day without a UTC date conversion at %s', now => {
+    const original = now.getTime()
+    const localDay = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    expect(taskDateRangeInitialDraft('', '', false, now)).toEqual({ startAt: '', endAt: `${localDay}T23:59`, isAllDay: true })
+    expect(now.getTime()).toBe(original)
+  })
+
+  it.each([
+    ['2026-08-25T09:00', '', false],
+    ['', '2026-08-26T17:15', false],
+    ['2026-08-25T00:00', '2026-08-26T23:59', true],
+    ['fecha-inválida', '', false],
+  ] as const)('preserves existing or invalid endpoints exactly', (startAt, endAt, isAllDay) => {
+    expect(taskDateRangeInitialDraft(startAt, endAt, isAllDay, new Date(2026, 10, 1))).toEqual({ startAt, endAt, isAllDay })
+  })
+
   it('keeps endpoint summaries explicit and validates all-day ranges by calendar date', () => {
     expect(taskDateRangeSummary('', '', false)).toBe('Agregar fecha de entrega')
     expect(taskDateRangeSummary('2026-08-25T09:00', '', false)).toMatch(/^Inicio: /)

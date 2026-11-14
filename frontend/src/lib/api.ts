@@ -1,4 +1,5 @@
 // API helper for Clarin frontend
+import { parseOnlineSession, sessionDeadline, type OnlineSession } from './onlineSession'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 const SESSION_MARKER = 'cookie-session'
@@ -22,6 +23,69 @@ const ACCESS_TOKEN_REFRESH_MS = 20 * 60 * 1000
 const LAST_ACTIVITY_KEY = 'clarin:last_activity_at'
 const LOGOUT_EVENT_KEY = 'clarin:logout_at'
 const AUTH_REFRESHED_KEY = 'clarin:auth_refreshed_at'
+const SESSION_SYNC_KEY = 'clarin:online_session_sync'
+
+type OnlineSessionNotice = 'none' | 'warning' | 'continuing' | 'continue-error' | 'checking' | 'unavailable'
+let onlineSession: OnlineSession | null = null
+let onlineDeadline: ReturnType<typeof sessionDeadline> | null = null
+let sessionNotice: OnlineSessionNotice = 'none'
+const sessionListeners = new Set<() => void>()
+
+export function subscribeOnlineSessionNotice(listener: () => void) {
+  sessionListeners.add(listener)
+  return () => { sessionListeners.delete(listener) }
+}
+
+export function getOnlineSessionNotice() { return sessionNotice }
+
+function setSessionNotice(notice: OnlineSessionNotice) {
+  if (sessionNotice === notice) return
+  sessionNotice = notice
+  sessionListeners.forEach(listener => listener())
+}
+
+function setOnlineSession(value: unknown, receivedAt = Date.now(), broadcast = true) {
+  const next = parseOnlineSession(value)
+  if (!next) return
+  if (onlineSession?.scope === next.scope && Date.parse(next.server_now) < Date.parse(onlineSession.server_now)) return
+  const changed = !onlineSession || next.scope !== onlineSession.scope || next.idle_expires_at !== onlineSession.idle_expires_at
+  onlineSession = next
+  onlineDeadline = sessionDeadline(next, receivedAt)
+  if (broadcast && changed && typeof window !== 'undefined') {
+    localStorage.setItem(SESSION_SYNC_KEY, JSON.stringify({ session: next, receivedAt }))
+  }
+  if (_idleInitialized) scheduleIdleCheck()
+}
+
+function readSessionSync(value: string | null) {
+  try {
+    const envelope = JSON.parse(value || 'null') as { session?: unknown; receivedAt?: number } | null
+    const session = parseOnlineSession(envelope?.session)
+    if (!session || typeof envelope?.receivedAt !== 'number' || !Number.isFinite(envelope.receivedAt)) return null
+    return { session, receivedAt: envelope.receivedAt }
+  } catch {
+    return null
+  }
+}
+
+export async function withAuthCookieMutation<T>(run: (signal: AbortSignal) => Promise<T>, timeoutMs = 10_000): Promise<T> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const request = () => run(controller.signal)
+  try {
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      return await navigator.locks.request('clarin:auth-cookies', { signal: controller.signal }, request)
+    }
+    return await request()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function hasNewerSessionScope(scope: string) {
+  const latest = readSessionSync(localStorage.getItem(SESSION_SYNC_KEY))
+  return onlineSession?.scope !== scope || Boolean(latest && latest.session.scope !== scope)
+}
 
 export type LogoutReason = 'manual' | 'idle' | 'expired'
 
@@ -31,7 +95,7 @@ export function getLoginRedirectForLogout(reason: LogoutReason = 'manual') {
 
 export function getLoginNoticeForLogoutReason(reason: string | null) {
   if (reason === 'idle') {
-    return 'Tu sesión se cerró después de 30 minutos sin actividad. Inicia sesión para continuar.'
+    return 'Tu sesión se cerró por inactividad. Inicia sesión para continuar.'
   }
   if (reason === 'expired') {
     return 'Tu sesión expiró. Inicia sesión nuevamente para continuar.'
@@ -48,6 +112,10 @@ export function clearAuthState() {
   localStorage.removeItem('kommo_enabled')
   localStorage.removeItem(LAST_ACTIVITY_KEY)
   localStorage.removeItem(AUTH_REFRESHED_KEY)
+  localStorage.removeItem(SESSION_SYNC_KEY)
+  onlineSession = null
+  onlineDeadline = null
+  clearIdleTimeout()
 }
 
 export async function invalidateOfflineBeforeIdentityChange() {
@@ -67,6 +135,7 @@ export async function invalidateOfflineBeforeIdentityChange() {
 
 export function markAuthActivity(force = false) {
   if (typeof window === 'undefined') return
+  if (onlineSession) return
   if (!localStorage.getItem('token')) return
   const now = Date.now()
   const previous = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || '0')
@@ -75,21 +144,29 @@ export function markAuthActivity(force = false) {
 }
 
 /** Record a valid cookie session without claiming that the access JWT changed. */
-export function markAuthSessionDetected() {
-  if (typeof window === 'undefined') return
+export function markAuthSessionDetected(session?: unknown, requestedAt?: number) {
+  if (typeof window === 'undefined') return false
+  const next = parseOnlineSession(session)
+  if (next && requestedAt !== undefined) {
+    const latest = readSessionSync(localStorage.getItem(SESSION_SYNC_KEY))
+    if (latest && latest.session.scope !== next.scope && latest.receivedAt >= requestedAt) return false
+  }
+  setOnlineSession(session)
   localStorage.setItem('token', SESSION_MARKER)
   markAuthActivity(true)
+  return true
 }
 
 /** Record an endpoint response that issued a fresh access JWT. */
-export function markAuthTokenRefreshed() {
+export function markAuthTokenRefreshed(session?: unknown) {
   if (typeof window === 'undefined') return
-  markAuthSessionDetected()
+  markAuthSessionDetected(session)
   localStorage.setItem(AUTH_REFRESHED_KEY, String(Date.now()))
 }
 
 export function isAuthIdleExpired() {
   if (typeof window === 'undefined') return false
+  if (onlineSession) return false // Canonical expiry is confirmed by the server.
   const lastActivity = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || '0')
   return lastActivity > 0 && Date.now() - lastActivity >= IDLE_TIMEOUT_MS
 }
@@ -99,18 +176,22 @@ export async function logoutFromBrowser(
   options: { redirect?: boolean } = {},
 ) {
   if (typeof window === 'undefined') return
+  const scope = onlineSession?.scope
   clearIdleTimeout()
   await invalidateOfflineBeforeIdentityChange()
-  try {
-    await fetch(`${API_BASE}/api/auth/logout`, {
-      method: 'POST',
-      credentials: 'include',
-    })
-  } catch {
-    // The local state still needs to be cleared even if the network is gone.
+  if (reason === 'manual' || (reason === 'idle' && !onlineSession)) {
+    try {
+      await withAuthCookieMutation(async signal => {
+        if (scope && hasNewerSessionScope(scope)) return
+        await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include', signal })
+      })
+    } catch {
+      // The local state still needs to be cleared even if the network is gone.
+    }
   }
+  if (scope && hasNewerSessionScope(scope)) { window.location.replace('/dashboard'); return }
   clearAuthState()
-  localStorage.setItem(LOGOUT_EVENT_KEY, `${Date.now()}:${reason}`)
+  localStorage.setItem(LOGOUT_EVENT_KEY, JSON.stringify({ at: Date.now(), reason, scope }))
   if (options.redirect !== false) window.location.href = getLoginRedirectForLogout(reason)
 }
 
@@ -127,22 +208,40 @@ export async function tryRefreshTokenOutcome(
   // Deduplicate concurrent refresh attempts
   if (_refreshPromise) return _refreshPromise
 
-  _refreshPromise = (async () => {
+  const expectedScope = onlineSession?.scope
+  _refreshPromise = withAuthCookieMutation<AuthRefreshOutcome>(async signal => {
     try {
+      if (expectedScope && hasNewerSessionScope(expectedScope)) return 'unavailable'
       const res = await fetch(`${API_BASE}/api/auth/refresh`, {
         method: 'POST',
         credentials: 'include', // sends httpOnly refresh-token cookie
+        signal,
       })
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
+          if (expectedScope) {
+            if (hasNewerSessionScope(expectedScope)) return 'unavailable'
+            // The activity check owns confirmation and the scoped login notice.
+            if (_idleInitialized && !sessionProbe) {
+              void checkOnlineSession(false)
+              return 'unavailable'
+            }
+            return 'expired'
+          }
           clearAuthState()
           return 'expired'
         }
         return 'unavailable'
       }
-      const data = await res.json().catch(() => undefined) as { success?: boolean } | undefined
+      const data = await res.json().catch(() => undefined) as { success?: boolean; session?: unknown } | undefined
       if (data?.success) {
-        markAuthTokenRefreshed()
+        if (expectedScope && hasNewerSessionScope(expectedScope)) return 'unavailable'
+        const next = parseOnlineSession(data.session)
+        if (expectedScope && next && next.scope !== expectedScope) {
+          window.location.replace('/dashboard')
+          return 'unavailable'
+        }
+        markAuthTokenRefreshed(data.session)
         return 'refreshed'
       }
       // A malformed or ambiguous successful response is not proof that the
@@ -150,10 +249,8 @@ export async function tryRefreshTokenOutcome(
       return 'unavailable'
     } catch {
       return 'unavailable'
-    } finally {
-      _refreshPromise = null
     }
-  })()
+  }).catch(() => 'unavailable' as const).finally(() => { _refreshPromise = null })
 
   return _refreshPromise
 }
@@ -178,6 +275,10 @@ let _heartbeatTimer: ReturnType<typeof setInterval> | null = null
 let _idleInitialized = false
 let _storageListener: ((event: StorageEvent) => void) | null = null
 const _activityEvents = ['mousemove', 'keydown', 'click', 'touchstart', 'scroll', 'visibilitychange']
+const canonicalActivityEvents = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'visibilitychange']
+let activityEvents: string[] = []
+let lastReportedActivity = 0
+let sessionProbe: { scope: string; interaction: boolean; controller: AbortController; result: Promise<boolean> } | null = null
 
 function getRemainingIdleMs() {
   const lastActivity = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || '0')
@@ -187,6 +288,18 @@ function getRemainingIdleMs() {
 
 function scheduleIdleCheck() {
   if (_idleTimer) clearTimeout(_idleTimer)
+  if (onlineDeadline) {
+    const remaining = onlineDeadline.at - Date.now()
+    if (remaining <= 0) {
+      if (sessionNotice !== 'unavailable') void checkOnlineSession(false, true)
+      return
+    }
+    const warning = onlineDeadline.reason === 'idle' && remaining <= 60_000
+    if (!warning) setSessionNotice('none')
+    else if (sessionNotice !== 'continuing' && sessionNotice !== 'continue-error') setSessionNotice('warning')
+    _idleTimer = setTimeout(scheduleIdleCheck, Math.max(1, remaining - (!warning && onlineDeadline.reason === 'idle' ? 60_000 : 0)))
+    return
+  }
   const remaining = getRemainingIdleMs()
   _idleTimer = setTimeout(() => {
     if (isAuthIdleExpired()) {
@@ -197,7 +310,20 @@ function scheduleIdleCheck() {
   }, Math.max(remaining, 1000))
 }
 
-function handleUserActivity() {
+function handleUserActivity(event: Event) {
+  if (onlineSession) {
+    if (event.type === 'visibilitychange') {
+      if (document.visibilityState === 'visible') scheduleIdleCheck()
+      return
+    }
+    if (!event.isTrusted || !onlineDeadline || Date.now() >= onlineDeadline.at || sessionNotice === 'continuing') return
+    if (event.type === 'pointermove' && sessionNotice !== 'none') return
+    if (Date.now() - lastReportedActivity >= ACTIVITY_THROTTLE_MS) {
+      lastReportedActivity = Date.now()
+      void checkOnlineSession(true)
+    }
+    return
+  }
   markAuthActivity()
   scheduleIdleCheck()
 }
@@ -206,6 +332,11 @@ async function sendActivityHeartbeat() {
   if (typeof window === 'undefined') return
   if (_offlineRuntimeActive) return
   if (!localStorage.getItem('token')) return
+  if (onlineSession) {
+    if (onlineDeadline && Date.now() >= onlineDeadline.at) scheduleIdleCheck()
+    else void checkOnlineSession(false)
+    return
+  }
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return
@@ -233,13 +364,29 @@ async function sendActivityHeartbeat() {
 export function initIdleTimeout() {
   if (typeof window === 'undefined' || _idleInitialized || _offlineRuntimeActive) return
   _idleInitialized = true
-  if (!localStorage.getItem(LAST_ACTIVITY_KEY)) markAuthActivity(true)
+  if (!onlineSession && !localStorage.getItem(LAST_ACTIVITY_KEY)) markAuthActivity(true)
 
-  _activityEvents.forEach(evt => window.addEventListener(evt, handleUserActivity, { passive: true }))
+  activityEvents = onlineSession ? canonicalActivityEvents : _activityEvents
+  activityEvents.forEach(evt => window.addEventListener(evt, handleUserActivity, { passive: true }))
   _storageListener = (event: StorageEvent) => {
+    if (event.key === SESSION_SYNC_KEY && onlineSession) {
+      const incoming = readSessionSync(event.newValue)
+      if (!incoming) return
+      if (incoming.session.scope !== onlineSession.scope) {
+        window.location.replace('/dashboard')
+        return
+      }
+      setOnlineSession(incoming.session, incoming.receivedAt, false)
+      return
+    }
     if (event.key === LOGOUT_EVENT_KEY) {
+      let reason = event.newValue?.split(':').pop()
+      try {
+        const message = JSON.parse(event.newValue || 'null')
+        if (message?.scope && onlineSession?.scope !== message.scope) return
+        reason = message?.reason || reason
+      } catch { /* Support a logout from a tab on the previous frontend build. */ }
       clearAuthState()
-      const reason = event.newValue?.split(':').pop()
       window.location.href = getLoginRedirectForLogout(reason === 'idle' || reason === 'expired' ? reason : 'manual')
       return
     }
@@ -262,12 +409,95 @@ export function clearIdleTimeout() {
     _heartbeatTimer = null
   }
   if (typeof window !== 'undefined') {
-    _activityEvents.forEach(evt => window.removeEventListener(evt, handleUserActivity))
+    activityEvents.forEach(evt => window.removeEventListener(evt, handleUserActivity))
     if (_storageListener) window.removeEventListener('storage', _storageListener)
   }
   _storageListener = null
+  activityEvents = []
   _idleInitialized = false
+  sessionProbe?.controller.abort()
+  sessionProbe = null
+  lastReportedActivity = 0
+  setSessionNotice('none')
 }
+
+async function fetchOnlineSession(scope: string, interaction: boolean, signal: AbortSignal) {
+  const request = () => fetch(`${API_BASE}/api/auth/activity`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: interaction ? JSON.stringify({ interaction: true, scope }) : undefined,
+    signal,
+  })
+  let response = await request()
+  let data = await response.json().catch(() => null)
+  if (response.status === 401 && data?.code !== 'session_idle_expired') {
+    const outcome = await tryRefreshTokenOutcome()
+    if (outcome === 'refreshed') {
+      response = await request()
+      data = await response.json().catch(() => null)
+    } else if (outcome === 'unavailable' && data?.code !== 'session_expired') {
+      return { status: 503, data: null }
+    }
+  }
+  return { status: response.status, data }
+}
+
+function checkOnlineSession(interaction: boolean, lock = false): Promise<boolean> {
+  const current = onlineSession
+  if (!current || _offlineRuntimeActive) return Promise.resolve(false)
+  if (lock) setSessionNotice('checking')
+  if (sessionProbe?.scope === current.scope) {
+    if (!interaction || sessionProbe.interaction) return sessionProbe.result
+    return sessionProbe.result.then(() => checkOnlineSession(true))
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8_000)
+  const request = { scope: current.scope, interaction, controller, result: Promise.resolve(false) }
+  const stillCurrent = () => onlineSession?.scope === current.scope && sessionProbe === request
+  const unavailable = () => {
+    if (onlineDeadline && Date.now() >= onlineDeadline.at) setSessionNotice('unavailable')
+    else if (sessionNotice === 'continuing') setSessionNotice('continue-error')
+  }
+  sessionProbe = request
+  request.result = (async () => {
+    try {
+      const { status, data } = await fetchOnlineSession(current.scope, interaction, controller.signal)
+      if (!stillCurrent()) return false
+      const next = parseOnlineSession(data?.session)
+      if (status === 409 || hasNewerSessionScope(current.scope) || (next && next.scope !== current.scope)) {
+        window.location.replace('/dashboard')
+        return false
+      }
+      if (status === 401 || status === 403) {
+        const reason = data?.code === 'session_idle_expired' || (onlineDeadline?.reason === 'idle' && Date.now() >= onlineDeadline.at) ? 'idle' : 'expired'
+        clearAuthState()
+        localStorage.setItem(LOGOUT_EVENT_KEY, JSON.stringify({ at: Date.now(), reason, scope: current.scope }))
+        window.location.replace(getLoginRedirectForLogout(reason))
+        return false
+      }
+      if (status !== 200 || !next) { unavailable(); return false }
+      sessionProbe = null
+      setOnlineSession(next)
+      return true
+    } catch {
+      if (stillCurrent()) unavailable()
+      return false
+    } finally {
+      clearTimeout(timeout)
+      if (sessionProbe === request) sessionProbe = null
+    }
+  })()
+  return request.result
+}
+
+export function continueOnlineSession() {
+  if (!onlineDeadline || Date.now() >= onlineDeadline.at) return checkOnlineSession(false, true)
+  setSessionNotice('continuing')
+  return checkOnlineSession(true)
+}
+
+export function retryOnlineSession() { return checkOnlineSession(false, true) }
 
 // ─── Version Detection ────────────────────────────────────────────────────────
 // Tracks server version from X-Clarin-Version header and notifies listeners

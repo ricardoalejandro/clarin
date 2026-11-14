@@ -11,6 +11,12 @@ type actorTaskListCounts struct {
 	Total, Open, Done, Cancelled int
 }
 
+func applyActorTaskListCounts(list *domain.TaskList, counts actorTaskListCounts) {
+	list.TaskCount, list.OpenTaskCount = counts.Total, counts.Open
+	list.CompletedTaskCount, list.CancelledTaskCount = counts.Done, counts.Cancelled
+	list.SetLifecycle()
+}
+
 func (r *TaskWorkRepository) accessibleEnvironmentIDs(ctx context.Context, accountID, userID uuid.UUID, environmentID *uuid.UUID) (map[uuid.UUID]*domain.TaskEffectiveAccess, error) {
 	query := `SELECT environment.id FROM task_environments environment
 		WHERE environment.account_id=$1 AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
@@ -97,11 +103,7 @@ func (r *TaskWorkRepository) ListFoldersForActor(ctx context.Context, accountID,
 		if allowed[list.EnvironmentID] == nil || list.Permissions == nil || !list.Permissions.CanView {
 			return false
 		}
-		list.TaskCount, list.OpenTaskCount, list.CompletedTaskCount, list.CancelledTaskCount = 0, 0, 0, 0
-		if visible := counts[list.ID]; visible.Total > 0 {
-			list.TaskCount, list.OpenTaskCount = visible.Total, visible.Open
-			list.CompletedTaskCount, list.CancelledTaskCount = visible.Done, visible.Cancelled
-		}
+		applyActorTaskListCounts(list, counts[list.ID])
 		return true
 	}
 	filteredRoots := make([]*domain.TaskList, 0, len(roots))
@@ -124,7 +126,15 @@ func (r *TaskWorkRepository) ListFoldersForActor(ctx context.Context, accountID,
 			}
 		}
 		folder.Lists = filteredLists
+		folder.SetLifecycle()
 		filteredFolders = append(filteredFolders, folder)
+	}
+	visibleLists := append([]*domain.TaskList{}, filteredRoots...)
+	for _, folder := range filteredFolders {
+		visibleLists = append(visibleLists, folder.Lists...)
+	}
+	if err := r.applyContainerLifecycleFacts(ctx, accountID, userID, filteredFolders, visibleLists); err != nil {
+		return nil, nil, err
 	}
 	return filteredFolders, filteredRoots, nil
 }

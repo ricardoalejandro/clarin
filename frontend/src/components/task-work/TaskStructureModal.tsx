@@ -16,8 +16,9 @@ import { TaskRemoteFolderPicker } from './TaskRemoteHierarchyPicker'
 import TaskWorkWindowShell from './TaskWorkWindowShell'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { mergeCanonicalTaskFolderWorkflowDrafts, mergeCanonicalTaskStatusDrafts, taskStatusDraftChanged, taskStructureHasPendingChanges } from './taskStructureDraftState'
+import type { TaskContainerLifecycleMutation } from './taskHierarchyLazy'
 
-interface Props { open: boolean; environmentId: string; folders: TaskFolder[]; lists: TaskList[]; workflows: TaskWorkflow[]; users?: TaskAccountUser[]; storageScope?: string; onClose: () => void; onChanged: () => Promise<void> | void; onCreated?: (created: { type: 'folder'; folder: TaskFolder } | { type: 'list'; list: TaskList }) => void; onOperation?: (operationID: string, active: boolean) => void }
+interface Props { open: boolean; environmentId: string; folders: TaskFolder[]; lists: TaskList[]; workflows: TaskWorkflow[]; users?: TaskAccountUser[]; storageScope?: string; onClose: () => void; onChanged: (mutation?: TaskContainerLifecycleMutation) => Promise<void> | void; onCreated?: (created: { type: 'folder'; folder: TaskFolder } | { type: 'list'; list: TaskList }) => void; onOperation?: (operationID: string, active: boolean) => void }
 export interface TaskStructureModalHandle { requestClose: () => Promise<boolean> }
 const field = 'w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50'
 const categories: Array<{ value: TaskStatusCategory; label: string; description: string; color: string }> = [

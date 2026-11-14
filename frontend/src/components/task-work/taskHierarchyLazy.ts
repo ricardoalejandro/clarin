@@ -1,4 +1,5 @@
 import type { TaskFolder, TaskList } from '@/types/task'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 export type TaskHierarchyLoadPhase = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -13,6 +14,7 @@ export interface TaskContainerLifecycleMutation {
   id: string
   action: 'archived' | 'trashed'
   operationID?: string
+  hierarchyCounts?: TaskHierarchyCounts
 }
 
 type ActiveHierarchy = {

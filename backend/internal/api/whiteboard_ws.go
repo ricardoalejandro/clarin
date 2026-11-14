@@ -1023,7 +1023,7 @@ func (s *Server) resolveWhiteboardRealtimeAccess(ctx context.Context, principal 
 	if principal.UserID == nil || strings.TrimSpace(principal.SessionID) == "" || s.services == nil || s.services.Auth == nil {
 		return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, service.ErrAuthSessionExpired)
 	}
-	if err := s.services.Auth.ValidateSessionReadOnly(ctx, principal.SessionID, *principal.UserID); err != nil {
+	if err := s.services.Auth.ValidateSessionReadOnly(ctx, principal.SessionID, *principal.UserID, principal.AccountID); err != nil {
 		return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, err)
 	}
 	allowed, err := s.whiteboardModuleAllowed(ctx, *principal.UserID, principal.AccountID)
@@ -1200,9 +1200,40 @@ func (s *Server) writeWhiteboardSocket(
 	defer ticker.Stop()
 	authorizationTicker := time.NewTicker(15 * time.Second)
 	defer authorizationTicker.Stop()
+	var memberDeadline time.Time
+	checkMemberSession := func() bool {
+		if principal.UserID == nil || time.Now().Before(memberDeadline) {
+			return true
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		session, err := s.services.Auth.SessionSnapshot(ctx, principal.SessionID, *principal.UserID, principal.AccountID)
+		if err != nil {
+			writeWhiteboardSocketTermination(conn, whiteboardSocketTerminationForAuthorization(err))
+			return false
+		}
+		memberDeadline = session.Deadline()
+		return true
+	}
+	if !checkMemberSession() {
+		return
+	}
+	var sessionTimer *time.Timer
+	var sessionTime <-chan time.Time
+	if principal.UserID != nil {
+		sessionTimer = time.NewTimer(time.Until(memberDeadline))
+		sessionTime = sessionTimer.C
+		defer sessionTimer.Stop()
+	}
+	deliver := func(payload []byte) (bool, error) {
+		if !checkMemberSession() {
+			return false, service.ErrAuthSessionExpired
+		}
+		return deliverWhiteboardSocketPayload(conn, client, payload)
+	}
 	for {
 		if payload, ok := client.TakeBootstrap(); ok {
-			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			delivered, err := deliver(payload)
 			if err != nil {
 				return
 			}
@@ -1216,7 +1247,7 @@ func (s *Server) writeWhiteboardSocket(
 		// select still observes Done and ordinary data without busy waiting.
 		select {
 		case payload := <-client.Control():
-			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			delivered, err := deliver(payload)
 			if err != nil {
 				return
 			}
@@ -1229,7 +1260,7 @@ func (s *Server) writeWhiteboardSocket(
 		}
 		select {
 		case payload := <-client.Control():
-			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			delivered, err := deliver(payload)
 			if err != nil {
 				return
 			}
@@ -1238,7 +1269,7 @@ func (s *Server) writeWhiteboardSocket(
 				return
 			}
 		case payload := <-client.Send:
-			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			delivered, err := deliver(payload)
 			if err != nil {
 				return
 			}
@@ -1249,6 +1280,11 @@ func (s *Server) writeWhiteboardSocket(
 		case <-client.Done():
 			writeClosedWhiteboardClient(conn, client)
 			return
+		case <-sessionTime:
+			if !checkMemberSession() {
+				return
+			}
+			sessionTimer.Reset(time.Until(memberDeadline))
 		case <-ticker.C:
 			presenceCtx, presenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			presenceErr := s.refreshWhiteboardPresence(presenceCtx, client)
