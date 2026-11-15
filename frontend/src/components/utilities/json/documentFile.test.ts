@@ -50,3 +50,52 @@ it('counts UTF-8 bytes and physical lines, and slices giant view chunks across s
   expect(measureDocument('')).toEqual({ bytes: 0, lines: 1, longestLine: 0 })
   expect(getXmlDeclaredEncoding('<?xml-stylesheet encoding="ISO-8859-1"?><r/>')).toBeUndefined()
 })
+
+it('offers a legacy candidate for invalid UTF-8 and applies it only after an explicit choice', async () => {
+  const source = '<?xml version="1.0" encoding="UTF-8"?><r name="Peña">“café” €</r>'
+  const encoded = [...source].map(char => ({ '“': 0x93, '”': 0x94, '€': 0x80 })[char as '“' | '”' | '€'] ?? char.charCodeAt(0))
+  const bytes = Uint8Array.from(encoded)
+  const file = new File([bytes], 'legacy.xml')
+  const result = await readDocumentFile(file)
+  expect(result).toMatchObject({ ok: false, encodingConflict: true, suggestedEncoding: 'windows-1252' })
+  expect(result).not.toHaveProperty('source')
+  const accepted = await readDocumentFile(file, 'windows-1252')
+  expect(accepted).toMatchObject({ ok: true, source, encoding: 'windows-1252', warnings: [expect.stringContaining('el XML declara UTF-8')] })
+  expect(new Uint8Array(await originalDocumentAsset(file).arrayBuffer())).toEqual(bytes)
+})
+
+it('requires a choice when a legacy XML declaration would garble otherwise valid UTF-8', async () => {
+  const source = '<?xml version="1.0" encoding="ISO-8859-1"?><r>Peña, café, €</r>'
+  const file = new File([source], 'ambiguous.xml')
+  expect(await readDocumentFile(file)).toMatchObject({ ok: false, encodingConflict: true, suggestedEncoding: 'utf-8' })
+  expect(await readDocumentFile(file, 'utf-8')).toMatchObject({ ok: true, source, warnings: [expect.stringContaining('el XML declara ISO-8859-1')] })
+  const legacy = await readDocumentFile(file, 'iso-8859-1')
+  expect(legacy.ok && legacy.source.includes('PeÃ±a')).toBe(true)
+  expect(await readDocumentFile(new File(['<?xml version="1.0" encoding="ISO-8859-1"?><r>ASCII</r>'], 'ascii.xml'))).toMatchObject({ ok: true, encoding: 'iso-8859-1' })
+})
+
+it('checks UTF-8 beyond the header and handles a multibyte sequence across bounded decoder blocks', async () => {
+  const prefix = '<?xml version="1.0" encoding="windows-1252"?><r>'
+  const source = prefix + 'x'.repeat(65_535 - prefix.length) + 'ñ' + 'x'.repeat(80_000) + '😀</r>'
+  expect(await readDocumentFile(new File([source], 'distant.xml'))).toMatchObject({ ok: false, suggestedEncoding: 'utf-8' })
+  expect(await readDocumentFile(new File([source], 'distant.xml'), 'utf-8')).toMatchObject({ ok: true, source })
+})
+
+it('reports a replacement character already encoded in the original without rewriting or promising recovery', async () => {
+  const source = '<?xml version="1.0" encoding="UTF-8"?><r>Shop � ñ 😀</r>'
+  const file = new File([source], 'replacement.xml')
+  const result = await readDocumentFile(file)
+  expect(result).toMatchObject({ ok: true, source, warnings: [expect.stringContaining('ya contiene caracteres de sustitución')] })
+  expect(result).not.toHaveProperty('suggestedEncoding')
+  expect(await originalDocumentAsset(file).text()).toBe(source)
+  expect(await readDocumentFile(new File(['<r>Peña, 中文, 😀</r>'], 'unicode.xml'))).toMatchObject({ ok: true, source: '<r>Peña, 中文, 😀</r>' })
+  expect(await readDocumentFile(new File(['<r>Peña, 中文, 😀</r>'], 'unicode.xml'))).not.toHaveProperty('warnings')
+})
+
+it('keeps BOM conflicts explicit and does not recommend a single-byte encoding for binary data', async () => {
+  const source = '<?xml version="1.0" encoding="ISO-8859-1"?><r>ñ</r>'
+  const file = new File(['\uFEFF', source], 'signature.xml')
+  expect(await readDocumentFile(file)).toMatchObject({ ok: false, encodingConflict: true, suggestedEncoding: 'utf-8' })
+  expect(await readDocumentFile(file, 'utf-8')).toMatchObject({ ok: true, source, warnings: [expect.stringContaining('el XML declara ISO-8859-1')] })
+  expect(await readDocumentFile(new File([Uint8Array.from([0, 0xff, 0xfe, 0])], 'binary.dat'))).not.toHaveProperty('suggestedEncoding')
+})

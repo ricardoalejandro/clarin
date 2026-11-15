@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useRef, useState, type Dispatch, 
 
 export type UtilitySlotValue = Blob | string
 export type UtilitySlotSource = UtilitySlotValue | (() => UtilitySlotValue)
+export interface UtilityDisplayStatus { lightPanels: string[]; chunkedPanels: string[] }
 
 export interface UtilityDocumentSession {
   documentId: string
@@ -16,6 +17,7 @@ export interface UtilityDocumentSession {
   getSlot: (name: string) => Blob | undefined
   slotNames?: () => string[]
   registerBeforeDeactivate?: (callback: () => void) => () => void
+  reportDisplayStatus?: (status: UtilityDisplayStatus) => void
   flush: () => Promise<boolean>
 }
 

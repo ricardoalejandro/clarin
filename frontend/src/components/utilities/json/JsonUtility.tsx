@@ -13,7 +13,8 @@ import {
 } from './editorWorkspaceState'
 import { useEditorDocuments, type DocumentSnapshot } from './useEditorDocuments'
 import { JSON_INPUT_LIMIT, JSON_REPAIR_LIMIT, measureDocument } from './jsonLimits'
-import type { DocumentWorkerRequest, DocumentWorkerResponse, JsonOperation, JsonRequest } from './jsonOperations'
+import type { DocumentFileResult, DocumentWorkerRequest, DocumentWorkerResponse, JsonOperation, JsonRequest } from './jsonOperations'
+import { DocumentImportReview } from './DocumentImportReview'
 import { DOCUMENT_ENCODINGS, originalDocumentAsset, prepareUtf8XmlDownload } from './documentFile'
 import { useDocumentSearch } from './useDocumentSearch'
 import type { DocumentMatch } from './documentSearch'
@@ -62,7 +63,7 @@ function positionMenu(anchor: HTMLElement, menu: HTMLDivElement | null) {
 
 interface Notice { message: string; error?: boolean; warnings?: string[] }
 interface ProposedEdit extends DocumentSnapshot { before: string; after: string; revision: number }
-interface Work { panel: Panel; worker: Worker; timer: number }
+interface Work { panel: Panel; kind: DocumentWorkerRequest['kind']; worker: Worker; timer: number }
 type EditorAction = JsonToolbarAction | 'repair' | 'escape' | 'unescape' | 'clear' | 'original' | 'preferences'
 interface EditorActionDefinition { label: string; icon: LucideIcon; title?: string; disabled?: boolean; pressed?: boolean; run: () => void }
 
@@ -104,6 +105,7 @@ export default function JsonUtility() {
   const revealSequence = useRef(0)
   const [encodingChoice, setEncodingChoice] = useState('utf-8')
   const [pendingEncoding, setPendingEncoding] = useState<{ panel: Panel; file: File }>()
+  const [pendingImport, setPendingImport] = useState<{ panel: Panel; file: File; result: Extract<DocumentFileResult, { ok: true }>; revision: number }>()
   const originals = useRef<Partial<Record<Panel, Blob>>>({})
   const [originalNames, setOriginalNames] = useJsonPreference<Partial<Record<Panel, string>>>('json.originalNames', {})
   const [initialViews] = useState(() => safeJsonViews(utility?.initialState['json.views']))
@@ -210,7 +212,9 @@ export default function JsonUtility() {
             timers.add(timer)
             worker.onmessage = event => { clearTimeout(timer); timers.delete(timer); worker.terminate(); workers.delete(worker); resolve(event.data) }
             worker.onerror = () => { clearTimeout(timer); timers.delete(timer); worker.terminate(); workers.delete(worker); reject(new Error('read')) }
-            worker.postMessage({ kind: 'read-file', file: new File([blob], `panel-${panel}.txt`) })
+            // Editable slots are always UTF-8, independently of the declaration
+            // retained inside an imported XML. Original bytes have their own slot.
+            worker.postMessage({ kind: 'read-file', file: new File([blob], `panel-${panel}.txt`), encoding: 'utf-8' })
           })
           if (cancelled || deactivated.current || result.kind !== 'read-file' || runtime.model.getVersionId() !== revision) continue
           if (!result.result.ok) throw new Error(result.result.message)
@@ -306,8 +310,15 @@ export default function JsonUtility() {
   useLayoutEffect(() => { editor.setTheme(dark ? 'vs-dark' : 'vs') }, [dark])
   useLayoutEffect(registerDocumentCompletions, [])
   useLayoutEffect(() => {
-    for (const panel of panels) documents.syncLanguage(panel, formats[panel], states[panel].reduced || states[panel].plainText)
+    for (const panel of panels) documents.syncLanguage(panel, formats[panel], states[panel])
   })
+
+  useEffect(() => {
+    utility?.reportDisplayStatus?.({
+      lightPanels: panels.filter(panel => states[panel].length > 0 && states[panel].reduced && !states[panel].huge),
+      chunkedPanels: panels.filter(panel => states[panel].length > 0 && states[panel].huge),
+    })
+  }, [utility, states])
 
   useEffect(() => {
     alive.current = true
@@ -342,7 +353,7 @@ export default function JsonUtility() {
         if (model.getVersionId() === revision) callback()
       }
       const bytes = request.kind === 'read-file' ? request.file.size : request.source.length
-      task.current = { panel, worker, timer: window.setTimeout(() => {
+      task.current = { panel, kind: request.kind, worker, timer: window.setTimeout(() => {
         finish(() => announce(panel, 'El documento tardó demasiado. Puedes reintentar o procesar una parte más pequeña.', true))
       }, bytes >= LARGE_DOCUMENT ? 60_000 : 30_000) }
       worker.onmessage = (event: MessageEvent<DocumentWorkerResponse>) => finish(() => receive(event.data))
@@ -440,6 +451,25 @@ export default function JsonUtility() {
     })
   }
 
+  function applyFile(candidate: NonNullable<typeof pendingImport>) {
+    const { panel, file, result, revision } = candidate
+    if (runtimes.current[panel]?.model.getVersionId() !== revision) {
+      setPendingImport(undefined)
+      setPendingEncoding({ panel, file })
+      announce(panel, 'El panel cambió durante la lectura. Se conservó tu edición; vuelve a probar la codificación.', true)
+      return
+    }
+    // Queue opaque bytes before model changes can queue the editable text.
+    originals.current[panel] = file
+    utility?.setSlot(`original-${panel}`, originalDocumentAsset(file))
+    documents.replace(panel, { ...result, formatHint: result.syntaxHint }, formats[panel])
+    setOriginalNames(current => ({ ...current, [panel]: file.name }))
+    setPendingEncoding(undefined)
+    setPendingImport(undefined)
+    if (result.syntaxHint) setFormats(current => ({ ...current, [panel]: result.syntaxHint! }))
+    announce(panel, result.converted ? `Archivo abierto como ${result.encoding}. La descarga editada usará UTF-8; el original se conserva.` : 'Archivo local abierto.', false, result.warnings)
+  }
+
   function openFile(file: File | undefined, encoding?: string, panel = fileTarget.current) {
     if (!file) return
     if (file.size > JSON_INPUT_LIMIT) {
@@ -450,18 +480,27 @@ export default function JsonUtility() {
       if (response.kind !== 'read-file') return
       const { result } = response
       if (!result.ok) {
-        if (result.encodingConflict) setPendingEncoding({ panel, file })
+        if (result.encodingConflict) {
+          setPendingEncoding({ panel, file })
+          setEncodingChoice(result.suggestedEncoding ?? 'utf-8')
+        }
         announce(panel, result.message, true)
         return
       }
-      documents.replace(panel, { ...result, formatHint: result.syntaxHint }, formats[panel])
-      originals.current[panel] = file
-      utility?.setSlot(`original-${panel}`, originalDocumentAsset(file))
-      setOriginalNames(current => ({ ...current, [panel]: file.name }))
-      setPendingEncoding(undefined)
-      if (result.syntaxHint) setFormats(current => ({ ...current, [panel]: result.syntaxHint! }))
-      announce(panel, result.converted ? `Archivo abierto como ${result.encoding}. La descarga editada usará UTF-8; el original se conserva.` : 'Archivo local abierto.')
+      const candidate = { panel, file, result, revision: runtimes.current[panel]!.model.getVersionId() }
+      if (encoding || result.converted || result.warnings?.length) setPendingImport(candidate)
+      else applyFile(candidate)
     })
+  }
+
+  function cancelFileImport(panel: Panel) {
+    if (task.current?.kind === 'read-file' && task.current.panel === panel) {
+      stop()
+      setBusy(null)
+    }
+    setPendingImport(undefined)
+    setPendingEncoding(undefined)
+    announce(panel, 'Apertura cancelada. Se conservó el documento.')
   }
 
   function selectFormat(next: DocumentFormat) {
@@ -657,9 +696,12 @@ export default function JsonUtility() {
       {pendingEncoding && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-xs" role="group" aria-label="Elegir codificación del archivo">
         <span className="min-w-0 break-all">Se conservó el documento. Abrir {pendingEncoding.file.name} como:</span>
         <select aria-label="Codificación del archivo" className={selectClass} value={encodingChoice} onChange={event => setEncodingChoice(event.target.value)}>{DOCUMENT_ENCODINGS.map(encoding => <option key={encoding} value={encoding}>{encoding.toUpperCase()}</option>)}</select>
-        <Action label="Abrir con esta codificación" disabled={working} onClick={() => openFile(pendingEncoding.file, encodingChoice, pendingEncoding.panel)}>Abrir</Action>
-        <Action label="Cancelar apertura" onClick={() => setPendingEncoding(undefined)}><X size={15} aria-hidden /></Action>
+        <Action label="Abrir con esta codificación" disabled={working} onClick={() => openFile(pendingEncoding.file, encodingChoice, pendingEncoding.panel)}>Probar</Action>
+        <Action label="Cancelar apertura" onClick={() => cancelFileImport(pendingEncoding.panel)}><X size={15} aria-hidden /></Action>
       </div>}
+      {pendingImport && <DocumentImportReview fileName={pendingImport.file.name} source={pendingImport.result.source} encoding={pendingImport.result.encoding ?? 'utf-8'} warnings={pendingImport.result.warnings}
+        onApply={() => applyFile(pendingImport)} onCancel={() => cancelFileImport(pendingImport.panel)}
+        onChooseEncoding={() => { setEncodingChoice(pendingImport.result.encoding ?? 'utf-8'); setPendingEncoding({ panel: pendingImport.panel, file: pendingImport.file }); setPendingImport(undefined) }} />}
       {searchOpen && !diff && <div className="shrink-0 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-1 text-xs">
         <div className="flex min-w-0 flex-wrap items-center gap-1" role="search" aria-label="Buscar en todo el documento">
           <Search size={15} aria-hidden />
@@ -734,7 +776,7 @@ export default function JsonUtility() {
         </div> : !diff && <span className="shrink-0 px-1" title={`Panel ${active.toUpperCase()}`}>{active.toUpperCase()}</span>}
         <span role="status" aria-live="polite" className="min-w-0 flex-1 truncate px-1" title={activeNotice?.message || 'Procesamiento local · Recomendado hasta 30 MiB; máximo 60 MiB por documento.'}>
           {diff ? diffStatus : busy ? <span className="inline-flex items-center gap-1"><Loader2 size={12} className="motion-safe:animate-spin" aria-hidden /> Procesando {busy.toUpperCase()}…</span>
-            : activeNotice?.error ? 'Revisa el aviso' : activeNotice?.message || (state.huge ? 'Tramos editables · Buscar recorre todo el documento' : state.reduced ? 'Documento grande · 60 MiB máx.' : 'Local · 30 MiB recomendado · 60 MiB máx.')}
+            : activeNotice?.error ? 'Revisa el aviso' : activeNotice?.message || (state.huge ? 'Tramos editables · Buscar recorre todo el documento' : state.reduced ? 'Documento grande · Resaltado básico' : 'Local · 30 MiB recomendado · 60 MiB máx.')}
         </span>
         {busy && <Action label="Cancelar operación" className="px-0" onClick={() => { const panel = busy; stop(); setBusy(null); announce(panel, 'Operación cancelada.') }}><X size={14} aria-hidden /></Action>}
         {pendingDownload && !diff && <Action label="Descargar resultado" className="px-0" onClick={() => download(pendingDownload.source, pendingDownload.extension)}><ArrowDownToLine size={14} aria-hidden /></Action>}

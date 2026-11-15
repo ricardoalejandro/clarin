@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { editor, MarkerSeverity, Range } from 'monaco-editor'
-import { documentLanguage, LARGE_DOCUMENT, LONG_LINE, type DocumentFormat, type Panel } from './editorWorkspaceState'
+import { documentLanguage, LARGE_DOCUMENT, LONG_LINE, type DocumentFormat, type DocumentSyntaxState, type Panel } from './editorWorkspaceState'
 import { type DocumentMetrics } from './jsonLimits'
 import { DocumentBuffer } from './documentBuffer'
 
@@ -142,10 +142,10 @@ export function useEditorDocuments(onChange: (panel: Panel, formatHint?: Documen
     return runtime?.versions.get(runtime.model.getAlternativeVersionId())?.raw ?? runtime?.buffer.snapshot() ?? ''
   }
 
-  function syncLanguage(panel: Panel, format: DocumentFormat, reduced: boolean) {
+  function syncLanguage(panel: Panel, format: DocumentFormat, state: DocumentSyntaxState) {
     const model = runtimes.current[panel]?.model
     if (!model) return
-    const language = documentLanguage(format, reduced)
+    const language = documentLanguage(format, state)
     if (model.getLanguageId() !== language) editor.setModelLanguage(model, language)
   }
 

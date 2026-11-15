@@ -10,6 +10,7 @@ export const DEFAULT_FONT = 14
 export const MIN_FONT = 10
 export const MAX_FONT = 70
 export const TRAM_LENGTH = 24_000
+export const LARGE_JSON_LANGUAGE = 'clarin-json-large'
 
 export interface DocumentRevealTarget { offset: number; length: number; nonce: number }
 
@@ -53,8 +54,13 @@ export function acceptsEditorZoom(event: Pick<WheelEvent, 'ctrlKey' | 'altKey' |
   return focused && event.cancelable && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.deltaY !== 0
 }
 
-export function documentLanguage(format: DocumentFormat, reduced: boolean) {
-  return reduced ? 'plaintext' : format === 'xml' ? 'xml' : 'json'
+export interface DocumentSyntaxState { reduced: boolean; huge: boolean; plainText: boolean }
+
+/** Size reduces language services, not syntax colors. Long-line chunks remain plain. */
+export function documentLanguage(format: DocumentFormat, state: DocumentSyntaxState) {
+  if (state.plainText || state.huge) return 'plaintext'
+  if (format === 'xml') return 'xml'
+  return state.reduced ? LARGE_JSON_LANGUAGE : 'json'
 }
 
 export function repairPreview(original: string, proposal: string) {

@@ -26,8 +26,8 @@ export interface JsonRequest {
 }
 
 export type DocumentFileResult =
-  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: JsonMode | 'xml'; xmlEncoding?: string; encoding?: string; converted?: boolean }
-  | { ok: false; message: string; encodingConflict?: true }
+  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: JsonMode | 'xml'; xmlEncoding?: string; encoding?: string; converted?: boolean; warnings?: string[] }
+  | { ok: false; message: string; encodingConflict?: true; suggestedEncoding?: string }
 
 export type DocumentWorkerRequest =
   | ({ kind: 'transform' } & JsonRequest)

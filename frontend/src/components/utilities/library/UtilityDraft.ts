@@ -1,4 +1,4 @@
-import type { UtilityDocumentSession, UtilitySlotSource, UtilitySlotValue } from './UtilityDocumentContext'
+import type { UtilityDisplayStatus, UtilityDocumentSession, UtilitySlotSource, UtilitySlotValue } from './UtilityDocumentContext'
 import { jsonRequest, libraryRequest, minimalTextEdit, operationId, readDocumentSlot, type UtilityDocument, type UtilityContent, UtilityRequestError } from './libraryApi'
 
 export type SavePhase = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
@@ -19,6 +19,7 @@ export class UtilityDraft {
   document: UtilityDocument
   phase: SavePhase = 'saved'
   error = ''
+  displayStatus?: UtilityDisplayStatus
   private slots = new Map<string, SlotDraft>()
   private configRevision = 0
   private savedConfigRevision = 0
@@ -56,6 +57,10 @@ export class UtilityDraft {
       },
       slotNames: () => [...new Set([...this.document.slots.map(slot => slot.slot), ...this.slots.keys()])],
       registerBeforeDeactivate: callback => { this.beforeDeactivate.add(callback); return () => { this.beforeDeactivate.delete(callback) } },
+      reportDisplayStatus: status => {
+        if (this.disposed || JSON.stringify(this.displayStatus) === JSON.stringify(status)) return
+        this.displayStatus = status; this.notify()
+      },
       flush: () => this.flush(),
     }
   }
@@ -96,7 +101,7 @@ export class UtilityDraft {
   private async save() {
     this.phase = 'saving'; this.notify()
     try {
-      while (this.dirty && !this.disposed) {
+      saveDraft: while (this.dirty && !this.disposed) {
         if (this.configRevision !== this.savedConfigRevision) {
           const pending = this.pendingConfig ??= { revision: this.configRevision, config: { ...this.document.config }, baseVersion: this.document.version, operation: operationId() }
           const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { ...jsonRequest('PATCH', { base_version: pending.baseVersion, operation_id: pending.operation, config: pending.config }), signal: this.controller.signal }).catch(error => {
@@ -106,8 +111,14 @@ export class UtilityDraft {
           if (this.disposed) return false
           this.accept(result.document); this.savedConfigRevision = pending.revision; this.pendingConfig = undefined
         }
-        for (const [name, slot] of this.slots) {
+        // An import must never persist the editable interpretation before its opaque original.
+        const slots = [...this.slots].sort(([a], [b]) => Number(/^original-[ab]$/.test(b)) - Number(/^original-[ab]$/.test(a)))
+        for (const [name, slot] of slots) {
+          // A previous upload may have yielded while an import replaced a lazy
+          // editor source. Rebuild the order before reading that stale provider.
+          if (this.slots.get(name) !== slot) continue saveDraft
           if (slot.saved === slot.revision || this.disposed) continue
+          if (!/^original-[ab]$/.test(name) && [...this.slots].some(([candidate, draft]) => /^original-[ab]$/.test(candidate) && draft.saved !== draft.revision)) continue saveDraft
           let pending = this.pendingSlots.get(name)
           if (!pending) {
             const value = this.value(slot.source)
