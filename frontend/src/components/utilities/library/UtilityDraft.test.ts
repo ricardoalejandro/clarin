@@ -76,6 +76,75 @@ describe('utility autosave session', () => {
     expect(await draft.session.getSlot('panel-a')!.text()).toBe('my draft')
   })
 
+  it.each([400, 401, 403, 404, 413, 422])('saves corrected key preferences after a definitive HTTP %s rejection', async status => {
+    const document = { ...base(), type: 'criptografia' as const }
+    const draft = new UtilityDraft(document, vi.fn())
+    draft.session.setState({ key_id: 'selected-key', active: 'hash' })
+    request.mockRejectedValueOnce(new UtilityRequestError('Selección rechazada', status))
+    expect(await draft.flush()).toBe(false)
+    expect(draft.dirty).toBe(true)
+    expect(draft.document.config).toMatchObject({ key_id: 'selected-key', active: 'hash' })
+    const rejected = JSON.parse(request.mock.calls[0][1]!.body as string)
+    // The metadata/WS reconciliation has confirmed that the selected key was deleted.
+    draft.session.setState({ key_id: '', hash_algorithm: 'SHA-512' })
+    request.mockResolvedValueOnce({ document: { ...document, version: 2 } })
+    expect(await draft.flush()).toBe(true)
+    const corrected = JSON.parse(request.mock.calls[1][1]!.body as string)
+    expect(corrected.operation_id).not.toBe(rejected.operation_id)
+    expect(corrected).toMatchObject({ base_version: 1, config: { key_id: '', active: 'hash', hash_algorithm: 'SHA-512' } })
+    expect(draft.phase).toBe('saved')
+    expect(draft.dirty).toBe(false)
+  })
+
+  it.each([undefined, 408, 429, 503])('retains the original config operation and payload after ambiguous status %s, then saves newer preferences', async status => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setState({ key_id: 'selected-key' })
+    request.mockRejectedValueOnce(status === undefined ? new TypeError('Conexión interrumpida') : new UtilityRequestError('Reintenta', status))
+    expect(await draft.flush()).toBe(false)
+    const original = request.mock.calls[0][1]!.body
+    draft.session.setState({ key_id: '', active: 'hash' })
+    request.mockResolvedValueOnce({ document: { ...base(), version: 2 } })
+    request.mockResolvedValueOnce({ document: { ...base(), version: 3 } })
+    expect(await draft.flush()).toBe(true)
+    expect(request.mock.calls[1][1]!.body).toBe(original)
+    const newer = JSON.parse(request.mock.calls[2][1]!.body as string)
+    expect(newer).toMatchObject({ base_version: 2, config: { key_id: '', active: 'hash' } })
+    expect(newer.operation_id).not.toBe(JSON.parse(original as string).operation_id)
+    expect(draft.dirty).toBe(false)
+  })
+
+  it('uses corrected content after a definitive quota rejection without losing the editable draft', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setSlot('panel-a', 'rejected content')
+    request.mockRejectedValueOnce(new UtilityRequestError('Sin espacio', 413))
+    expect(await draft.flush()).toBe(false)
+    const oldOperation = (request.mock.calls[0][1]!.headers as Record<string, string>)['X-Operation-Id']
+    draft.session.setSlot('panel-a', 'smaller')
+    request.mockResolvedValueOnce({ document: { ...base(), version: 2 }, content: { slot: 'panel-a', version: 1, bytes: 7 } })
+    expect(await draft.flush()).toBe(true)
+    expect((request.mock.calls[1][1]!.headers as Record<string, string>)['X-Operation-Id']).not.toBe(oldOperation)
+    expect(await (request.mock.calls[1][1]!.body as Blob).text()).toBe('smaller')
+    expect(await draft.session.getSlot('panel-a')!.text()).toBe('smaller')
+    expect(draft.dirty).toBe(false)
+  })
+
+  it('replays an ambiguous content upload before saving its newer replacement', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setSlot('panel-a', 'first')
+    request.mockRejectedValueOnce(new UtilityRequestError('Respuesta perdida', 503))
+    expect(await draft.flush()).toBe(false)
+    const original = request.mock.calls[0][1]!
+    draft.session.setSlot('panel-a', 'second')
+    request.mockResolvedValueOnce({ document: { ...base(), version: 2 }, content: { slot: 'panel-a', version: 1, bytes: 5 } })
+    request.mockResolvedValueOnce({ document: { ...base(), version: 3 }, content: { slot: 'panel-a', version: 2, bytes: 6 } })
+    expect(await draft.flush()).toBe(true)
+    expect(request.mock.calls[1][1]!.headers).toEqual(original.headers)
+    expect(request.mock.calls[1][1]!.body).toBe(original.body)
+    expect((request.mock.calls[2][1]!.headers as Record<string, string>)['If-Match']).toBe('1')
+    expect(await (request.mock.calls[2][1]!.body as Blob).text()).toBe('second')
+    expect(draft.dirty).toBe(false)
+  })
+
   it('does not lose newer edits that arrive during a save', async () => {
     const draft = new UtilityDraft(base(), vi.fn())
     draft.session.setSlot('panel-a', 'first')

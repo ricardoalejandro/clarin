@@ -7,6 +7,13 @@ type SaveResult = { document: UtilityDocument; content: UtilityContent }
 type PendingConfig = { revision: number; baseVersion: number; operation: string; config: Record<string, unknown> }
 type PendingSlot = { revision: number; baseVersion: number; operation: string; value: UtilitySlotValue; blob?: Blob; edit: ReturnType<typeof minimalTextEdit> | undefined }
 
+function definitivelyRejected(error: unknown) {
+  // Timeouts/rate limits remain retryable with the same identity; conflicts keep
+  // their explicit recovery flow. Other 4xx responses rejected the mutation.
+  return error instanceof UtilityRequestError && error.status !== undefined
+    && error.status >= 400 && error.status < 500 && ![408, 409, 429].includes(error.status)
+}
+
 /** Owns one document's draft. Nothing is written to browser persistence. */
 export class UtilityDraft {
   document: UtilityDocument
@@ -92,7 +99,10 @@ export class UtilityDraft {
       while (this.dirty && !this.disposed) {
         if (this.configRevision !== this.savedConfigRevision) {
           const pending = this.pendingConfig ??= { revision: this.configRevision, config: { ...this.document.config }, baseVersion: this.document.version, operation: operationId() }
-          const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { ...jsonRequest('PATCH', { base_version: pending.baseVersion, operation_id: pending.operation, config: pending.config }), signal: this.controller.signal })
+          const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { ...jsonRequest('PATCH', { base_version: pending.baseVersion, operation_id: pending.operation, config: pending.config }), signal: this.controller.signal }).catch(error => {
+            if (definitivelyRejected(error)) this.pendingConfig = undefined
+            throw error
+          })
           if (this.disposed) return false
           this.accept(result.document); this.savedConfigRevision = pending.revision; this.pendingConfig = undefined
         }
@@ -109,11 +119,16 @@ export class UtilityDraft {
           if (edit === null) { slot.saved = revision; this.pendingSlots.delete(name); continue }
           const patch = edit && edit.text.length < 1_000_000 && typeof value === 'string' && edit.text.length < value.length / 2
             ? jsonRequest('PATCH', { slot: name, base_version: pending.baseVersion, operation_id: pending.operation, edits: [edit] }) : null
-          if (patch && new Blob([patch.body as string]).size <= 1024 * 1024) {
-            result = await libraryRequest<SaveResult>(`/documents/${this.document.id}/changes`, { ...patch, signal: this.controller.signal })
-          } else {
-            const blob = pending.blob ??= this.blob(value)
-            result = await libraryRequest<SaveResult>(`/documents/${this.document.id}/content/${encodeURIComponent(name)}`, { method: 'PUT', body: blob, headers: { 'Content-Type': blob.type || 'application/octet-stream', 'If-Match': String(pending.baseVersion), 'X-Operation-Id': pending.operation }, signal: this.controller.signal })
+          try {
+            if (patch && new Blob([patch.body as string]).size <= 1024 * 1024) {
+              result = await libraryRequest<SaveResult>(`/documents/${this.document.id}/changes`, { ...patch, signal: this.controller.signal })
+            } else {
+              const blob = pending.blob ??= this.blob(value)
+              result = await libraryRequest<SaveResult>(`/documents/${this.document.id}/content/${encodeURIComponent(name)}`, { method: 'PUT', body: blob, headers: { 'Content-Type': blob.type || 'application/octet-stream', 'If-Match': String(pending.baseVersion), 'X-Operation-Id': pending.operation }, signal: this.controller.signal })
+            }
+          } catch (error) {
+            if (definitivelyRejected(error)) this.pendingSlots.delete(name)
+            throw error
           }
           if (this.disposed) return false
           this.accept(result.document)
