@@ -18,6 +18,7 @@ import { DocumentImportReview } from './DocumentImportReview'
 import { DOCUMENT_ENCODINGS, originalDocumentAsset, prepareUtf8XmlDownload } from './documentFile'
 import { useDocumentSearch } from './useDocumentSearch'
 import type { DocumentMatch } from './documentSearch'
+import type { DocumentFoldingStatus } from './documentFolding'
 import { useUtilityDocument, useUtilityDocumentState } from '../library/UtilityDocumentContext'
 import { editorViewsNeedCompaction, projectEditorViewState, safeJsonViews, validJsonPreference } from './editorPreferences'
 import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu'
@@ -26,7 +27,7 @@ import '../utility-density.css'
 import './jsonWorkspace.css'
 
 const button = 'utility-control inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--editor-ink)] outline-none hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-40'
-const select = 'utility-field rounded-md border border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-xs text-[var(--editor-ink)]'
+const select = 'utility-field json-editor-field rounded-md border border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-xs text-[var(--editor-ink)]'
 const menuClass = 'fixed inset-auto m-0 max-h-[calc(100dvh-1rem)] w-64 max-w-[calc(100vw-1rem)] overflow-auto rounded-lg border border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-[var(--editor-ink)] shadow-xl'
 const panels: Panel[] = ['a', 'b']
 
@@ -101,6 +102,7 @@ export default function JsonUtility() {
   const [chunks, setChunks] = useJsonPreference<Record<Panel, number>>('json.chunks', { a: 0, b: 0 })
   const [searchOpen, setSearchOpen] = useState(false)
   const searchInput = useRef<HTMLInputElement>(null)
+  const [folding, setFolding] = useState<Partial<Record<Panel, DocumentFoldingStatus>>>({})
   const [revealMatch, setRevealMatch] = useState<{ panel: Panel; offset: number; length: number; nonce: number }>()
   const revealSequence = useRef(0)
   const [encodingChoice, setEncodingChoice] = useState('utf-8')
@@ -317,8 +319,9 @@ export default function JsonUtility() {
     utility?.reportDisplayStatus?.({
       lightPanels: panels.filter(panel => states[panel].length > 0 && states[panel].reduced && !states[panel].huge),
       chunkedPanels: panels.filter(panel => states[panel].length > 0 && states[panel].huge),
+      folding,
     })
-  }, [utility, states])
+  }, [utility, states, folding])
 
   useEffect(() => {
     alive.current = true
@@ -705,7 +708,7 @@ export default function JsonUtility() {
       {searchOpen && !diff && <div className="shrink-0 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-1 text-xs">
         <div className="flex min-w-0 flex-wrap items-center gap-1" role="search" aria-label="Buscar en todo el documento">
           <Search size={15} aria-hidden />
-          <input ref={searchInput} aria-label="Texto para buscar en todo el documento" maxLength={1024} value={search.query} onChange={event => search.setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false); if (event.key === 'Enter' && search.matches[0]) showMatch(search.matches[0]) }} className="utility-field min-w-0 flex-1 rounded-md border border-[var(--editor-border)] bg-[var(--editor-canvas)] px-2 text-[var(--editor-ink)] outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Busca en el documento completo…" />
+          <input ref={searchInput} aria-label="Texto para buscar en todo el documento" maxLength={1024} value={search.query} onChange={event => search.setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false); if (event.key === 'Enter' && search.matches[0]) showMatch(search.matches[0]) }} className="utility-field json-editor-field min-w-0 flex-1 rounded-md border border-[var(--editor-border)] bg-[var(--editor-canvas)] px-2 text-[var(--editor-ink)] outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Busca en el documento completo…" />
           <Action label="Distinguir mayúsculas" aria-pressed={search.caseSensitive} onClick={() => search.setCaseSensitive(value => !value)}>Aa</Action>
           <span role="status">{search.working || search.pending ? 'Buscando…' : search.error || (search.query ? `${search.matches.length}${search.nextOffset !== null ? '+' : ''} coincidencias` : 'Texto literal · Todo el documento')}</span>
           <Action label="Cerrar búsqueda" onClick={() => { setSearchOpen(false); runtimes.current[active]?.view?.focus() }}><X size={15} aria-hidden /></Action>
@@ -736,6 +739,7 @@ export default function JsonUtility() {
             </div>}
             <DocumentCodeEditor id={`document-editor-${panel}`} label={label} model={model} visible={shown}
               font={font} wrap={wrap[panel]} reduced={data.reduced} chunk={chunk} revision={data.revision} onZoom={zoom}
+              onFoldingStatus={status => setFolding(current => JSON.stringify(current[panel]) === JSON.stringify(status) ? current : { ...current, [panel]: status })}
               onToggleWrap={() => toggleWrap(panel)}
               onFind={find} reveal={revealMatch?.panel === panel ? revealMatch : undefined}
               initialViewState={savedViews.current[panel]}

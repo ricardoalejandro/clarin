@@ -81,6 +81,13 @@ func utilityMigrations() []string {
 		`ALTER TABLE utility_vault ADD COLUMN IF NOT EXISTS rotation_attempts INT NOT NULL DEFAULT 0`,
 		`ALTER TABLE utility_vault ADD COLUMN IF NOT EXISTS rotation_error TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE utility_vault ADD COLUMN IF NOT EXISTS rotation_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+		// Existing entries have no provable document origin. Keep them intact;
+		// recovery and any explicitly requested purge are separate operations.
+		`ALTER TABLE utility_vault ADD COLUMN IF NOT EXISTS document_id UUID`,
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='utility_vault'::regclass AND conname='utility_vault_document_fk') THEN
+		 ALTER TABLE utility_vault ADD CONSTRAINT utility_vault_document_fk FOREIGN KEY(account_id,owner_id,document_id)
+		 REFERENCES utility_documents(account_id,owner_id,id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED; END IF; END $$`,
+		`CREATE INDEX IF NOT EXISTS utility_vault_document_recent ON utility_vault(account_id,owner_id,document_id,created_at DESC,id DESC)`,
 	}
 }
 

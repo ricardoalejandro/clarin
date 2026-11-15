@@ -17,6 +17,7 @@ import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/ope
 import { utilities, utilityById, type Utility } from '../catalog'
 import { UtilityWorkspace } from '../UtilityWorkspace'
 import { UtilityDocumentProvider } from './UtilityDocumentContext'
+import { duplicateCryptoDocument } from '../crypto/duplicateCryptoDocument'
 import { UtilityDraft } from './UtilityDraft'
 import { DocumentModeIndicator } from './DocumentModeIndicator'
 import { activeTabScrollLeft, libraryDrawerBounds, libraryLayout, librarySaveStatus } from './libraryLayout'
@@ -212,10 +213,14 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   useEffect(() => {
     const controller = new AbortController()
     const release = subscribeWebSocket(message => {
-      const event = message as { event?: string; type?: string; data?: { kind?: string; id?: string } }
+      const event = message as { event?: string; type?: string; data?: { kind?: string; id?: string; document_id?: string } }
       if ((event.event || event.type) !== 'utility_updated' || !event.data) return
       const { id, kind } = event.data
       setReload(value => value + 1)
+      if (kind === 'vault_deleted' && id && event.data.document_id) {
+        void sessions.current.get(event.data.document_id)?.session.reconcileVaultDeletion?.(id)
+        return
+      }
       if (kind === 'folder') {
         void libraryRequest<{ folders: UtilityFolder[] }>('/folders', { signal: controller.signal }).then(result => { if (!controller.signal.aborted) setFolders(result.folders) }).catch(() => {})
       }
@@ -232,7 +237,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       void libraryRequest<{ document: UtilityDocument }>(`/documents/${id}`, { signal: controller.signal }).then(result => {
         if (controller.signal.aborted || !mounted.current) return
         const draft = sessions.current.get(id)
-        if (!draft || draft.dirty || result.document.version <= draft.document.version) return
+        if (!draft || draft.dirty || draft.reconcilingVault || result.document.version <= draft.document.version) return
         draft.dispose(); sessions.current.delete(id)
         setDocuments(current => ({ ...current, [id]: result.document }))
         if (workspaceRef.current.active_id === id) { makeDraft(result.document); setEditorGeneration(value => value + 1) }
@@ -566,7 +571,9 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     try {
       // A conflict must still allow preserving the user's unsaved work as a copy.
       if (draft.phase !== 'conflict' && draft.phase !== 'error' && !(await draft.flush())) return
-      const result = await libraryRequest<{ document: UtilityDocument }>('/documents', jsonRequest('POST', { type: document.type, title: `${document.title} · copia`, folder_id: document.folder_id, config: draft.document.config, operation_id: operationId() }))
+      const result = document.type === 'criptografia'
+        ? await duplicateCryptoDocument(draft.document, draft.phase === 'conflict' || draft.phase === 'error')
+        : await libraryRequest<{ document: UtilityDocument }>('/documents', jsonRequest('POST', { type: document.type, title: `${document.title} · copia`, folder_id: document.folder_id, config: draft.document.config, operation_id: operationId() }))
       const copy = makeDraft(result.document)
       const slots = new Set([...(draft.session.slotNames?.() ?? draft.document.slots.map(slot => slot.slot))])
       for (const slot of slots) { const blob = draft.session.getSlot(slot) ?? await draft.session.readSlot(slot); if (blob) copy.session.setSlot(slot, blob) }

@@ -21,7 +21,11 @@ export function DocumentModeIndicator({ status }: { status?: UtilityDisplayStatu
       <div className="space-y-2 p-1 text-xs leading-5">
         <p className="font-semibold">Modo ligero · Panel {panels}</p>
         <p>Solo se aplica a los paneles grandes de esta pestaña: desde 8 MiB, 200.000 líneas o líneas excepcionalmente largas.</p>
-        {status.lightPanels.length > 0 && <p>JSON/XML mantiene colores básicos. Se reducen plegado, sugerencias y análisis automático; Formatear, Validar y Buscar siguen disponibles.</p>}
+        {status.lightPanels.length > 0 && <p>JSON/XML mantiene colores básicos y plegado estructural local. Se reducen sugerencias y análisis automático; Formatear, Validar y Buscar siguen disponibles.</p>}
+        {Object.entries(status.folding ?? {}).map(([panel, folding]) => folding && folding.phase !== 'idle' && <p key={panel} role="status" aria-label={`Plegado del panel ${panel.toUpperCase()}`}>
+          Panel {panel.toUpperCase()}: {folding.phase === 'preparing' ? 'preparando plegado local…' : folding.phase === 'timeout' ? 'el plegado superó 10 segundos. Edita el documento o vuelve a abrir el panel para reintentar.' : folding.phase === 'error' ? 'no se pudo preparar el plegado. Edita el documento o vuelve a abrir el panel para reintentar.' : `${folding.regions.toLocaleString('es-PE')} bloques plegables.`}
+          {folding.phase === 'limited' && (folding.reason === 'regions' ? ' Se muestran hasta 5.000 bloques, priorizando las secciones principales.' : folding.reason === 'depth' ? ' Se alcanzó el límite de 160 niveles; se conservan los bloques seguros.' : folding.reason === 'doctype' ? ' Los documentos con DOCTYPE quedan fuera del plegado.' : folding.reason === 'size' ? ' Se alcanzó el límite de tamaño del plegado.' : ' El documento está incompleto; se conservan los bloques cerrados seguros.')}
+        </p>)}
         {status.chunkedPanels.length > 0 && <p>Las líneas gigantes se editan por tramos en texto simple. Buscar sigue recorriendo todo el documento.</p>}
         <p>El contenido y su original se conservan. El modo habitual vuelve cuando el panel queda por debajo de estos límites.</p>
         <button type="button" className="utility-control rounded-lg px-2 text-slate-700 hover:bg-slate-100" onClick={() => setAnchor(null)}>Cerrar explicación</button>

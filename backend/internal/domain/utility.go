@@ -45,6 +45,7 @@ type UtilityWorkspace struct {
 
 type UtilityVaultItem struct {
 	ID          uuid.UUID       `json:"id"`
+	DocumentID  *uuid.UUID      `json:"document_id"`
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Kind        string          `json:"kind"`

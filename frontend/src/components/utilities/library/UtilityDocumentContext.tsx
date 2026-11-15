@@ -1,10 +1,11 @@
 'use client'
 
 import { createContext, useContext, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import type { DocumentFoldingStatus } from '../json/documentFolding'
 
 export type UtilitySlotValue = Blob | string
 export type UtilitySlotSource = UtilitySlotValue | (() => UtilitySlotValue)
-export interface UtilityDisplayStatus { lightPanels: string[]; chunkedPanels: string[] }
+export interface UtilityDisplayStatus { lightPanels: string[]; chunkedPanels: string[]; folding?: Partial<Record<'a' | 'b', DocumentFoldingStatus>> }
 
 export interface UtilityDocumentSession {
   documentId: string
@@ -18,6 +19,8 @@ export interface UtilityDocumentSession {
   slotNames?: () => string[]
   registerBeforeDeactivate?: (callback: () => void) => () => void
   reportDisplayStatus?: (status: UtilityDisplayStatus) => void
+  reconcileVaultDeletion?: (keyId: string) => Promise<boolean>
+  subscribeState?: (listener: (state: Record<string, unknown>) => void) => () => void
   flush: () => Promise<boolean>
 }
 
@@ -31,6 +34,11 @@ export function useUtilityDocumentState<T>(key: string, initial: T): [T, Dispatc
   const document = useUtilityDocument()
   const [value, setValue] = useState<T>(() => document && Object.hasOwn(document.initialState, key) ? document.initialState[key] as T : initial)
   const previous = useRef(value)
+  useEffect(() => document?.subscribeState?.(state => {
+    const canonical = Object.hasOwn(state, key) ? state[key] as T : initial
+    previous.current = canonical
+    setValue(canonical)
+  }), [document, key])
   useEffect(() => {
     if (Object.is(previous.current, value)) return
     previous.current = value

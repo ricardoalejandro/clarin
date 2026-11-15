@@ -202,7 +202,7 @@ func validateFolder(ctx context.Context, tx pgx.Tx, account, owner uuid.UUID, id
 	return missing(tx.QueryRow(ctx, `SELECT id FROM utility_folders WHERE account_id=$1 AND owner_id=$2 AND id=$3 FOR KEY SHARE`, account, owner, id).Scan(&found))
 }
 
-func validateDocumentKey(ctx context.Context, tx pgx.Tx, account, owner uuid.UUID, kind string, config json.RawMessage) error {
+func validateDocumentKey(ctx context.Context, tx pgx.Tx, account, owner, document uuid.UUID, kind string, config json.RawMessage) error {
 	if kind != "criptografia" {
 		return nil
 	}
@@ -213,7 +213,7 @@ func validateDocumentKey(ctx context.Context, tx pgx.Tx, account, owner uuid.UUI
 		return nil
 	}
 	var found uuid.UUID
-	return missing(tx.QueryRow(ctx, `SELECT id FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3::uuid FOR KEY SHARE`, account, owner, key).Scan(&found))
+	return missing(tx.QueryRow(ctx, `SELECT id FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3::uuid AND document_id=$4 FOR KEY SHARE`, account, owner, key, document).Scan(&found))
 }
 
 func configuredKey(config json.RawMessage) string {
@@ -254,7 +254,7 @@ func (s *Store) Create(ctx context.Context, account, owner uuid.UUID, in Documen
 	if err = validateFolder(ctx, tx, account, owner, in.FolderID); err != nil {
 		return result, err
 	}
-	if err = validateDocumentKey(ctx, tx, account, owner, in.Type, in.Config); err != nil {
+	if err = validateDocumentKey(ctx, tx, account, owner, in.ID, in.Type, in.Config); err != nil {
 		return result, err
 	}
 	result, err = scanDocument(tx.QueryRow(ctx, `INSERT INTO utility_documents(id,account_id,owner_id,type,title,folder_id,config) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING `+docColumns, in.ID, account, owner, in.Type, in.Title, in.FolderID, in.Config))
@@ -320,7 +320,7 @@ func (s *Store) Patch(ctx context.Context, account, owner, id uuid.UUID, in Docu
 		result.Config = in.Config
 	}
 	if configuredKey(result.Config) != previousKey {
-		if err = validateDocumentKey(ctx, tx, account, owner, result.Type, result.Config); err != nil {
+		if err = validateDocumentKey(ctx, tx, account, owner, id, result.Type, result.Config); err != nil {
 			return result, err
 		}
 	}
@@ -348,6 +348,9 @@ func (s *Store) Delete(ctx context.Context, account, owner, id uuid.UUID, versio
 	}
 	if current != version {
 		return ErrConflict
+	}
+	if err = deleteDocumentVault(ctx, tx, account, owner, id); err != nil {
+		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE utility_objects SET state='gc',available_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND resource_id=$3`, account, owner, id); err != nil {
 		return err

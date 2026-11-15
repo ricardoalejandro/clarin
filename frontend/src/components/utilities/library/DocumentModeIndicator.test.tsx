@@ -21,3 +21,17 @@ it('only shows a display indicator for affected panels and explains it on demand
   view.rerender(<DocumentModeIndicator status={{ lightPanels: ['a'], chunkedPanels: [] }} />)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
+
+it('reports structural folding progress, explicit limits and recoverable failures without changing document data', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const view = render(<DocumentModeIndicator status={{ lightPanels: ['a'], chunkedPanels: [], folding: { a: { phase: 'preparing', regions: 0 } } }} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Modo ligero · Panel A' }))
+  expect(screen.getByRole('status', { name: 'Plegado del panel A' })).toHaveTextContent('preparando plegado local')
+  view.rerender(<DocumentModeIndicator status={{ lightPanels: ['a'], chunkedPanels: [], folding: { a: { phase: 'limited', regions: 5000, reason: 'regions' } } }} />)
+  expect(screen.getByRole('status')).toHaveTextContent('5.000 bloques')
+  expect(screen.getByRole('status')).toHaveTextContent('secciones principales')
+  view.rerender(<DocumentModeIndicator status={{ lightPanels: ['a'], chunkedPanels: [], folding: { a: { phase: 'timeout', regions: 0 } } }} />)
+  expect(screen.getByRole('status')).toHaveTextContent('10 segundos')
+  expect(screen.getByRole('status')).toHaveTextContent('reintentar')
+  expect(screen.getByRole('dialog')).toHaveTextContent('plegado estructural local')
+})

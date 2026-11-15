@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown, Download, KeyRound, Loader2, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import { subscribeWebSocket } from '@/lib/api'
 import EditorConfirmDialog from '@/components/documents/EditorConfirmDialog'
 import { jsonRequest, libraryRequest, operationId } from '../library/libraryApi'
 import { useUtilityDocument, useUtilityDocumentState } from '../library/UtilityDocumentContext'
@@ -10,10 +11,11 @@ import { CryptoInputError } from './cryptoOperations'
 import type { KeyMaterial, VaultCandidate, VaultKind } from './pkiOperations'
 import { usePkiJob } from './usePkiJob'
 import { CryptoHelp, CryptoToolbarActions } from './CryptoToolbarContext'
+import { documentVaultPath, scopedVaultEvent } from './vaultScope'
 import '../utility-density.css'
 
 export interface VaultItem {
-  id: string; name: string; description: string; kind: VaultKind; algorithm: string; bits?: number
+  id: string; document_id?: string | null; name: string; description: string; kind: VaultKind; algorithm: string; bits?: number
   public_data: string; metadata: Record<string, unknown>; version: number; created_at: string; updated_at: string
 }
 export interface VaultSelection { id: string; name?: string; kind: VaultKind; algorithm: string; bits?: number }
@@ -31,8 +33,16 @@ function VaultDisclosure({ title, children, open, onToggle }: { title: string; c
   </section>
 }
 
-export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection) => void; onDeleted?: (id: string) => void }) {
+type VaultPanelProps = { onUse: (item: VaultSelection) => void; onDeleted?: (id: string) => void }
+export function VaultPanel(props: VaultPanelProps) {
+  const session = useUtilityDocument()
+  return <DocumentVaultPanel key={session?.documentId || 'standalone'} {...props} />
+}
+
+function DocumentVaultPanel({ onUse, onDeleted }: VaultPanelProps) {
   const documentSession = useUtilityDocument()
+  const documentId = documentSession?.documentId || ''
+  const vaultPath = documentId ? documentVaultPath(documentId) : ''
   const [query, setQuery] = useState('')
   const [settled, settleQuery] = useDebouncedValue(query)
   const [items, setItems] = useState<VaultItem[]>([])
@@ -60,10 +70,18 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
   const [renameDescription, setRenameDescription] = useState('')
   const [creation, setCreation] = useState<'generate' | 'import' | null>(null)
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({})
+  const [legacyOpen, setLegacyOpen] = useState(false)
+  const [legacy, setLegacy] = useState<VaultItem[]>([])
+  const [legacyNext, setLegacyNext] = useState('')
+  const [legacyLoading, setLegacyLoading] = useState(false)
+  const [legacyError, setLegacyError] = useState('')
+  const [legacySelection, setLegacySelection] = useState<VaultItem | null>(null)
   const section = (id: string) => ({ open: Boolean(openSections[id]), onToggle: () => setOpenSections(current => ({ ...current, [id]: !current[id] })) })
   const host = useRef<HTMLElement>(null)
   const [wide, setWide] = useState(false)
   const generation = useRef(0)
+  const requests = useRef(new Set<AbortController>())
+  const legacyOperations = useRef(new Map<string, string>())
   const selection = useRef('')
   const queryRef = useRef(settled)
   queryRef.current = settled
@@ -72,12 +90,30 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
   const downloads = useRef(new Set<string>())
   const job = usePkiJob()
   const busy = pending || job.busy
+  function cancelRequests() {
+    requests.current.forEach(controller => controller.abort())
+    requests.current.clear()
+  }
+  async function scopedRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    options.signal?.addEventListener('abort', abort, { once: true })
+    if (options.signal?.aborted) controller.abort()
+    requests.current.add(controller)
+    try {
+      const result = await libraryRequest<T>(path, { ...options, signal: controller.signal })
+      if (controller.signal.aborted) throw new DOMException('Operación cancelada', 'AbortError')
+      return result
+    }
+    finally { requests.current.delete(controller); options.signal?.removeEventListener('abort', abort) }
+  }
   useEffect(() => documentSession?.registerBeforeDeactivate?.(() => {
     generation.current++
+    cancelRequests()
     job.cancel()
     setPending(false)
   }), [documentSession, job.cancel])
-  useEffect(() => () => { generation.current++; downloads.current.forEach(url => URL.revokeObjectURL(url)); downloads.current.clear() }, [])
+  useEffect(() => () => { generation.current++; cancelRequests(); downloads.current.forEach(url => URL.revokeObjectURL(url)); downloads.current.clear() }, [])
   useEffect(() => {
     const node = host.current
     if (!node) return
@@ -90,37 +126,80 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
   }, [])
   useEffect(() => {
     const controller = new AbortController()
-    void libraryRequest<{ configured: boolean }>('/vault/status', { signal: controller.signal }).then(value => setConfigured(value.configured)).catch(() => { if (!controller.signal.aborted) setError('No se pudo comprobar la disponibilidad de la biblioteca de claves.') })
+    void scopedRequest<{ configured: boolean }>('/vault/status', { signal: controller.signal }).then(value => { if (!controller.signal.aborted) setConfigured(value.configured) }).catch(() => { if (!controller.signal.aborted) setError('No se pudo comprobar la disponibilidad de la biblioteca de claves.') })
     return () => controller.abort()
   }, [refresh])
   useEffect(() => {
+    if (!vaultPath) return
     const controller = new AbortController()
     setLoading(true)
-    void libraryRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>(`/vault?q=${encodeURIComponent(settled)}`, { signal: controller.signal }).then(page => {
+    void scopedRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>(`${vaultPath}?q=${encodeURIComponent(settled)}`, { signal: controller.signal }).then(page => {
       if (controller.signal.aborted) return
       if (!Array.isArray(page.items)) throw new Error('Invalid collection')
       setItems(page.items); setNext(page.has_more ? page.next_cursor || '' : '')
     }).catch(() => { if (!controller.signal.aborted) setError('No se pudo cargar la biblioteca. Reintenta.') }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [settled, refresh])
+  }, [vaultPath, settled, refresh])
   useEffect(() => {
     const controller = new AbortController()
     const selectionChanged = selection.current !== selectedId
     if (selectionChanged) {
-      generation.current++; job.cancel(); setOutput(''); setPassword(''); setPending(false); selection.current = selectedId
+      generation.current++; job.cancel(); setOutput(''); setPassword(''); setJwt(''); setPending(false); selection.current = selectedId
       setOpenSections({})
     }
-    setSelected(null)
-    if (selectedId) void libraryRequest<{ item: VaultItem }>(`/vault/${selectedId}`, { signal: controller.signal }).then(result => {
+    if (selectionChanged) { setSelected(null); setLegacySelection(null) }
+    if (selectedId && vaultPath) void scopedRequest<{ item: VaultItem }>(`${vaultPath}/${encodeURIComponent(selectedId)}`, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return
       setSelected(result.item); setRename(result.item.name); setRenameDescription(result.item.description)
       if (selectionChanged) setExportFormat(result.item.kind === 'aes' ? 'jwk-protected' : result.item.kind === 'certificate' ? 'certificate' : Array.isArray(result.item.metadata.key_usage) && !result.item.metadata.key_usage.includes('sign') ? 'public' : 'pem')
-    }).catch(() => { if (!controller.signal.aborted) setError('La entrada seleccionada ya no está disponible. Elige otra.') })
+    }).catch(async error => {
+      if (controller.signal.aborted) return
+      if (error && typeof error === 'object' && 'status' in error && error.status === 404) {
+        try {
+          const previous = await scopedRequest<{ item: VaultItem }>(`/vault/legacy/${encodeURIComponent(selectedId)}`, { signal: controller.signal })
+          if (controller.signal.aborted) return
+          setSelected(null); setLegacySelection(previous.item)
+          return
+        } catch (legacyError) {
+          if (controller.signal.aborted) return
+          if (legacyError && typeof legacyError === 'object' && 'status' in legacyError && legacyError.status === 404) {
+            void documentSession?.reconcileVaultDeletion?.(selectedId)
+            generation.current++; job.cancel(); setPending(false); setOutput(''); setPassword(''); setJwt('')
+            setSelected(null); setSelectedId(''); onDeleted?.(selectedId)
+          }
+        }
+      }
+      setError('No se pudo abrir la entrada seleccionada. Actualiza la biblioteca para reintentar.')
+    })
     return () => controller.abort()
     // The worker is scoped to the selected entry, not the list/search request.
-  }, [selectedId, refresh, job.cancel])
+  }, [vaultPath, selectedId, refresh, job.cancel])
+  useEffect(() => subscribeWebSocket(message => {
+    const event = scopedVaultEvent(message, documentId)
+    if (!event) return
+    if (event.kind === 'vault_deleted' && event.id) {
+      void documentSession?.reconcileVaultDeletion?.(event.id)
+      setItems(existing => existing.filter(item => item.id !== event.id))
+      if (selection.current === event.id) {
+        generation.current++; cancelRequests(); job.cancel(); setOutput(''); setPassword(''); setJwt(''); setPending(false)
+        setSelected(null); setSelectedId(''); onDeleted?.(event.id)
+      }
+    }
+    setRefresh(value => value + 1)
+  }), [documentId, job.cancel, onDeleted, setSelectedId])
+  useEffect(() => {
+    if (!legacyOpen || !documentId) return
+    const controller = new AbortController()
+    setLegacyLoading(true); setLegacyError('')
+    void scopedRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>('/vault/legacy', { signal: controller.signal }).then(page => {
+      if (controller.signal.aborted) return
+      if (!Array.isArray(page.items)) throw new Error('Invalid collection')
+      setLegacy(page.items); setLegacyNext(page.has_more ? page.next_cursor || '' : '')
+    }).catch(() => { if (!controller.signal.aborted) setLegacyError('No se pudieron cargar las claves anteriores. Reintenta.') }).finally(() => { if (!controller.signal.aborted) setLegacyLoading(false) })
+    return () => controller.abort()
+  }, [legacyOpen, documentId, refresh])
   async function act(work: (current: () => boolean) => Promise<void>) {
-    if (busy) return
+    if (busy || !vaultPath) return
     const revision = generation.current
     setPending(true); setError(''); setNotice(''); setOutput('')
     try { await work(() => generation.current === revision) }
@@ -130,12 +209,12 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
   }
   async function store(value: VaultCandidate, current: () => boolean) {
     if (!current()) return
-    const result = await libraryRequest<{ item: VaultItem }>('/vault', jsonRequest('POST', { ...value, name: name.trim() || 'Nueva clave', description: description.trim(), operation_id: operationId() }))
+    const result = await scopedRequest<{ item: VaultItem }>(vaultPath, jsonRequest('POST', { ...value, name: name.trim() || 'Nueva clave', description: description.trim(), operation_id: operationId() }))
     if (!current()) return
     setSelectedId(result.item.id); setSelected(result.item); setRefresh(value => value + 1); setNotice('Entrada guardada y protegida en tu biblioteca.'); setPassword(''); setCreation(null)
   }
   async function material(item: VaultItem) {
-    const value = await libraryRequest<{ material: string }>(`/vault/${item.id}/material`)
+    const value = await scopedRequest<{ material: string }>(`${vaultPath}/${encodeURIComponent(item.id)}/material`)
     return value.material
   }
   function download(data: string | Uint8Array, filename: string) {
@@ -148,8 +227,27 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
     const revision = generation.current
     const search = settled
     await act(async current => {
-      const page = await libraryRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>(`/vault?q=${encodeURIComponent(settled)}&cursor=${encodeURIComponent(next)}`)
+      const page = await scopedRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>(`${vaultPath}?q=${encodeURIComponent(settled)}&cursor=${encodeURIComponent(next)}`)
+      if (!Array.isArray(page.items)) throw new Error('No se pudo cargar la biblioteca. Reintenta.')
       if (current() && revision === generation.current && queryRef.current === search) { setItems(existing => [...existing, ...page.items.filter(item => !existing.some(previous => previous.id === item.id))]); setNext(page.has_more ? page.next_cursor || '' : '') }
+    })
+  }
+  async function importLegacy(item: VaultItem, current: () => boolean) {
+    const identity = `${item.id}:${item.version}`
+    const operation = legacyOperations.current.get(identity) || operationId()
+    legacyOperations.current.set(identity, operation)
+    const result = await scopedRequest<{ item: VaultItem }>(`${vaultPath}/import-legacy`, jsonRequest('POST', { source_id: item.id, source_version: item.version, operation_id: operation }))
+    if (!current()) return
+    legacyOperations.current.delete(identity); setLegacySelection(null)
+    setSelectedId(result.item.id); setSelected(result.item); setRefresh(value => value + 1)
+    setNotice('Copia independiente importada en este documento. Pulsa Usar esta clave para seleccionarla.'); setLegacyOpen(false)
+  }
+  async function moreLegacy() {
+    await act(async current => {
+      const page = await scopedRequest<{ items: VaultItem[]; next_cursor?: string; has_more: boolean }>(`/vault/legacy?cursor=${encodeURIComponent(legacyNext)}`)
+      if (!Array.isArray(page.items)) throw new Error('No se pudieron cargar las claves anteriores. Reintenta.')
+      if (!current()) return
+      setLegacy(existing => [...existing, ...page.items.filter(item => !existing.some(previous => previous.id === item.id))]); setLegacyNext(page.has_more ? page.next_cursor || '' : '')
     })
   }
   async function attachDerived(selfSigned: boolean, current: () => boolean) {
@@ -164,7 +262,7 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
     let metadata = selected.metadata
     if (selfSigned) metadata = (await job.run<VaultCandidate>({ task: 'import', data: new TextEncoder().encode(result).buffer, filename: 'certificate.pem', password: '' })).metadata
     if (!current()) return
-    await libraryRequest(`/vault/${selected.id}/material`, jsonRequest('PUT', { version: selected.version, material: JSON.stringify(parsed), metadata, operation_id: operationId() }))
+    await scopedRequest(`${vaultPath}/${encodeURIComponent(selected.id)}/material`, jsonRequest('PUT', { version: selected.version, material: JSON.stringify(parsed), metadata, operation_id: operationId() }))
     if (current()) { setOutput(result); setRefresh(value => value + 1); setNotice(selfSigned ? 'Certificado de prueba guardado. No representa confianza pública.' : 'Solicitud CSR guardada en esta entrada.') }
   }
   async function attachCertificate(file: File, current: () => boolean) {
@@ -184,25 +282,35 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
     if (!current()) return
     const combined = JSON.parse(checked.material) as KeyMaterial
     combined.requests = stored.requests
-    await libraryRequest(`/vault/${selected.id}/material`, jsonRequest('PUT', { version: selected.version, material: JSON.stringify(combined), metadata: checked.metadata, operation_id: operationId() }))
+    await scopedRequest(`${vaultPath}/${encodeURIComponent(selected.id)}/material`, jsonRequest('PUT', { version: selected.version, material: JSON.stringify(combined), metadata: checked.metadata, operation_id: operationId() }))
     if (current()) { setRefresh(value => value + 1); setNotice('Certificado asociado a su clave y guardado.') }
   }
   return <section ref={host} aria-label="Biblioteca personal de claves" className="min-w-0 space-y-2">
     <h2 className="sr-only">Mis claves y certificados</h2>
     <CryptoToolbarActions>
-      <button type="button" className={primary} aria-label="Nueva clave" title="Nueva clave" disabled={busy || !configured} onClick={() => setCreation('generate')}><Plus size={16} aria-hidden /></button>
-      <button type="button" className={button} aria-label="Importar clave o certificado" title="Importar clave o certificado" disabled={busy || !configured} onClick={() => setCreation('import')}><Upload size={16} aria-hidden /></button>
+      <button type="button" className={primary} aria-label="Nueva clave" title="Nueva clave" disabled={busy || !configured || !vaultPath} onClick={() => setCreation('generate')}><Plus size={16} aria-hidden /></button>
+      <button type="button" className={button} aria-label="Importar clave o certificado" title="Importar clave o certificado" disabled={busy || !configured || !vaultPath} onClick={() => setCreation('import')}><Upload size={16} aria-hidden /></button>
       <button type="button" className={button} aria-label="Actualizar biblioteca de claves" title="Actualizar biblioteca de claves" onClick={() => setRefresh(value => value + 1)} disabled={busy}><RefreshCw size={16} aria-hidden /></button>
     </CryptoToolbarActions>
-    <CryptoHelp>Privados para tu usuario y cuenta. Se protegen cifrados en el servidor y se abren con tu sesión de Clarin.</CryptoHelp>
+    <CryptoHelp>Claves privadas de este documento, tu usuario y cuenta. Se protegen cifradas en el servidor y se abren con tu sesión de Clarin.</CryptoHelp>
+    {!vaultPath && <p role="status" className="text-sm text-slate-600">Abre un documento para gestionar sus claves.</p>}
     {configured === false && <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">La protección de claves aún no está configurada en el servidor. Las demás herramientas siguen disponibles.</p>}
     <div className="grid items-start gap-2" style={{ gridTemplateColumns: wide ? '224px minmax(0,1fr)' : 'minmax(0,1fr)' }}>
       <aside className={`${wide ? 'sticky top-2' : ''} utility-panel space-y-1`}><label className="relative block"><span className="sr-only">Buscar claves por nombre o huella</span><Search aria-hidden className="absolute left-2 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><input className={`${field} pl-8`} maxLength={128} value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value) settleQuery('') }} placeholder="Nombre o huella…" /></label>
         {(loading || query !== settled) && <p role="status" className="text-xs text-slate-500">Buscando…</p>}
         <ul className="max-h-80 space-y-0.5 overflow-y-auto">{items.map(item => <li key={item.id}><button type="button" disabled={busy} aria-pressed={selectedId === item.id} onClick={() => setSelectedId(item.id)} className={`w-full rounded-lg px-2 py-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 ${selectedId === item.id ? 'bg-emerald-50 text-emerald-900' : 'hover:bg-slate-50'}`}><span className="block truncate text-xs font-medium">{item.name}</span><span className="block text-[11px] text-slate-500">{item.algorithm} {item.bits || ''}</span></button></li>)}</ul>
-        {!items.length && !loading && <p className="py-4 text-sm text-slate-500">Todavía no hay entradas que mostrar.</p>}{next && <button className={button} type="button" disabled={busy} onClick={() => void more()}>Mostrar más</button>}
+        {!items.length && !loading && <p className="py-4 text-sm text-slate-500">{settled ? 'No hay claves que coincidan.' : 'Este documento todavía no tiene claves.'}</p>}{next && <button className={button} type="button" disabled={busy} onClick={() => void more()}>Mostrar más</button>}
+        {vaultPath && <VaultDisclosure title="Claves anteriores" open={legacyOpen} onToggle={() => setLegacyOpen(value => !value)}>
+          <p className="text-xs text-slate-500">Importa una copia independiente de tu biblioteca anterior a este documento.</p>
+          {legacyLoading && <p role="status" className="text-xs text-slate-500">Cargando claves anteriores…</p>}
+          {legacyError && <p role="alert" className="text-xs text-rose-700">{legacyError}<button type="button" className={button} onClick={() => setRefresh(value => value + 1)}>Reintentar</button></p>}
+          {!legacyLoading && !legacyError && !legacy.length && <p className="text-xs text-slate-500">No tienes claves anteriores para importar.</p>}
+          <ul className="max-h-64 space-y-1 overflow-y-auto">{legacy.map(item => <li key={item.id} className="min-w-0 space-y-1 rounded-lg border border-slate-200 p-2"><p className="break-words text-xs font-medium">{item.name}</p><p className="text-[11px] text-slate-500">{item.algorithm} {item.bits || ''}</p><button type="button" className={button} disabled={busy || !configured} onClick={() => void act(current => importLegacy(item, current))} aria-label={`Importar copia de ${item.name}`}>Importar copia</button></li>)}</ul>
+          {legacyNext && <button type="button" className={button} disabled={busy} onClick={() => void moreLegacy()}>Mostrar más claves anteriores</button>}
+        </VaultDisclosure>}
       </aside>
       <div className="min-w-0 space-y-2">
+        {legacySelection && <section aria-label="Clave anterior seleccionada" className="utility-panel space-y-2"><h3 className="break-words text-sm font-semibold">{legacySelection.name}</h3><p className="text-xs text-slate-600">Esta clave pertenece a tu biblioteca anterior. Importa una copia independiente antes de usarla aquí.</p><button type="button" className={primary} disabled={busy || !configured} onClick={() => void act(current => importLegacy(legacySelection, current))}>Importar en esta hoja</button></section>}
         <section hidden={creation === null} aria-label={creation === 'import' ? 'Importar clave' : 'Crear clave'} className="utility-panel space-y-2">
           <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{creation === 'import' ? 'Importar clave o certificado' : 'Nueva clave'}</h3><button type="button" className={button} aria-label="Cerrar opciones de creación" disabled={busy} onClick={() => setCreation(null)}><X size={16} aria-hidden /></button></div>
           <div className={fields}><label className="text-xs">Nombre<input className={`${field} mt-1`} maxLength={160} value={name} onChange={event => setName(event.target.value)} placeholder="Ej. Integración de pruebas" /></label><label className="text-xs">Descripción<input className={`${field} mt-1`} maxLength={1000} value={description} onChange={event => setDescription(event.target.value)} /></label></div>
@@ -217,7 +325,7 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
           <dl className="space-y-1 text-xs"><div><dt className="font-semibold text-slate-600">Algoritmo</dt><dd>{selected.algorithm} {selected.bits || ''}</dd></div>{Boolean(selected.metadata.fingerprint) && <div><dt className="font-semibold text-slate-600">Huella</dt><dd className="break-all font-mono text-[11px]">{String(selected.metadata.fingerprint)}</dd></div>}</dl>
           <VaultDisclosure title="Detalles del certificado" {...section('certificate')}><dl className={`${fields} text-xs`}>{Object.entries({ Titular: selected.metadata.subject, Emisor: selected.metadata.issuer, 'Válido desde': selected.metadata.not_before, 'Válido hasta': selected.metadata.not_after, SAN: Array.isArray(selected.metadata.san) ? selected.metadata.san.join(', ') : undefined }).filter(([, value]) => value).map(([label, value]) => <div key={label} className="min-w-0"><dt className="font-semibold text-slate-600">{label}</dt><dd className="break-all text-slate-800">{String(value)}</dd></div>)}</dl>{Boolean(selected.metadata.not_after) && <p className="text-xs text-slate-500">La vigencia describe fechas; no confirma la confianza de una autoridad certificadora ni su revocación.</p>}</VaultDisclosure>
           <VaultDisclosure title="Renombrar" {...section('rename')}><div className={fields}><label className="text-xs">Nombre de entrada<input className={`${field} mt-1`} value={rename} maxLength={160} onChange={event => setRename(event.target.value)} /></label><label className="text-xs">Descripción de entrada<input className={`${field} mt-1`} value={renameDescription} maxLength={1000} onChange={event => setRenameDescription(event.target.value)} /></label></div>
-          <button type="button" className={button} disabled={busy || !rename.trim()} onClick={() => void act(async current => { await libraryRequest(`/vault/${selected.id}`, jsonRequest('PATCH', { version: selected.version, name: rename.trim(), description: renameDescription, operation_id: operationId() })); if (current()) { setRefresh(value => value + 1); setNotice('Entrada actualizada.') } })}>Guardar nombre</button></VaultDisclosure>
+          <button type="button" className={button} disabled={busy || !rename.trim()} onClick={() => void act(async current => { await scopedRequest(`${vaultPath}/${encodeURIComponent(selected.id)}`, jsonRequest('PATCH', { version: selected.version, name: rename.trim(), description: renameDescription, operation_id: operationId() })); if (current()) { setRefresh(value => value + 1); setNotice('Entrada actualizada.') } })}>Guardar nombre</button></VaultDisclosure>
           <input type="file" hidden ref={certificateInput} accept=".pem,.cer,.crt,.der" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void act(current => attachCertificate(file, current)) }} />
           <VaultDisclosure title="Exportar" {...section('export')}><label className="block text-xs">Formato de exportación<select className={`${field} mt-1`} value={exportFormat} onChange={event => setExportFormat(event.target.value as typeof exportFormat)}>{(selected.kind === 'rsa' || selected.kind === 'ec') && <><option value="pem">Privada PKCS#8 protegida</option><option value="p12">P12/PFX protegido</option><option value="csr">Solicitudes CSR guardadas</option></>}{selected.kind !== 'certificate' && <><option value="jwk-protected">JWK protegido con contraseña (JWE)</option><option value="jwk">JWK sin contraseña</option></>}{selected.kind !== 'aes' && <><option value="public">Pública PEM</option><option value="certificate">Certificados PEM</option><option value="certificate-der">Certificado DER</option></>}</select></label>
           <label className="block text-xs">Contraseña de exportación<input type="password" autoComplete="new-password" className={`${field} mt-1`} maxLength={1024} value={password} onChange={event => setPassword(event.target.value)} /><span className="text-[11px] text-slate-500">Temporal; no se guarda en la hoja.</span></label>
@@ -234,6 +342,6 @@ export function VaultPanel({ onUse, onDeleted }: { onUse: (item: VaultSelection)
     </div>
     {busy && <div role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="size-4 motion-safe:animate-spin" aria-hidden />Procesando…{job.busy && <button className={button} type="button" onClick={() => { job.cancel(); setPending(false) }}>Cancelar</button>}</div>}
     {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</p>}{notice && <p role="status" className="text-sm text-emerald-800">{notice}</p>}
-    {deleting && selected && <EditorConfirmDialog title="Eliminar clave o certificado" onCancel={() => { if (!busy) setDeleting(false) }} actions={<><button className={button} disabled={busy} onClick={() => setDeleting(false)} type="button">Cancelar</button><button className={`${button} text-rose-700`} disabled={busy} type="button" onClick={() => void act(async current => { await libraryRequest(`/vault/${selected.id}?version=${selected.version}`, { method: 'DELETE' }); if (current()) { onDeleted?.(selected.id); setDeleting(false); setSelectedId(''); setSelected(null); setRefresh(value => value + 1); setNotice('Entrada eliminada. La limpieza física se procesará automáticamente.') } })}>Eliminar definitivamente</button></>}><p>Se eliminará <strong>{selected.name}</strong> de Clarin. Las copias exportadas seguirán existiendo y el certificado no se revocará.</p></EditorConfirmDialog>}
+    {deleting && selected && <EditorConfirmDialog title="Eliminar clave o certificado" onCancel={() => { if (!busy) setDeleting(false) }} actions={<><button className={button} disabled={busy} onClick={() => setDeleting(false)} type="button">Cancelar</button><button className={`${button} text-rose-700`} disabled={busy} type="button" onClick={() => void act(async current => { await scopedRequest(`${vaultPath}/${encodeURIComponent(selected.id)}?version=${selected.version}`, { method: 'DELETE' }); if (current()) { void documentSession?.reconcileVaultDeletion?.(selected.id); onDeleted?.(selected.id); setDeleting(false); setSelectedId(''); setSelected(null); setRefresh(value => value + 1); setNotice('Entrada eliminada. La limpieza física se procesará automáticamente.') } })}>Eliminar definitivamente</button></>}><p>Se eliminará <strong>{selected.name}</strong> de este documento. Las copias en otros documentos y archivos exportados seguirán existiendo; el certificado no se revocará.</p></EditorConfirmDialog>}
   </section>
 }

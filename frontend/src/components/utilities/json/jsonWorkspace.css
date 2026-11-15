@@ -1,3 +1,27 @@
+.json-editor-field {
+  --editor-selection: #a7f3d0;
+}
+
+/* Override the application-wide important form color only on editor fields. */
+[data-editor-theme] .json-editor-field {
+  color: var(--editor-ink) !important;
+  caret-color: var(--editor-ink);
+}
+
+[data-editor-theme='dark'] .json-editor-field {
+  --editor-selection: #065f46;
+}
+
+[data-editor-theme] .json-editor-field::placeholder {
+  color: var(--editor-muted) !important;
+  opacity: 1;
+}
+
+[data-editor-theme] .json-editor-field::selection {
+  background-color: var(--editor-selection);
+  color: var(--editor-ink);
+}
+
 .json-toolbar-icon {
   width: var(--utility-control-size);
   padding-inline: 0;

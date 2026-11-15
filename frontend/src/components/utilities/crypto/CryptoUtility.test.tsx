@@ -25,7 +25,7 @@ afterEach(() => { cleanup(); vi.mocked(libraryRequest).mockReset(); vi.clearAllM
 const selectedKey = { id: 'selected-key', name: 'Clave seleccionada', description: '', kind: 'aes' as const, algorithm: 'AES-GCM', bits: 256, metadata: {}, version: 1, public_data: '', created_at: '', updated_at: '' }
 const missingKeyNotice = 'La clave guardada ya no está disponible. Puedes elegir otra en Mis claves.'
 function vaultEvent(id = selectedKey.id, kind = 'vault') {
-  act(() => { for (const listener of realtime.listeners) listener({ event: 'utility_updated', data: { kind, id } }) })
+  act(() => { for (const listener of realtime.listeners) listener({ event: 'utility_updated', data: { kind, id, document_id: 'synthetic' } }) })
 }
 
 function renderSelectedKey() {
@@ -40,7 +40,8 @@ function mockSelectedKey(material: () => Promise<unknown> = async () => ({ mater
   vi.mocked(libraryRequest).mockImplementation((path, options) => {
     if (options?.method === 'DELETE') { deleted = true; return Promise.resolve({ deleted: true }) as never }
     if (path === '/vault/status') return Promise.resolve({ configured: true }) as never
-    if (path.startsWith('/vault?q=')) return Promise.resolve({ items: deleted ? [] : [selectedKey], has_more: false }) as never
+    if (path.startsWith('/vault/legacy/')) return Promise.reject(new UtilityRequestError('No disponible', 404)) as never
+    if (path.startsWith('/documents/synthetic/vault?q=')) return Promise.resolve({ items: deleted ? [] : [selectedKey], has_more: false }) as never
     if (path.endsWith('/material')) return material() as never
     return Promise.resolve({ item: selectedKey }) as never
   })
@@ -101,7 +102,7 @@ it('keeps one primary action in the shared toolbar and preserves drafts through 
 })
 
 it('clears a confirmed deleted key reference so document preferences can still autosave', async () => {
-  vi.mocked(libraryRequest).mockRejectedValueOnce(new UtilityRequestError('No disponible', 404))
+  vi.mocked(libraryRequest).mockRejectedValue(new UtilityRequestError('No disponible', 404))
   const setState = vi.fn()
   const session: UtilityDocumentSession = { documentId: 'synthetic', initialState: { key_id: 'deleted-key' }, setState, setSlot: vi.fn(), getSlot: () => undefined, readSlot: async () => null, flush: async () => true }
   render(<UtilityDocumentProvider value={session}><CryptoUtility /></UtilityDocumentProvider>)
@@ -120,6 +121,19 @@ it('preserves the saved key reference after a temporary service failure', async 
   fireEvent.click(screen.getByRole('button', { name: 'Base64' }))
   expect(setState).toHaveBeenCalledWith({ active: 'base64' })
   expect(setState).not.toHaveBeenCalledWith({ key_id: '' })
+})
+
+it('preserves an old key reference as metadata until explicitly imported into this document', async () => {
+  vi.mocked(libraryRequest).mockImplementation(path => path.startsWith('/vault/legacy/')
+    ? Promise.resolve({ item: selectedKey }) as never
+    : Promise.reject(new UtilityRequestError('No pertenece a esta hoja', 404)))
+  const setState = renderSelectedKey()
+  expect(await screen.findByText(/Esta clave pertenece a tu biblioteca anterior/)).toBeVisible()
+  expect(setState).not.toHaveBeenCalledWith({ key_id: '' })
+  expect(screen.queryByRole('checkbox', { name: /Usar la clave seleccionada/ })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Base64' }))
+  expect(setState).toHaveBeenCalledWith({ active: 'base64' })
+  expect(vi.mocked(libraryRequest).mock.calls.some(([path]) => path.endsWith('/material'))).toBe(false)
 })
 
 it('clears the cipher selection after deleting the key that was explicitly chosen from the vault', async () => {
@@ -228,7 +242,7 @@ it('cancels a vault refresh when choosing another key and releases its subscript
   vi.mocked(libraryRequest).mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject }))
   vaultEvent()
   const oldSignal = vi.mocked(libraryRequest).mock.calls.at(-1)![1]!.signal!
-  vi.mocked(libraryRequest).mockImplementation((path) => Promise.resolve(path === '/vault/status' ? { configured: true } : path.startsWith('/vault?q=') ? { items: [nextKey], has_more: false } : { item: nextKey }) as never)
+  vi.mocked(libraryRequest).mockImplementation((path) => Promise.resolve(path === '/vault/status' ? { configured: true } : path.startsWith('/documents/synthetic/vault?q=') ? { items: [nextKey], has_more: false } : { item: nextKey }) as never)
   fireEvent.click(screen.getByRole('button', { name: 'Mis claves' }))
   fireEvent.click(await screen.findByRole('button', { name: /Otra clave/ }))
   fireEvent.click(await screen.findByRole('button', { name: 'Usar esta clave' }))
@@ -246,4 +260,34 @@ it('cancels a vault refresh when choosing another key and releases its subscript
   const callCount = vi.mocked(libraryRequest).mock.calls.length
   vaultEvent(nextKey.id)
   expect(libraryRequest).toHaveBeenCalledTimes(callCount)
+})
+
+it('ignores another document events and clears the current key immediately on canonical deletion', async () => {
+  mockSelectedKey()
+  const setState = renderSelectedKey()
+  await screen.findByRole('checkbox', { name: /Usar la clave seleccionada/ })
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: /Usar la clave seleccionada/ })).toBeChecked())
+  const count = vi.mocked(libraryRequest).mock.calls.length
+  act(() => { for (const listener of realtime.listeners) listener({ event: 'utility_updated', data: { kind: 'vault_deleted', id: selectedKey.id, document_id: 'other-document' } }) })
+  expect(libraryRequest).toHaveBeenCalledTimes(count)
+  expect(screen.getByRole('checkbox', { name: /Usar la clave seleccionada/ })).toBeChecked()
+  vaultEvent(selectedKey.id, 'vault_deleted')
+  expect(screen.queryByRole('checkbox', { name: /Usar la clave seleccionada/ })).not.toBeInTheDocument()
+  await waitFor(() => expect(setState).toHaveBeenCalledWith({ key_id: '' }))
+})
+
+it('aborts a material read and rejects its late result after switching documents', async () => {
+  let resolveMaterial!: (value: unknown) => void
+  mockSelectedKey(() => new Promise(resolve => { resolveMaterial = resolve }))
+  const first: UtilityDocumentSession = { documentId: 'synthetic', initialState: { key_id: selectedKey.id }, setState: vi.fn(), setSlot: vi.fn(), getSlot: () => undefined, readSlot: async () => null, flush: async () => true }
+  const view = render(<UtilityDocumentProvider value={first}><CryptoUtility /></UtilityDocumentProvider>)
+  await screen.findByRole('checkbox', { name: /Usar la clave seleccionada/ })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Cifrar' })).toBeEnabled())
+  fireEvent.click(screen.getByRole('button', { name: 'Cifrar' }))
+  const signal = vi.mocked(libraryRequest).mock.calls.find(([path]) => path.endsWith('/material'))![1]!.signal!
+  view.rerender(<UtilityDocumentProvider value={{ ...first, documentId: 'second', initialState: {} }}><CryptoUtility /></UtilityDocumentProvider>)
+  expect(signal.aborted).toBe(true)
+  await act(async () => { resolveMaterial({ material: '{"secret":"late-secret"}' }) })
+  expect(screen.queryByRole('checkbox', { name: /Usar la clave seleccionada/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: 'JWE cifrado' })).not.toBeInTheDocument()
 })

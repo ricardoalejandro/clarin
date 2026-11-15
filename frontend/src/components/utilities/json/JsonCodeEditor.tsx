@@ -5,6 +5,8 @@ import { editor, json, KeyCode, KeyMod, languages, Position, Range } from 'monac
 import { jsonLiteralCompletions, xmlClosingTagCompletion } from './documentCompletions'
 import { acceptsEditorZoom, documentRevealSelection, documentWrapOptions, tramRange } from './editorWorkspaceState'
 import { registerLargeJsonSyntax } from './largeJsonSyntax'
+import { DocumentFoldingSession, registerDocumentFolding } from './documentFoldingController'
+import { FOLD_MAX_REGIONS, type DocumentFoldingStatus } from './documentFolding'
 
 globalThis.MonacoEnvironment = {
   getWorker(_moduleId, label) {
@@ -17,6 +19,7 @@ globalThis.MonacoEnvironment = {
 json.jsonDefaults.setDiagnosticsOptions({ validate: false, schemas: [], enableSchemaRequest: false })
 json.jsonDefaults.setModeConfiguration({ ...json.jsonDefaults.modeConfiguration, diagnostics: false, documentFormattingEdits: false, documentRangeFormattingEdits: false })
 registerLargeJsonSyntax(languages)
+registerDocumentFolding(languages)
 
 export function registerDocumentCompletions() {
   const readPrefix = (model: editor.ITextModel, position: Position) =>
@@ -97,6 +100,7 @@ interface Props {
   reveal?: { offset: number; length: number; nonce: number }
   initialViewState?: editor.ICodeEditorViewState | null
   onViewState?: (state: editor.ICodeEditorViewState | null) => void
+  onFoldingStatus?: (status: DocumentFoldingStatus) => void
 }
 
 export function DocumentCodeEditor(props: Props) {
@@ -110,6 +114,8 @@ export function DocumentCodeEditor(props: Props) {
   const syncingPreview = useRef(false)
   const restoredView = useRef(false)
   const revealedMatch = useRef<number | null>(null)
+  const folding = useRef<DocumentFoldingSession | null>(null)
+  const flushView = useRef<(() => void) | null>(null)
   const latest = useRef(props)
   useLayoutEffect(() => { latest.current = props }, [props])
 
@@ -122,9 +128,15 @@ export function DocumentCodeEditor(props: Props) {
     const findAction = view.addAction({ id: 'clarin.document.findAll', label: 'Buscar en todo el documento', keybindings: [KeyMod.CtrlCmd | KeyCode.KeyF], run: () => latest.current.onFind?.() })
     const undoAction = view.addAction({ id: 'clarin.document.undo', label: 'Deshacer en el documento', keybindings: [KeyMod.CtrlCmd | KeyCode.KeyZ], run: () => latest.current.chunk !== null ? model.undo() : view.trigger('clarin', 'undo', null) })
     const redoAction = view.addAction({ id: 'clarin.document.redo', label: 'Rehacer en el documento', keybindings: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ, KeyMod.CtrlCmd | KeyCode.KeyY], run: () => latest.current.chunk !== null ? model.redo() : view.trigger('clarin', 'redo', null) })
-    const remember = () => latest.current.onViewState?.(view.saveViewState())
+    let viewTimer: ReturnType<typeof setTimeout> | undefined
+    const capture = () => { clearTimeout(viewTimer); viewTimer = undefined; if (view.getModel()) latest.current.onViewState?.(view.saveViewState()) }
+    const remember = () => { clearTimeout(viewTimer); viewTimer = setTimeout(capture, 250) }
+    flushView.current = capture
     const scroll = view.onDidScrollChange(remember)
     const cursor = view.onDidChangeCursorSelection(remember)
+    const hidden = view.onDidChangeHiddenAreas(remember)
+    const foldSession = folding.current = new DocumentFoldingSession(model, status => latest.current.onFoldingStatus?.(status))
+    const language = model.onDidChangeLanguage(() => view.updateOptions({ folding: latest.current.chunk === null && (!latest.current.reduced || model.getLanguageId() !== 'plaintext') }))
     const wrapAction = view.addAction({
       id: 'clarin.document.toggleWrap',
       label: 'Ajustar líneas',
@@ -146,7 +158,10 @@ export function DocumentCodeEditor(props: Props) {
     element.addEventListener('paste', paste, true)
     latest.current.onReady(view)
     return () => {
-      remember()
+      capture()
+      flushView.current = null
+      foldSession.dispose()
+      folding.current = null
       instance.current = null
       latest.current.onReady(null)
       element.removeEventListener('paste', paste, true)
@@ -157,6 +172,8 @@ export function DocumentCodeEditor(props: Props) {
       redoAction.dispose()
       scroll.dispose()
       cursor.dispose()
+      hidden.dispose()
+      language.dispose()
       wrapAction.dispose()
       view.dispose()
       preview.current?.dispose()
@@ -169,6 +186,7 @@ export function DocumentCodeEditor(props: Props) {
     const view = instance.current
     if (!view) return
     if (!visible || chunk !== null) {
+      flushView.current?.()
       if (view.getModel() === model) viewState.current = view.saveViewState()
       if (chunk === null || !visible) {
         if (chunk !== null && view.getModel() === preview.current && preview.current) {
@@ -240,7 +258,10 @@ export function DocumentCodeEditor(props: Props) {
       readOnly: false,
       domReadOnly: false,
       ariaLabel: label,
-      folding: !reduced,
+      folding: chunk === null && (!reduced || model.getLanguageId() !== 'plaintext'),
+      foldingStrategy: 'auto',
+      foldingMaximumRegions: FOLD_MAX_REGIONS,
+      showFoldingControls: reduced ? 'always' : 'mouseover',
       bracketPairColorization: { enabled: !reduced },
       matchBrackets: reduced ? 'never' : 'always',
       occurrencesHighlight: reduced ? 'off' : 'singleFile',
@@ -253,6 +274,10 @@ export function DocumentCodeEditor(props: Props) {
       placeholder: 'Pega texto o abre un archivo local.',
     })
   }, [font, label, reduced, chunk, wrap])
+
+  useLayoutEffect(() => {
+    folding.current?.setEnabled(reduced && visible && chunk === null)
+  }, [model, reduced, visible, chunk])
 
   useLayoutEffect(() => {
     const target = props.reveal

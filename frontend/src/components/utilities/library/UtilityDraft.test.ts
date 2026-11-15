@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Blob as NodeBlob } from 'node:buffer'
-import { UtilityDraft } from './UtilityDraft'
+import { UtilityDraft, mergeUtilityConfig } from './UtilityDraft'
 import { libraryRequest, readDocumentSlot, UtilityRequestError, type UtilityDocument } from './libraryApi'
 
 vi.mock('./libraryApi', async original => ({ ...await original<typeof import('./libraryApi')>(), libraryRequest: vi.fn(), readDocumentSlot: vi.fn() }))
@@ -271,5 +271,109 @@ describe('utility autosave session', () => {
     expect(draft.session.getSlot('late')).toBeUndefined()
     finish({ document: base(), content: { slot: 'panel-a', version: 1, bytes: 15 } })
     expect(await saving).toBe(false)
+  })
+})
+
+describe('vault deletion canonical reconciliation', () => {
+  const cryptoDocument = (): UtilityDocument => ({ ...base(), type: 'criptografia', config: { key_id: 'old-key', active: 'cipher', hash_algorithm: 'SHA-256' } })
+  const removed = () => ({ ...cryptoDocument(), version: 2, config: { ...cryptoDocument().config, key_id: '' } })
+  beforeEach(() => { request.mockReset() })
+
+  it('adopts server version++ without creating another save, and deduplicates HTTP and websocket echoes', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn()), observe = vi.fn()
+    draft.session.subscribeState?.(observe)
+    request.mockResolvedValue({ document: removed() })
+    const first = draft.reconcileVaultDeletion('old-key')
+    expect(draft.reconcileVaultDeletion('old-key')).toBe(first)
+    expect(await first).toBe(true)
+    expect(await draft.flush()).toBe(true)
+    expect(await draft.reconcileVaultDeletion('old-key')).toBe(true)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(draft.document.version).toBe(2)
+    expect(draft.document.config.key_id).toBe('')
+    expect(draft.dirty).toBe(false)
+    expect(observe).toHaveBeenCalledWith(removed().config)
+  })
+
+  it('merges disjoint dirty preferences against the canonical baseline and writes only with the new version', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn())
+    draft.session.setState({ active: 'hash' })
+    request.mockResolvedValueOnce({ document: { ...removed(), config: { ...removed().config, hash_algorithm: 'SHA-512' } } })
+    expect(await draft.reconcileVaultDeletion('old-key')).toBe(true)
+    expect(draft.document.config).toMatchObject({ key_id: '', active: 'hash', hash_algorithm: 'SHA-512' })
+    request.mockImplementation(async (_path, options) => ({ document: { ...removed(), version: 3, config: JSON.parse(options!.body as string).config } }) as never)
+    expect(await draft.flush()).toBe(true)
+    expect(JSON.parse(request.mock.calls[1][1]!.body as string)).toMatchObject({ base_version: 2, config: draft.document.config })
+  })
+
+  it('waits for an in-flight 409, blocks new saves, preserves a later selection and retries on the canonical version', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn())
+    draft.session.setState({ active: 'hash' })
+    let rejectSave!: (reason: unknown) => void
+    request.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSave = reject }))
+    const saving = draft.flush()
+    request.mockResolvedValueOnce({ document: removed() })
+    request.mockImplementationOnce(async (_path, options) => ({ document: { ...removed(), version: 3, config: JSON.parse(options!.body as string).config } }) as never)
+    const reconciliation = draft.reconcileVaultDeletion('old-key'), blockedFlush = draft.flush()
+    draft.session.setState({ key_id: 'later-key' })
+    expect(request).toHaveBeenCalledTimes(1)
+    rejectSave(new UtilityRequestError('La eliminación avanzó la versión', 409))
+    expect(await saving).toBe(false)
+    expect(await reconciliation).toBe(true)
+    expect(await blockedFlush).toBe(true)
+    expect(request.mock.calls.map(([, options]) => options?.method || 'GET')).toEqual(['PATCH', 'GET', 'PATCH'])
+    expect(JSON.parse(request.mock.calls[2][1]!.body as string)).toMatchObject({ base_version: 2, config: { key_id: 'later-key', active: 'hash' } })
+    expect(draft.document.version).toBe(3)
+    expect(draft.phase).toBe('saved')
+  })
+
+  it('retains a retry barrier after a canonical fetch 503 and never resends the old base version', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn())
+    draft.session.setState({ active: 'hash' })
+    request.mockRejectedValueOnce(new UtilityRequestError('Temporal', 503))
+    expect(await draft.reconcileVaultDeletion('old-key')).toBe(false)
+    expect(draft.phase).toBe('error')
+    expect(draft.reconcilingVault).toBe(true)
+    request.mockResolvedValueOnce({ document: removed() })
+    request.mockImplementationOnce(async (_path, options) => ({ document: { ...removed(), version: 3, config: JSON.parse(options!.body as string).config } }) as never)
+    expect(await draft.flush()).toBe(true)
+    expect(request.mock.calls.map(([, options]) => options?.method || 'GET')).toEqual(['GET', 'GET', 'PATCH'])
+    expect(JSON.parse(request.mock.calls[2][1]!.body as string).base_version).toBe(2)
+  })
+
+  it('keeps true same-field conflicts visible and never overwrites the remote preference on an echo', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn())
+    draft.session.setState({ active: 'hash' })
+    request.mockResolvedValue({ document: { ...removed(), config: { ...removed().config, active: 'base64' } } })
+    expect(await draft.reconcileVaultDeletion('old-key')).toBe(false)
+    expect(draft.document.config.active).toBe('hash')
+    expect(draft.document.version).toBe(2)
+    expect(draft.phase).toBe('conflict')
+    expect(await draft.reconcileVaultDeletion('old-key')).toBe(false)
+    draft.session.setState({ hash_algorithm: 'SHA-384' })
+    expect(await draft.flush()).toBe(false)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses edits arriving during the canonical fetch, and refuses a snapshot older than its current token', async () => {
+    const draft = new UtilityDraft(cryptoDocument(), vi.fn())
+    let finish!: (result: unknown) => void
+    request.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const reconciliation = draft.reconcileVaultDeletion('old-key')
+    await Promise.resolve()
+    draft.session.setState({ key_id: 'later-key' })
+    finish({ document: removed() })
+    expect(await reconciliation).toBe(true)
+    expect(draft.document.config.key_id).toBe('later-key')
+    const newer = new UtilityDraft({ ...cryptoDocument(), version: 8 }, vi.fn())
+    request.mockResolvedValueOnce({ document: removed() })
+    expect(await newer.reconcileVaultDeletion('old-key')).toBe(false)
+    expect(newer.document.version).toBe(8)
+    expect(newer.reconcilingVault).toBe(true)
+  })
+
+  it('three-way comparison distinguishes a remote-only option from an actual concurrent conflict', () => {
+    expect(mergeUtilityConfig({ active: 'cipher', key_id: 'old' }, { active: 'hash', key_id: 'later' }, { active: 'cipher', key_id: '', hash_algorithm: 'SHA-512' }, new Set(['old']))).toEqual({ config: { active: 'hash', key_id: 'later', hash_algorithm: 'SHA-512' }, conflicts: [] })
+    expect(mergeUtilityConfig({ active: 'cipher' }, { active: 'hash' }, { active: 'base64' }, new Set()).conflicts).toEqual(['active'])
   })
 })

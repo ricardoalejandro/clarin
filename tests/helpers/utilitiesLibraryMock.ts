@@ -4,7 +4,7 @@ import type { Route } from '@playwright/test'
 export type MockUtilityDocument = { id: string; type: string; title: string; folder_id: string | null; favorite: boolean; version: number; config: Record<string, unknown>; slots: { slot: string; version: number; bytes: number; content_type: string }[]; created_at: string; updated_at: string; snippet?: string }
 
 /** Stateful test server: browser tests exercise real saves/reloads, not constant fixtures. */
-export function createUtilitiesLibraryMock() {
+export function createUtilitiesLibraryMock(hooks: { duplicateCrypto?: (source: MockUtilityDocument, copy: MockUtilityDocument) => void; deleteDocument?: (document: MockUtilityDocument) => void } = {}) {
   const documents = new Map<string, MockUtilityDocument>()
   const contents = new Map<string, Buffer>()
   const folders: { id: string; name: string; version: number }[] = []
@@ -27,7 +27,8 @@ export function createUtilitiesLibraryMock() {
       else await reply({ folders })
       return true
     }
-    if (path === '/vault') { await reply({ entries: [], available: true }); return true }
+    if (path === '/vault/status') { await reply({ configured: true }); return true }
+    if (path === '/vault/legacy' || /^\/documents\/[^/]+\/vault$/.test(path)) { await reply({ items: [], has_more: false }); return true }
     if (path === '/documents' && method === 'GET') {
       const q = (url.searchParams.get('q') ?? '').toLowerCase()
       const items = [...documents.values()].filter(document => (!url.searchParams.get('type') || document.type === url.searchParams.get('type')) && (!url.searchParams.has('folder_id') || document.folder_id === (url.searchParams.get('folder_id') || null)) && (url.searchParams.get('favorite') !== 'true' || document.favorite) && (!q || document.title.toLowerCase().includes(q) || document.type !== 'criptografia' && document.slots.some(slot => contents.get(`${document.id}/${slot.slot}`)?.toString('utf8').toLowerCase().includes(q))))
@@ -37,6 +38,18 @@ export function createUtilitiesLibraryMock() {
       const input = body(), id = randomUUID(), timestamp = new Date().toISOString()
       const document: MockUtilityDocument = { id, type: input.type, title: input.title, folder_id: input.folder_id ?? null, favorite: false, config: input.config ?? {}, slots: [], version: 1, created_at: timestamp, updated_at: timestamp }
       documents.set(id, document); writes.push(`create:${id}`); await reply({ document }); return true
+    }
+    const duplicate = /^\/documents\/([^/]+)\/duplicate$/.exec(path)
+    if (duplicate && method === 'POST') {
+      const source = documents.get(duplicate[1]), input = body()
+      if (!source || source.type !== 'criptografia') { await reply({}, 404); return true }
+      if (operations.has(input.operation_id)) { await reply(operations.get(input.operation_id)); return true }
+      if (input.base_version !== source.version) { await reply({}, 409); return true }
+      const timestamp = new Date().toISOString()
+      const copy = { ...source, id: randomUUID(), title: input.title, config: { ...(input.config ?? source.config) }, slots: [], version: 1, favorite: false, created_at: timestamp, updated_at: timestamp }
+      hooks.duplicateCrypto?.(source, copy)
+      documents.set(copy.id, copy); writes.push(`duplicate:${source.id}`)
+      const result = { document: copy }; operations.set(input.operation_id, result); await reply(result); return true
     }
     const match = /^\/documents\/([^/]+)(?:\/(content\/([^/]+)|changes))?$/.exec(path)
     if (!match) { await reply({}); return true }
@@ -48,6 +61,7 @@ export function createUtilitiesLibraryMock() {
     if (match[2] === undefined) {
       if (method === 'GET') { await reply({ document }); return true }
       if (method === 'DELETE') {
+        hooks.deleteDocument?.(document)
         documents.delete(document.id); document.slots.forEach(slot => contents.delete(`${document.id}/${slot.slot}`)); writes.push(`delete:${document.id}`)
         if (workspace.open_ids.includes(document.id)) workspace = { ...workspace, open_ids: workspace.open_ids.filter(id => id !== document.id), active_id: workspace.active_id === document.id ? null : workspace.active_id, version: workspace.version + 1 }
         await reply({ deleted: true, cleanup_pending: true, workspace }); return true

@@ -3,11 +3,12 @@
 import { Children, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ArrowDownToLine, Binary, Copy, Eye, EyeOff, Hash, Info, KeyRound, Loader2, LockKeyhole, X } from 'lucide-react'
 import { subscribeWebSocket } from '@/lib/api'
-import { useUtilityDocumentState } from '../library/UtilityDocumentContext'
+import { useUtilityDocument, useUtilityDocumentState } from '../library/UtilityDocumentContext'
 import { libraryRequest, UtilityRequestError } from '../library/libraryApi'
 import { VaultPanel, type VaultSelection } from './VaultPanel'
 import type { KeyMaterial } from './pkiOperations'
 import { CryptoHelp, CryptoHelpContext, CryptoToolbarActions, CryptoToolbarContext } from './CryptoToolbarContext'
+import { documentVaultPath, scopedVaultEvent } from './vaultScope'
 import '../utility-density.css'
 import {
   CryptoInputError, decodeBase64, decodeUtf8, decryptJwe, encodeBase64, encodeHex, encodeUtf8, encryptJwe,
@@ -29,15 +30,19 @@ function columns(width: string) {
 }
 
 function useOperation<T>() {
+  const documentSession = useUtilityDocument()
   const generation = useRef(0)
+  const controller = useRef<AbortController | null>(null)
   const [result, setResult] = useState<T>()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => () => { generation.current++ }, [])
+  useEffect(() => () => { generation.current++; controller.current?.abort() }, [])
+  useEffect(() => documentSession?.registerBeforeDeactivate?.(() => reset()), [documentSession])
 
   function reset() {
     generation.current++
+    controller.current?.abort()
     setResult(undefined)
     setError('')
     setBusy(false)
@@ -48,13 +53,16 @@ function useOperation<T>() {
     setError(message)
   }
 
-  async function run(work: (isCurrent: () => boolean) => T | Promise<T>) {
+  async function run(work: (isCurrent: () => boolean, signal: AbortSignal) => T | Promise<T>) {
+    controller.current?.abort()
+    const request = new AbortController()
+    controller.current = request
     const current = ++generation.current
     setResult(undefined)
     setError('')
     setBusy(true)
     try {
-      const value = await work(() => generation.current === current)
+      const value = await work(() => generation.current === current && !request.signal.aborted, request.signal)
       if (generation.current === current) setResult(value)
     } catch (error) {
       if (generation.current === current) setError(error instanceof CryptoInputError ? error.message : 'No se pudo completar la operación. Puedes reintentar.')
@@ -180,6 +188,7 @@ function changeBounded(value: string, limit: number, setValue: (value: string) =
 }
 
 function CipherPanel({ savedKey, onKeyUnavailable }: { savedKey?: VaultSelection; onKeyUnavailable?: (id: string) => void }) {
+  const documentId = useUtilityDocument()?.documentId || ''
   const [mode, setMode] = useUtilityDocumentState<'encrypt' | 'decrypt'>('cipher_mode', 'encrypt')
   const [algorithm, setAlgorithm] = useUtilityDocumentState<CipherAlgorithm>('cipher_algorithm', 'aes256')
   const [source, setSource] = useState('')
@@ -219,12 +228,12 @@ function CipherPanel({ savedKey, onKeyUnavailable }: { savedKey?: VaultSelection
         : <LabeledField label={`Clave AES de ${algorithm === 'aes128' ? '128' : '256'} bits (Base64)`}><input type="password" autoComplete="off" value={key} className={`${field} font-mono font-normal`} onChange={(event) => updateKey(event.target.value)} /></LabeledField>)}
       <CryptoHelp>Formato JWE compacto. {rsa ? 'RSA-OAEP-256 protege una clave nueva de AES-256-GCM en cada operación.' : 'La clave Base64 puede generarse en Claves.'} Límite de texto de 1 MiB.</CryptoHelp>
       <TaskActions label={encrypting ? 'Cifrar' : 'Descifrar'} busy={operation.busy} error={operation.error} disabled={(!useSaved && !key.trim()) || (!encrypting && !source.trim())}
-        onRun={() => void operation.run(async isCurrent => {
+        onRun={() => void operation.run(async (isCurrent, signal) => {
           let value = key
           if (useSaved && savedKey) {
             let stored: { material: string }
             try {
-              stored = await libraryRequest<{ material: string }>(`/vault/${savedKey.id}/material`)
+              stored = await libraryRequest<{ material: string }>(`${documentVaultPath(documentId, savedKey.id)}/material`, { signal })
             } catch (error) {
               if (isCurrent() && error instanceof UtilityRequestError && error.status === 404) onKeyUnavailable?.(savedKey.id)
               throw error
@@ -373,6 +382,13 @@ const areas = [
 ] as const
 
 export default function CryptoUtility() {
+  const session = useUtilityDocument()
+  return <DocumentCryptoUtility key={session?.documentId || 'standalone'} />
+}
+
+function DocumentCryptoUtility() {
+  const documentSession = useUtilityDocument()
+  const documentId = documentSession?.documentId || ''
   const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
   const [active, setActive] = useUtilityDocumentState<(typeof areas)[number]['id'] | 'vault'>('active', 'cipher')
@@ -383,6 +399,7 @@ export default function CryptoUtility() {
   const [keyNotice, setKeyNotice] = useState('')
   function forgetUnavailableKey(id: string) {
     if (keyIdRef.current !== id) return
+    void documentSession?.reconcileVaultDeletion?.(id)
     keyIdRef.current = ''
     setKeyId('')
     setSavedKey(undefined)
@@ -391,29 +408,40 @@ export default function CryptoUtility() {
   const [visited, setVisited] = useState(() => new Set([active]))
   useEffect(() => { setVisited(previous => new Set([...previous, active])) }, [active])
   useEffect(() => {
-    if (!keyId) { setSavedKey(undefined); return }
+    if (!keyId || !documentId) { setSavedKey(undefined); return }
     let controller: AbortController | undefined
     function reloadKey() {
       if (keyIdRef.current !== keyId) return
       controller?.abort()
       const current = new AbortController()
       controller = current
-      void libraryRequest<{ item: VaultSelection }>(`/vault/${keyId}`, { signal: current.signal }).then(result => {
+      void libraryRequest<{ item: VaultSelection }>(documentVaultPath(documentId, keyId), { signal: current.signal }).then(result => {
         if (current.signal.aborted || keyIdRef.current !== keyId) return
         setSavedKey(result.item.kind === 'rsa' || result.item.kind === 'aes' ? result.item : undefined)
         setKeyNotice('')
-      }).catch(error => {
+      }).catch(async error => {
         if (current.signal.aborted || keyIdRef.current !== keyId) return
-        if (error instanceof UtilityRequestError && error.status === 404) forgetUnavailableKey(keyId)
+        if (!(error instanceof UtilityRequestError) || error.status !== 404) return
+        try {
+          await libraryRequest<{ item: VaultSelection }>(`/vault/legacy/${encodeURIComponent(keyId)}`, { signal: current.signal })
+          if (current.signal.aborted || keyIdRef.current !== keyId) return
+          setSavedKey(undefined)
+          setKeyNotice('Esta clave pertenece a tu biblioteca anterior. Importa una copia en Mis claves para usarla en este documento.')
+        } catch (legacyError) {
+          if (current.signal.aborted || keyIdRef.current !== keyId) return
+          if (legacyError instanceof UtilityRequestError && legacyError.status === 404) forgetUnavailableKey(keyId)
+        }
       })
     }
     reloadKey()
     const release = subscribeWebSocket(message => {
-      const event = message as { event?: string; type?: string; data?: { kind?: string; id?: string } }
-      if ((event.event || event.type) === 'utility_updated' && event.data?.kind === 'vault' && event.data.id === keyId) reloadKey()
+      const event = scopedVaultEvent(message, documentId)
+      if (event?.id !== keyId) return
+      if (event.kind === 'vault_deleted') { controller?.abort(); forgetUnavailableKey(keyId) }
+      else reloadKey()
     })
     return () => { controller?.abort(); release() }
-  }, [keyId])
+  }, [keyId, documentId])
 
   return <section aria-label="Criptografía y codificación" className="utility-density-scope flex min-h-0 w-full flex-1 flex-col gap-2">
     <div className="utility-work-toolbar gap-1 border-b border-slate-200">
@@ -425,7 +453,7 @@ export default function CryptoUtility() {
     <div ref={setActionsHost} className="flex shrink-0 items-center gap-1" data-crypto-primary-actions />
     <button type="button" className={`${control} shrink-0`} aria-label="Información de criptografía" title="Información y límites" aria-expanded={showHelp} aria-controls="crypto-information" onClick={() => setShowHelp(value => !value)}><Info size={16} aria-hidden /></button>
     </div>
-    {keyNotice && <p role="status" className="text-sm text-slate-600">{keyNotice}</p>}
+    {keyNotice && <p role="status" className="text-sm text-slate-600">{keyNotice}{keyId && <button type="button" className={`${control} ml-2`} onClick={() => setActive('vault')}>Abrir Mis claves</button>}</p>}
     <CryptoHelpContext.Provider value={showHelp}>
     {areas.map(({ id, Component }) => visited.has(id) && <div key={id} hidden={active !== id} className={active === id ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}><CryptoToolbarContext.Provider value={active === id ? actionsHost : null}>{id === 'cipher' ? <CipherPanel savedKey={savedKey} onKeyUnavailable={forgetUnavailableKey} /> : <Component />}</CryptoToolbarContext.Provider></div>)}
     {active === 'vault' && <CryptoToolbarContext.Provider value={actionsHost}><VaultPanel onDeleted={forgetUnavailableKey} onUse={item => { keyIdRef.current = item.id; setKeyNotice(''); setKeyId(item.id); setSavedKey(item); if (item.kind === 'rsa' || item.kind === 'aes') setActive('cipher') }} /></CryptoToolbarContext.Provider>}
