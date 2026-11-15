@@ -1,0 +1,58 @@
+/* The independent offline bundles do not load Tailwind. Keep this primitive local. */
+[data-operational-date-field] {
+  display: flex; align-items: center; width: 100%; min-width: 0;
+  border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; color: #0f172a;
+}
+[data-operational-date-field]:focus-within { border-color: #059669; box-shadow: 0 0 0 2px #d1fae5; }
+[data-operational-date-field]:has(input[aria-invalid="true"]) { border-color: #e11d48; }
+[data-operational-date-field] input[type="text"] {
+  flex: 1 1 0; width: 100%; min-width: 0; min-height: 44px; padding: 8px 10px;
+  border: 0; border-radius: 10px; outline: 0; background: transparent; color: #0f172a;
+  font: inherit; font-size: 14px; font-variant-numeric: tabular-nums;
+}
+[data-operational-date-field] input[type="text"] + input[type="text"] { flex: 0 0 76px; width: 76px; border-left: 1px solid #e2e8f0; border-radius: 0; }
+[data-operational-date-trigger] {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px;
+  min-height: 44px; width: 44px; padding: 0; border: 0; border-radius: 0 10px 10px 0;
+  background: transparent; color: #64748b; cursor: pointer;
+}
+[data-operational-date-trigger] svg { width: 16px; height: 16px; }
+[data-operational-date-trigger]:hover { background: #f8fafc; color: #047857; }
+[data-operational-date-trigger]:focus-visible { outline: 2px solid #059669; outline-offset: -3px; }
+[data-operational-picker-backdrop] { position: fixed; inset: 0; padding: 0; border: 0; background: transparent; cursor: default; }
+[data-operational-date-picker] {
+  position: fixed; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid #cbd5e1; border-radius: 14px; background: #fff; color: #0f172a;
+  box-shadow: 0 12px 32px #0f172a26; font-family: inherit; font-size: 14px;
+}
+[data-operational-date-picker] button {
+  min-height: 40px; padding: 6px 8px; border: 0; border-radius: 8px;
+  background: transparent; color: #475569; font: inherit; font-size: 12px; cursor: pointer;
+}
+[data-operational-date-picker] button:hover { background: #ecfdf5; color: #047857; }
+[data-operational-date-picker] button:focus-visible { outline: 2px solid #059669; outline-offset: -2px; }
+[data-operational-date-picker] button:disabled { opacity: .35; cursor: not-allowed; }
+[data-operational-date-picker] svg { width: 16px; height: 16px; }
+[data-operational-date-picker] > div:has(> button) { display: flex; align-items: center; gap: 4px; padding: 8px; }
+[data-operational-date-picker] > div:first-child { border-bottom: 1px solid #e2e8f0; }
+[data-operational-date-picker] > div:first-child > button:nth-child(2) { flex: 1; font-weight: 600; }
+[data-operational-date-picker] [role="grid"] { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; padding: 10px; }
+[data-operational-date-picker] [role="columnheader"] { padding: 4px 0; text-align: center; font-size: 11px; color: #64748b; }
+[data-operational-date-picker] button[data-date-key] { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 38px; padding: 4px; font-size: 12px; }
+[data-operational-date-picker] button[data-date-key][aria-pressed="true"],
+[data-operational-date-picker] [aria-label="Meses"] button[aria-pressed="true"] { background: #059669; color: #fff; }
+[data-operational-date-picker] button[aria-current="date"] { text-decoration: underline; text-underline-offset: 3px; }
+[data-operational-date-picker] label { display: block; padding: 8px; font-size: 12px; color: #64748b; }
+[data-operational-date-picker] input { width: 100%; min-height: 40px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 8px; background: #fff; color: #0f172a; font: inherit; }
+[data-operational-date-picker] [aria-label="Meses"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 8px; }
+[data-operational-date-picker] > div:last-child { position: sticky; bottom: 0; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+[data-operational-date-picker] > div:last-child > button:last-child { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding-inline: 12px; background: #059669; color: #fff; font-weight: 600; }
+@media (pointer: coarse) {
+  [data-operational-date-picker] button { min-width: 44px; min-height: 44px; }
+  [data-operational-date-picker] [role="grid"] { padding: 1px; gap: 0; }
+  [data-operational-date-picker] button[data-date-key] { min-height: 44px; }
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-operational-date-field] input[type="text"], [data-operational-date-trigger] { min-height: 36px; }
+  [data-operational-date-trigger] { width: 36px; flex-basis: 36px; }
+}

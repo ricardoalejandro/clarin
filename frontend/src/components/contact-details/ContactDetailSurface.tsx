@@ -55,6 +55,7 @@ import CrmDetailAccordion, { defaultCrmDetailAccordionState, type CrmDetailSecti
 import { activityAuthorLabel } from '@/components/crm-detail/ScopedActivityPanel'
 import { beginQuickTagMutation, reconcileQuickTagMutation, rollbackQuickTagMutation } from './quickTagMutation'
 import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { clearSubmittedNote, contactFieldColumns, contactTagForeground, hasContactNoteDraft } from './contactExperience'
 import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
@@ -323,6 +324,8 @@ function ContactDetailSurfaceImpl({
   const [editMode, setEditMode] = useState(false)
   const [editDraft, setEditDraft] = useState<ContactEditDraft | null>(null)
   const [editDirty, setEditDirty] = useState(false)
+  const dates = useOperationalDateFields()
+  const contactEditDirty = editDirty || dates.dirty
   const [phoneDraft, setPhoneDraft] = useState<ContactProfileExtraPhonePatch[]>([])
   const [tagCreating, setTagCreating] = useState(false)
   const [quickTagCreating, setQuickTagCreating] = useState(false)
@@ -371,6 +374,7 @@ function ContactDetailSurfaceImpl({
     setEditMode(false)
     setEditDraft(null)
     setEditDirty(false)
+    dates.reset()
     setPhoneDraft([])
     setTagDraft([])
     setCustomFieldDraftValues({})
@@ -452,6 +456,7 @@ function ContactDetailSurfaceImpl({
 
   const enterEditMode = () => {
     if (!profile.contact || !canWriteContact() || profile.saving) return
+    dates.reset()
     setEditDraft(contactEditDraft(profile.contact))
     setPhoneDraft(profile.contact.extra_phones.map(phone => ({ id: phone.id, phone: phone.phone, label: phone.label || '' })))
     setTagDraft(profile.contact.structured_tags)
@@ -469,7 +474,8 @@ function ContactDetailSurfaceImpl({
 
   const abandonEdit = () => {
     if (!canWriteContact()) return
-    if (editDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas descartarlos?')) return
+    if (contactEditDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas descartarlos?')) return
+    dates.reset()
     setEditMode(false)
     setEditDraft(null)
     setEditDirty(false)
@@ -477,11 +483,11 @@ function ContactDetailSurfaceImpl({
   }
 
   const canClose = useCallback(() => {
-    if (editMode && editDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')) return false
+    if (editMode && contactEditDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')) return false
     if (hasContactNoteDraft(newObservation, editingObservationDraft, editingObservation ? editingObservation.notes || '' : undefined)
       && !window.confirm('Hay una nota sin guardar. ¿Deseas cerrar y descartarla?')) return false
     return true
-  }, [editDirty, editMode, newObservation, editingObservationDraft, editingObservation])
+  }, [contactEditDirty, editMode, newObservation, editingObservationDraft, editingObservation])
 
   const requestClose = useCallback(() => {
     if (!canClose()) return false
@@ -500,6 +506,7 @@ function ContactDetailSurfaceImpl({
 
   const saveCompleteContact = async () => {
     if (!canWriteContact() || !editDraft || !profile.contact || profile.saving || tagCreating) return
+    if (!dates.validate()) return
     const session = surfaceLease()
     const ageText = editDraft.age.trim()
     const age = ageText ? Number(ageText) : null
@@ -527,7 +534,7 @@ function ContactDetailSurfaceImpl({
           const numberValue = draft.trim() === '' ? null : Number(draft)
           if (numberValue !== null && !Number.isFinite(numberValue)) throw new Error(`El campo ${definition.name} debe ser numérico.`)
           edited.value_number = numberValue
-        } else if (definition.field_type === 'date') edited.value_date = draft || null
+        } else if (definition.field_type === 'date') edited.value_date = dates.value(`custom:${definition.id}`, draft) || null
         else if (definition.field_type === 'checkbox') edited.value_bool = draft === '' ? null : draft === 'true'
         else if (definition.field_type === 'multi_select') {
           const selected = JSON.parse(draft || '[]') as string[]
@@ -555,7 +562,7 @@ function ContactDetailSurfaceImpl({
         company: editDraft.company.trim() || null,
         age,
         dni: editDraft.dni.trim() || null,
-        birth_date: editDraft.birth_date || null,
+        birth_date: dates.value('birth_date', editDraft.birth_date) || null,
         address: editDraft.address.trim() || null,
         distrito: editDraft.distrito.trim() || null,
         ocupacion: editDraft.ocupacion.trim() || null,
@@ -578,12 +585,13 @@ function ContactDetailSurfaceImpl({
     setEditMode(false)
     setEditDraft(null)
     setEditDirty(false)
+    dates.reset()
   }
 
   useEffect(() => {
     if (!editMode) return
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!editDirty) return
+      if (!contactEditDirty) return
       event.preventDefault()
       event.returnValue = ''
     }
@@ -601,7 +609,7 @@ function ContactDetailSurfaceImpl({
       window.removeEventListener('beforeunload', handleBeforeUnload)
       window.removeEventListener('keydown', handleEscape, true)
     }
-  }, [editDirty, editMode])
+  }, [contactEditDirty, editMode])
 
   useLayoutEffect(() => {
     if (readOnly) {
@@ -817,7 +825,7 @@ function ContactDetailSurfaceImpl({
                     <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Nombre visible</span><input autoFocus type="text" value={editDraft.custom_name} onChange={event => updateEditDraft('custom_name', event.target.value)} placeholder="Nombre que verá el equipo" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Nombre de origen</span><input type="text" value={editDraft.name} onChange={event => updateEditDraft('name', event.target.value)} placeholder="Nombre sincronizado o registrado" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
-                      {profileFields.map(field => <div key={field.key} className={`block ${field.key === 'address' ? 'sm:col-span-2' : ''}`}><span className="mb-1 block text-xs font-semibold text-slate-600">{field.label}</span>{field.inputType === 'date' ? !readOnly && <OperationalDatePicker mode="date" label={field.label} placeholder={field.placeholder} value={editDraft[field.key]} onChange={value => updateEditDraft(field.key, value)} /> : <input aria-label={field.label} type={field.inputType || 'text'} inputMode={field.inputType === 'tel' ? 'tel' : field.inputType === 'number' ? 'numeric' : undefined} value={editDraft[field.key]} onChange={event => updateEditDraft(field.key, event.target.value)} placeholder={field.placeholder} min={field.key === 'age' ? 1 : undefined} max={field.key === 'age' ? 150 : undefined} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}</div>)}
+                      {profileFields.map(field => <div key={field.key} className={`block ${field.key === 'address' ? 'sm:col-span-2' : ''}`}><span className="mb-1 block text-xs font-semibold text-slate-600">{field.label}</span>{field.inputType === 'date' ? <OperationalDatePicker mode="date" disabled={readOnly || profile.saving} label={field.label} placeholder={field.placeholder} value={editDraft[field.key]} onDraftStateChange={dates.track(field.key)} onChange={value => updateEditDraft(field.key, value)} /> : <input aria-label={field.label} type={field.inputType || 'text'} inputMode={field.inputType === 'tel' ? 'tel' : field.inputType === 'number' ? 'numeric' : undefined} value={editDraft[field.key]} onChange={event => updateEditDraft(field.key, event.target.value)} placeholder={field.placeholder} min={field.key === 'age' ? 1 : undefined} max={field.key === 'age' ? 150 : undefined} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}</div>)}
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Notas del contacto</span><textarea rows={4} value={editDraft.notes} onChange={event => updateEditDraft('notes', event.target.value)} placeholder="Notas generales sobre la persona" className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-base leading-relaxed text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
                     </div>
                   </section>
@@ -842,7 +850,7 @@ function ContactDetailSurfaceImpl({
                       {definition.field_type === 'checkbox' ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option><option value="true">Sí</option><option value="false">No</option></select>
                         : definition.field_type === 'select' && options.length > 0 ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
                           : definition.field_type === 'multi_select' ? options.length > 0 ? <div id={`profile-definition-${definition.id}`} className="grid grid-cols-1 gap-2 sm:grid-cols-2">{options.map(option => { const selected = parseMultiDraft(draft).includes(option.value); return <button key={option.value} type="button" aria-pressed={selected} onClick={() => { const current = parseMultiDraft(draft); update(JSON.stringify(selected ? current.filter(item => item !== option.value) : [...current, option.value])) }} className={`min-h-11 rounded-xl border px-3 text-left text-sm font-semibold ${selected ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-600'}`}>{option.label}</button>})}</div> : <input id={`profile-definition-${definition.id}`} type="text" value={parseMultiDraft(draft).join(', ')} onChange={event => update(JSON.stringify(event.target.value.split(',').map(item => item.trim()).filter(Boolean)))} placeholder="Valores separados por coma" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />
-                            : definition.field_type === 'date' ? !readOnly && <OperationalDatePicker mode="date" label={definition.name} value={draft} onChange={update} />
+                            : definition.field_type === 'date' ? <OperationalDatePicker mode="date" disabled={readOnly || profile.saving} label={definition.name} required={definition.is_required} value={draft} onDraftStateChange={dates.track(`custom:${definition.id}`)} onChange={update} />
                               : definition.field_type === 'text' && (definition.config?.text_variant === 'textarea' || definition.config?.text_variant === 'rich') ? <textarea id={`profile-definition-${definition.id}`} rows={4} value={draft} onChange={event => update(event.target.value)} className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />
                                 : <input id={`profile-definition-${definition.id}`} type={definition.field_type === 'number' || definition.field_type === 'currency' ? 'number' : definition.field_type === 'email' ? 'email' : definition.field_type === 'phone' ? 'tel' : 'text'} value={draft} onChange={event => update(event.target.value)} min={definition.config?.min} max={definition.config?.max} maxLength={definition.config?.max_length} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}
                     </div>
@@ -850,8 +858,8 @@ function ContactDetailSurfaceImpl({
                 </div>
                 <footer className="sticky bottom-0 z-20 border-t border-slate-200 bg-white/95 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur">
                   {collectionError && <p className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert">{collectionError}</p>}
-                  <div className="mb-2 flex items-center gap-2 text-xs"><span className={`h-2 w-2 rounded-full ${editDirty ? 'bg-amber-500' : 'bg-slate-300'}`} /><span className={editDirty ? 'font-semibold text-amber-700' : 'text-slate-500'}>{editDirty ? 'Cambios sin guardar' : 'Sin cambios pendientes'}</span></div>
-                  <div className="grid grid-cols-2 gap-2"><button type="button" onClick={abandonEdit} disabled={profile.saving} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancelar</button><button type="submit" disabled={profile.saving || tagCreating || !editDirty} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{profile.saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{profile.saving ? 'Guardando…' : 'Guardar contacto'}</button></div>
+                  <div className="mb-2 flex items-center gap-2 text-xs"><span className={`h-2 w-2 rounded-full ${contactEditDirty ? 'bg-amber-500' : 'bg-slate-300'}`} /><span className={contactEditDirty ? 'font-semibold text-amber-700' : 'text-slate-500'}>{contactEditDirty ? 'Cambios sin guardar' : 'Sin cambios pendientes'}</span></div>
+                  <div className="grid grid-cols-2 gap-2"><button type="button" onClick={abandonEdit} disabled={profile.saving} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancelar</button><button type="submit" disabled={profile.saving || tagCreating || !contactEditDirty || !dates.valid} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{profile.saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{profile.saving ? 'Guardando…' : 'Guardar contacto'}</button></div>
                 </footer>
               </form>
               </div>

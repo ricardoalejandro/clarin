@@ -46,6 +46,21 @@ function gateway(createTask: OfflineDataGateway['createTask']): OfflineDataGatew
 }
 
 describe('OfflineTasksView idempotent retries', () => {
+  it('uses the latest manually written date and refuses malformed calendar dates', async () => {
+    const createTask = vi.fn().mockResolvedValue({ operation_id: 'op', state: 'queued', local_task: task, pending_count: 1, sync })
+    render(<OfflineTasksView gateway={gateway(createTask)} canCreate canComplete onSync={vi.fn()} />)
+    fireEvent.change(await screen.findByPlaceholderText(/Nueva tarea/), { target: { value: 'Fecha sin conexión' } })
+    const date = screen.getByRole('textbox', { name: 'Fecha límite' })
+    fireEvent.change(date, { target: { value: '31/04/2028' } })
+    expect(screen.getByRole('button', { name: 'Crear localmente' })).toBeDisabled()
+    fireEvent.keyDown(date, { key: 'Enter' })
+    expect(createTask).not.toHaveBeenCalled()
+    fireEvent.change(date, { target: { value: '29/02/2028' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear localmente' }))
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1))
+    expect(createTask.mock.calls[0][0]).toMatchObject({ patch: { due_at: new Date('2028-02-29T23:59:59').toISOString() } })
+  })
+
   it('reuses the operation and resource IDs when the local enqueue response was lost', async () => {
     const createTask = vi.fn()
       .mockRejectedValueOnce(new LocalServiceError(0, 'local_service_timeout', 'timeout'))

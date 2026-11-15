@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import type { Lead } from '@/types/contact'
 import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import CrmDetailAccordion, { defaultCrmDetailAccordionState, type CrmDetailSectionKey } from './CrmDetailAccordion'
 
 export type DetachedLeadPatch = {
@@ -46,6 +47,7 @@ type Props = {
   activity: ReactNode
   tasks: ReactNode
   onSave: (patch: DetachedLeadPatch) => Promise<SaveResult>
+  onDirtyChange?: (dirty: boolean) => void
   onMessage?: (phone: string) => void
 }
 
@@ -99,10 +101,11 @@ function embedPanel(node: ReactNode, onCountChange: (count: number) => void) {
   return cloneElement(element, { embedded: true, onCountChange: (count: number) => { onCountChange(count); original?.(count) } })
 }
 
-export default function DetachedLeadDetail({ lead, context, activity, tasks, onSave, onMessage }: Props) {
+export default function DetachedLeadDetail({ lead, context, activity, tasks, onSave, onDirtyChange, onMessage }: Props) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [accordionOpen, setAccordionOpen] = useState(defaultCrmDetailAccordionState)
   const [editing, setEditing] = useState(false)
+  const dates = useOperationalDateFields()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [form, setForm] = useState<FormState>(() => formFromLead(lead))
@@ -110,6 +113,7 @@ export default function DetachedLeadDetail({ lead, context, activity, tasks, onS
   const [taskCount, setTaskCount] = useState(0)
 
   useEffect(() => {
+    dates.reset()
     setAccordionOpen(defaultCrmDetailAccordionState())
     setEditing(false)
     setSaving(false)
@@ -121,18 +125,29 @@ export default function DetachedLeadDetail({ lead, context, activity, tasks, onS
 
   const embeddedActivity = useMemo(() => embedPanel(activity, setActivityCount), [activity])
   const embeddedTasks = useMemo(() => embedPanel(tasks, setTaskCount), [tasks])
+  const dirty = editing && (dates.dirty || JSON.stringify(form) !== JSON.stringify(formFromLead(lead)))
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
+  useEffect(() => {
+    if (!dirty) return
+    const protectDraft = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', protectDraft)
+    return () => window.removeEventListener('beforeunload', protectDraft)
+  }, [dirty])
   const initials = useMemo(() => displayName(lead).split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(''), [lead])
   const toggle = (key: CrmDetailSectionKey) => setAccordionOpen(current => ({ ...current, [key]: !current[key] }))
   const change = (key: keyof FormState, value: string) => { setForm(current => ({ ...current, [key]: value })); setError('') }
-  const cancel = () => { setForm(formFromLead(lead)); setEditing(false); setError('') }
+  const cancel = () => { dates.reset(); setForm(formFromLead(lead)); setEditing(false); setError('') }
 
   const save = async () => {
     if (!form.name.trim() || saving) return
+    if (!dates.validate()) return
     setSaving(true)
     setError('')
     const parsedAge = Number.parseInt(form.age, 10)
     const result = await onSave({
       ...form,
+      birth_date: dates.value('birth_date', form.birth_date),
       name: form.name.trim(),
       age: form.age && Number.isFinite(parsedAge) ? parsedAge : undefined,
     })
@@ -161,7 +176,7 @@ export default function DetachedLeadDetail({ lead, context, activity, tasks, onS
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-800"><span className="font-bold">Sin Contact canónico.</span> Este Lead histórico conserva datos personales propios; sus etiquetas no se mezclarán con las de un Contact.</div>
 
         <CrmDetailAccordion id="detached-lead-contact" title="Información del contacto" summary="Datos históricos guardados en este Lead" icon={UserRound} tone="emerald" open={accordionOpen.contact} onToggle={() => toggle('contact')}>
-          {editing ? <div><div className="grid gap-3 sm:grid-cols-2">{fields.map((field, index) => <div key={field.key} className="block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{field.label}</span>{field.type === 'date' ? <OperationalDatePicker mode="date" label={field.label} value={form[field.key]} onChange={value => change(field.key, value)} /> : <input aria-label={field.label} autoFocus={index === 0} type={field.type || 'text'} value={form[field.key]} onChange={event => change(field.key, event.target.value)} placeholder={field.placeholder} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100" />}</div>)}</div>{error && <p role="alert" className="mt-3 flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-4 w-4" />{error}</p>}<div className="mt-3 flex justify-end gap-2"><button type="button" onClick={cancel} disabled={saving} className="inline-flex min-h-11 items-center gap-1.5 px-3 text-sm font-bold text-slate-600"><X className="h-4 w-4" />Cancelar</button><button type="button" onClick={() => void save()} disabled={saving || !form.name.trim()} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white disabled:opacity-45"><Save className="h-4 w-4" />{saving ? 'Guardando…' : 'Guardar'}</button></div></div> : <div className="grid gap-2 sm:grid-cols-2"><Datum icon={Phone} label="Teléfono" value={lead.phone} /><Datum icon={Mail} label="Correo" value={lead.email} /><Datum icon={Building2} label="Organización" value={lead.company} /><Datum icon={BriefcaseBusiness} label="Ocupación" value={lead.ocupacion} /><Datum icon={MapPin} label="Ubicación" value={[lead.address, lead.distrito].filter(Boolean).join(', ')} /><Datum icon={CalendarDays} label="Nacimiento / edad" value={[lead.birth_date?.split('T')[0], lead.age ? `${lead.age} años` : ''].filter(Boolean).join(' · ')} /></div>}
+          {editing ? <div><div className="grid gap-3 sm:grid-cols-2">{fields.map((field, index) => <div key={field.key} className="block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{field.label}</span>{field.type === 'date' ? <OperationalDatePicker mode="date" disabled={saving} label={field.label} value={form[field.key]} onDraftStateChange={dates.track(field.key)} onChange={value => change(field.key, value)} /> : <input aria-label={field.label} autoFocus={index === 0} type={field.type || 'text'} value={form[field.key]} onChange={event => change(field.key, event.target.value)} placeholder={field.placeholder} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100" />}</div>)}</div>{error && <p role="alert" className="mt-3 flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-4 w-4" />{error}</p>}<div className="mt-3 flex justify-end gap-2"><button type="button" onClick={cancel} disabled={saving} className="inline-flex min-h-11 items-center gap-1.5 px-3 text-sm font-bold text-slate-600"><X className="h-4 w-4" />Cancelar</button><button type="button" onClick={() => void save()} disabled={saving || !form.name.trim() || !dates.valid} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white disabled:opacity-45"><Save className="h-4 w-4" />{saving ? 'Guardando…' : 'Guardar'}</button></div></div> : <div className="grid gap-2 sm:grid-cols-2"><Datum icon={Phone} label="Teléfono" value={lead.phone} /><Datum icon={Mail} label="Correo" value={lead.email} /><Datum icon={Building2} label="Organización" value={lead.company} /><Datum icon={BriefcaseBusiness} label="Ocupación" value={lead.ocupacion} /><Datum icon={MapPin} label="Ubicación" value={[lead.address, lead.distrito].filter(Boolean).join(', ')} /><Datum icon={CalendarDays} label="Nacimiento / edad" value={[lead.birth_date?.split('T')[0], lead.age ? `${lead.age} años` : ''].filter(Boolean).join(' · ')} /></div>}
         </CrmDetailAccordion>
 
         <CrmDetailAccordion id="detached-lead-tags" title="Etiquetas" summary={`${lead.structured_tags?.length || 0} asignada${lead.structured_tags?.length === 1 ? '' : 's'} · registro histórico`} icon={Tag} tone="cyan" open={accordionOpen.tags} onToggle={() => toggle('tags')}>{lead.structured_tags?.length ? <div className="flex flex-wrap gap-2">{lead.structured_tags.map(tag => <span key={tag.id} className="rounded-full px-3 py-1.5 text-xs font-bold text-white" style={{ backgroundColor: tag.color || '#64748b' }}>{tag.name}</span>)}</div> : <p className="text-xs italic text-slate-400">Sin etiquetas asociadas.</p>}</CrmDetailAccordion>

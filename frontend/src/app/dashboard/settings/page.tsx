@@ -25,6 +25,8 @@ import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import PipelineManagementDialog from '@/components/pipelines/PipelineManagementDialog'
 import type { Pipeline } from '@/types/contact'
 import OfflineAccessPanel from '@/components/settings/OfflineAccessPanelV5'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import QuickRepliesSettings from '@/components/settings/QuickRepliesSettings'
 import type { Device } from '@/types/chat'
 import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
@@ -415,6 +417,7 @@ function SortableFieldItem({ field, onEdit, onDelete }: { field: CustomFieldDefi
 
 // ─── Custom Fields Panel ────────────────────────────────────────────────────
 function CustomFieldsPanel() {
+  const defaultDates = useOperationalDateFields()
   const [fields, setFields] = useState<CustomFieldDefinition[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -466,6 +469,7 @@ function CustomFieldsPanel() {
   }, [fetchFields])
 
   const resetForm = () => {
+    defaultDates.reset()
     setFormName('')
     setFormType('text')
     setFormRequired(false)
@@ -488,6 +492,7 @@ function CustomFieldsPanel() {
   }
 
   const openEdit = (field: CustomFieldDefinition) => {
+    defaultDates.reset()
     setEditingField(field)
     setFormName(field.name)
     setFormType(field.field_type)
@@ -544,6 +549,8 @@ function CustomFieldsPanel() {
   }
 
   const handleSave = async () => {
+    const dateField = (editingField ? editingField.field_type : formType) === 'date'
+    if (dateField && !defaultDates.validate()) return
     const err = validate()
     if (err) { setError(err); return }
     setError('')
@@ -553,7 +560,7 @@ function CustomFieldsPanel() {
       const body: any = {
         name: formName.trim(),
         is_required: formRequired,
-        default_value: formDefault.trim() || null,
+        default_value: (dateField ? defaultDates.value('default', formDefault) : formDefault).trim() || null,
         config: buildConfig(),
       }
       if (!editingField) {
@@ -947,9 +954,11 @@ function CustomFieldsPanel() {
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
+                  ) : activeType === 'date' ? (
+                    <OperationalDatePicker mode="date" label="Valor por defecto" value={formDefault} onChange={setFormDefault} onDraftStateChange={defaultDates.track('default')} showQuickValues={false} className="max-w-sm" />
                   ) : (
                     <input
-                      type={activeType === 'number' || activeType === 'currency' ? 'number' : activeType === 'date' ? 'date' : 'text'}
+                      type={activeType === 'number' || activeType === 'currency' ? 'number' : 'text'}
                       value={formDefault}
                       onChange={e => setFormDefault(e.target.value)}
                       placeholder="Ninguno"

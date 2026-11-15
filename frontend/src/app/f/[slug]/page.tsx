@@ -7,6 +7,9 @@ import {
   ArrowRight, AlertCircle
 } from 'lucide-react';
 import { buildSurveySessionEvent, surveySessionRequestHeaders, surveySessionStorageKey, type SurveySessionPhase } from '@/lib/surveySession';
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker';
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields';
+import type { OperationalDateDraftState } from '@/components/operational-date/operationalDateInput';
 
 interface SurveyBranding {
   logo_url?: string;
@@ -70,6 +73,9 @@ export default function PublicFormPage() {
   // -1 = welcome, 0..n-1 = questions, n = thank you
   const [step, setStep] = useState(-1);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const dateAnswers = useOperationalDateFields();
+  const answerValue = useCallback((question: Question) => question.type === 'date'
+    ? dateAnswers.value(question.id, answers[question.id] || '') : answers[question.id] || '', [answers, dateAnswers.value]);
   const [fileUrls, setFileUrls] = useState<Record<string, string>>({});
   const [fileUploadIds, setFileUploadIds] = useState<Record<string, string>>({});
   const [navigationHistory, setNavigationHistory] = useState<number[]>([]);
@@ -119,6 +125,7 @@ export default function PublicFormPage() {
     setError('');
     setStep(-1);
     setAnswers({});
+    dateAnswers.reset();
     setFileUrls({});
     setFileUploadIds({});
     setNavigationHistory([]);
@@ -216,6 +223,7 @@ export default function PublicFormPage() {
 
   const submitResponses = useCallback(async () => {
     if (submitInFlightRef.current) return;
+    if (!dateAnswers.validate()) return;
     submitInFlightRef.current = true;
     setSubmitting(true);
     setValidationError('');
@@ -228,14 +236,14 @@ export default function PublicFormPage() {
       for (let index = 0; index < questions.length;) {
         const question = questions[index];
         reachableQuestionIDs.add(question.id);
-        const jumpIndex = evaluateLogic(question, answers[question.id] || '');
+        const jumpIndex = evaluateLogic(question, answerValue(question));
         index = jumpIndex !== null && jumpIndex > index ? jumpIndex : index + 1;
       }
       const answersList = questions
-        .filter(q => reachableQuestionIDs.has(q.id) && (answers[q.id] || fileUploadIds[q.id]))
+        .filter(q => reachableQuestionIDs.has(q.id) && (answerValue(q) || fileUploadIds[q.id]))
         .map(q => ({
           question_id: q.id,
-          value: answers[q.id] || '',
+          value: answerValue(q),
           upload_id: fileUploadIds[q.id] || undefined,
         }));
 
@@ -272,16 +280,18 @@ export default function PublicFormPage() {
       }
       if (submitAbortRef.current === controller) submitAbortRef.current = null;
     }
-  }, [answers, evaluateLogic, fileUploadIds, questions, recipientToken, slug, survey?.thank_you_redirect_url]);
+  }, [answerValue, dateAnswers.validate, evaluateLogic, fileUploadIds, questions, recipientToken, slug, survey?.thank_you_redirect_url]);
 
   const goNext = useCallback(async () => {
     if (submitInFlightRef.current || submitting || uploading) return;
+    if (currentQuestion?.type === 'date' && !dateAnswers.validate()) return;
+    const currentAnswer = currentQuestion ? answerValue(currentQuestion) : '';
     ensureSessionStarted();
     setValidationError('');
 
     // Validate current question
     if (currentQuestion && currentQuestion.required) {
-      const val = answers[currentQuestion.id] || '';
+      const val = currentAnswer;
       if (!val && !fileUrls[currentQuestion.id]) {
         setValidationError('Esta pregunta es obligatoria');
         return;
@@ -296,9 +306,11 @@ export default function PublicFormPage() {
     }
 
     if (currentQuestion) {
-      if (answers[currentQuestion.id] || fileUploadIds[currentQuestion.id]) trackSession('answered', currentQuestion.id);
+      // Advancing is explicit confirmation, including a complete date still focused.
+      if (currentQuestion.type === 'date') setAnswers(previous => ({ ...previous, [currentQuestion.id]: currentAnswer }));
+      if (currentAnswer || fileUploadIds[currentQuestion.id]) trackSession('answered', currentQuestion.id);
       // Check logic rules
-      const jumpIdx = evaluateLogic(currentQuestion, answers[currentQuestion.id] || '');
+      const jumpIdx = evaluateLogic(currentQuestion, currentAnswer);
       if (jumpIdx !== null) {
         if (jumpIdx >= questions.length) {
           await submitResponses();
@@ -316,12 +328,20 @@ export default function PublicFormPage() {
     } else {
       await submitResponses();
     }
-  }, [step, currentQuestion, answers, fileUrls, fileUploadIds, questions, evaluateLogic, submitResponses, submitting, uploading, ensureSessionStarted, trackSession]);
+  }, [step, currentQuestion, answerValue, dateAnswers.validate, fileUrls, fileUploadIds, questions, evaluateLogic, submitResponses, submitting, uploading, ensureSessionStarted, trackSession]);
 
   const goPrev = () => {
     if (submitInFlightRef.current || submitting || uploading) return;
-    setValidationError('');
     if (navigationHistory.length === 0) return;
+    if (currentQuestion?.type === 'date') {
+      if (!dateAnswers.validate()) {
+        setValidationError('Revisa la fecha antes de volver a la pregunta anterior. Tu respuesta se conserva.');
+        return;
+      }
+      const value = answerValue(currentQuestion);
+      setAnswers(previous => ({ ...previous, [currentQuestion.id]: value }));
+    }
+    setValidationError('');
     setStep(navigationHistory[navigationHistory.length - 1]);
     setNavigationHistory(navigationHistory.slice(0, -1));
   };
@@ -361,6 +381,7 @@ export default function PublicFormPage() {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         const target = e.target;
         if (target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement || (target instanceof HTMLElement && target.isContentEditable)) return;
@@ -525,9 +546,11 @@ export default function PublicFormPage() {
           {/* Input */}
           <div className="mb-8">
             <QuestionInput
+              key={currentQuestion.id}
               question={currentQuestion}
               value={answers[currentQuestion.id] || ''}
               onChange={(val) => { ensureSessionStarted(); setAnswers(prev => ({ ...prev, [currentQuestion.id]: val })); }}
+              onDateDraftStateChange={dateAnswers.track(currentQuestion.id)}
               onFileUpload={(file) => handleFileUpload(currentQuestion.id, file)}
               fileUrl={fileUrls[currentQuestion.id]}
               uploading={uploading}
@@ -580,8 +603,9 @@ export default function PublicFormPage() {
 
 // ─── Question Input Renderer ────────────────────────────────────────────────
 
-function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploading, disabled, accent }: {
+function QuestionInput({ question, value, onChange, onDateDraftStateChange, onFileUpload, fileUrl, uploading, disabled, accent }: {
   question: Question; value: string; onChange: (v: string) => void;
+  onDateDraftStateChange: (state: OperationalDateDraftState) => void;
   onFileUpload: (f: File) => void; fileUrl?: string; uploading: boolean; disabled: boolean; accent: string;
 }) {
   const config = question.config || {};
@@ -723,13 +747,9 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
 
     case 'date':
       return (
-        <input
-          type="date"
-          disabled={disabled}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="survey-focus w-full border-b-2 border-slate-200 bg-transparent py-3 text-xl outline-none transition-colors duration-200 motion-reduce:transition-none"
-        />
+        <OperationalDatePicker mode="date" label={question.title || 'Fecha'} value={value} onChange={onChange}
+          onDraftStateChange={onDateDraftStateChange} disabled={disabled} required={question.required} showQuickValues={false}
+          inputClassName="survey-focus border-b-2 border-slate-200 bg-transparent py-3 text-xl" />
       );
 
     case 'file_upload':

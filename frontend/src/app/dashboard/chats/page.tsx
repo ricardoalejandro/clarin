@@ -2,6 +2,8 @@
 
 import { useEffect, useLayoutEffect, useState, useRef, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search, Plus, Pin, PinOff, Users, RefreshCw, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { formatTime } from '@/utils/format'
@@ -210,15 +212,18 @@ export default function ChatsPage() {
   const [reactionCustomFrom, setReactionCustomFrom] = useState('')
   const [reactionCustomTo, setReactionCustomTo] = useState('')
   const [filterDraft, setFilterDraft] = useState({ view: 'all' as InboxView, reaction: false, from: 'client' as 'any' | 'client' | 'me', emojis: [] as string[], range: '30d' as 'any' | '1d' | '7d' | '30d' | 'custom', customFrom: '', customTo: '' })
+  const filterDates = useOperationalDateFields()
   const filterDialogRef = useRef<HTMLDivElement>(null)
   useAccessibleDialog(showMobileFilters, filterDialogRef, () => setShowMobileFilters(false))
   useChatHistoryLayer(showMobileFilters, '__clarinChatFilters', () => setShowMobileFilters(false))
   const openFilterDraft = () => {
+    filterDates.reset()
     setFilterDraft({ view: inboxView, reaction: filterHasReaction, from: reactionFromMe, emojis: [...reactionEmojis], range: reactionRange, customFrom: reactionCustomFrom, customTo: reactionCustomTo })
     searchInputRef.current?.blur(); setShowMobileFilters(true)
   }
   const applyFilterDraft = () => {
-    setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDraft.customFrom); setReactionCustomTo(filterDraft.customTo); setShowMobileFilters(false)
+    if (!filterDates.validate()) return
+    setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDates.value('from', filterDraft.customFrom)); setReactionCustomTo(filterDates.value('to', filterDraft.customTo)); setShowMobileFilters(false)
   }
   const chatQueryKey = JSON.stringify([pins.scope, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
   const activeChatQueryKeyRef = useRef(chatQueryKey)
@@ -1702,7 +1707,7 @@ export default function ChatsPage() {
                       <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, range: option.v }))} className={`min-h-11 rounded-xl border px-3 text-xs font-semibold ${filterDraft.range === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
-                  {filterDraft.range === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><label className="text-xs text-slate-500">Desde<input type="date" value={filterDraft.customFrom} onChange={event => setFilterDraft(draft => ({ ...draft, customFrom: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label><label className="text-xs text-slate-500">Hasta<input type="date" value={filterDraft.customTo} onChange={event => setFilterDraft(draft => ({ ...draft, customTo: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label></div>}
+                  {filterDraft.range === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><div className="text-xs text-slate-500">Desde<OperationalDatePicker mode="date" label="Desde" value={filterDraft.customFrom} onChange={value => setFilterDraft(draft => ({ ...draft, customFrom: value }))} onDraftStateChange={filterDates.track('from')} showQuickValues={false} /></div><div className="text-xs text-slate-500">Hasta<OperationalDatePicker mode="date" label="Hasta" value={filterDraft.customTo} onChange={value => setFilterDraft(draft => ({ ...draft, customTo: value }))} onDraftStateChange={filterDates.track('to')} showQuickValues={false} /></div></div>}
                 </div>
               </section>
             )}

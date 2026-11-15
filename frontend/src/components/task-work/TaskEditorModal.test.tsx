@@ -68,6 +68,32 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('saves an explicitly added hour from an empty range before blur as a timed task', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask } })
+    renderEditor({ defaultTitle: 'Con hora explícita' })
+    fireEvent.click(screen.getByRole('button', { name: 'Añadir hora' }))
+    const date = screen.getByRole('textbox', { name: 'Fecha de entrega' }), time = screen.getByRole('textbox', { name: 'Fecha de entrega: hora' })
+    fireEvent.change(date, { target: { value: '29/02/2028' } })
+    fireEvent.change(time, { target: { value: '13:30' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({ start_at: '', due_at: new Date('2028-02-29T13:30').toISOString(), is_all_day: false }))
+  })
+
+  it('submits a manually typed delivery without requiring blur and blocks partial input', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask } })
+    renderEditor({ defaultTitle: 'Fecha escrita' })
+    const date = screen.getByRole('textbox', { name: 'Fecha de entrega' })
+    fireEvent.change(date, { target: { value: '29/02/202' } })
+    expect(screen.getByRole('button', { name: 'Crear tarea' })).toBeDisabled()
+    fireEvent.keyDown(document, { key: 'Enter', ctrlKey: true })
+    expect(apiPost).not.toHaveBeenCalled()
+    fireEvent.change(date, { target: { value: '29/02/2028' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({ start_at: '', due_at: new Date('2028-02-29T23:59').toISOString() }))
+  })
+
   it('keeps daily fields outside advanced options and preserves the draft when they expand', () => {
     renderEditor({ defaultTitle: 'Trabajo diario' })
     const advanced = screen.getByText('Opciones avanzadas').closest('details')!
@@ -270,7 +296,7 @@ describe('TaskEditorModal', () => {
     expect(screen.getByRole('dialog', { name: 'Crear subtarea' })).toBeInTheDocument()
     expect(screen.queryByText('Tipo')).not.toBeInTheDocument()
     expect(screen.queryByRole('spinbutton', { name: 'Porcentaje manual' })).not.toBeInTheDocument()
-    expect(document.querySelectorAll('[data-task-date-range-trigger]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-task-date-range-field]')).toHaveLength(1)
     fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Paso verificable' } })
     fireEvent.click(screen.getByRole('button', { name: 'Crear subtarea' }))
 
@@ -363,12 +389,12 @@ describe('TaskEditorModal', () => {
     const dateTrigger = screen.getByRole('button', { name: /Fecha de entrega:/ })
 
     fireEvent.click(dateTrigger)
-    const picker = screen.getByRole('dialog', { name: 'Editar Fecha de entrega' })
+    const picker = screen.getByRole('dialog', { name: 'Elegir Fecha de entrega' })
     fireEvent.keyDown(picker, { key: 'Enter', ctrlKey: true })
     expect(apiPost).not.toHaveBeenCalled()
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fecha de entrega' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Elegir Fecha de entrega' })).not.toBeInTheDocument())
     expect(screen.getByRole('dialog', { name: 'Crear una tarea' })).toBeInTheDocument()
     expect(props.onClose).not.toHaveBeenCalled()
   })

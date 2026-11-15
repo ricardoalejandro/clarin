@@ -78,7 +78,8 @@ import {
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskLocationLabel } from './taskBreadcrumbVisibility'
 import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
-import TaskDateTimePicker from './TaskDateTimePicker'
+import OperationalDatePicker from '../operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
 import { taskDueDateOnlyValue } from './TaskDateRangePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import { allTasksCanBeAdministered, canAdministerTask, canEditTask } from './taskPermissionActions'
@@ -461,6 +462,7 @@ function InlineCreate({
   onMore: (statusId?: string, draft?: TaskInlineDraft) => void
 }) {
   const [open, setOpen] = useState(false)
+  const dateFields = useOperationalDateFields()
   const [listId, setListId] = useState(defaultListId || (lists.length === 1 ? lists[0].id : ''))
   const [title, setTitle] = useState('')
   const [ownerId, setOwnerId] = useState(currentUserId || users[0]?.id || '')
@@ -484,9 +486,10 @@ function InlineCreate({
 
   const draft = (): TaskInlineDraft | undefined => {
     if (!list || !targetStatus) return undefined
-    const dueAt = taskDueDateOnlyValue(dueDate)
+    const latestDate = dateFields.value('due', dueDate)
+    const dueAt = taskDueDateOnlyValue(latestDate)
     return {
-      title: title.trim(), listId: list.id, statusId: targetStatus.id, ownerId, dueDate, priority,
+      title: title.trim(), listId: list.id, statusId: targetStatus.id, ownerId, dueDate: latestDate, priority,
       dueAt, isAllDay: Boolean(dueAt),
     }
   }
@@ -496,14 +499,16 @@ function InlineCreate({
     setOpen(false)
     if (createOperationRef.current?.uncertain) return
     createOperationRef.current = null
+    dateFields.reset()
     setTitle(''); setDueDate(''); setPriority('medium'); setError('')
   }
   const create = async () => {
     if (!title.trim() || !ownerId || !list || !targetStatus || savingRef.current) return
+    if (!dateFields.validate()) return
     savingRef.current = true
     setSaving(true)
     setError('')
-    const dueAt = taskDueDateOnlyValue(dueDate)
+    const dueAt = taskDueDateOnlyValue(dateFields.value('due', dueDate))
     createOperationRef.current = retainTaskCreateOperation(createOperationRef.current, {
       title: title.trim(),
       description: '',
@@ -554,9 +559,9 @@ function InlineCreate({
     {list && !targetStatus && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-medium text-amber-700">La lista no tiene un estado equivalente.</p>}
     <div className="mt-2 grid grid-cols-2 gap-1.5">
       <TaskUserCombobox disabled={saving || creationUncertain} users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
-      <TaskDateTimePicker disabled={saving || creationUncertain} label="Fecha de entrega" allDay value={taskDueDateOnlyValue(dueDate)} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
+      <OperationalDatePicker mode="date" compact disabled={saving || creationUncertain} label="Fecha de entrega" value={dueDate} onDraftStateChange={dateFields.track('due')} onChange={setDueDate} />
       <select disabled={saving || creationUncertain} value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
-      <button type="button" disabled={saving || creationUncertain} onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
+      <button type="button" disabled={saving || creationUncertain} onClick={() => { if (!dateFields.validate()) return; const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
     </div>
     {error && <p className="mt-2 text-[10px] font-medium text-rose-600">{error}</p>}
     <div className="mt-2 flex items-center justify-between"><span className="text-[9px] text-slate-400">Enter para guardar · Esc para cancelar</span><div className="flex gap-1"><button type="button" disabled={saving} onClick={close} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Cancelar"><X className="h-3.5 w-3.5" /></button><button type="button" disabled={!title.trim() || !ownerId || !list || !targetStatus || saving} onClick={() => void create()} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}{creationUncertain ? 'Reintentar creación' : 'Crear'}</button></div></div>

@@ -1,7 +1,12 @@
 'use client'
 
+import type { ContactDetailSurfaceHandle } from '@/components/contact-details/ContactDetailSurface'
+
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
+import { customFieldFilterDateKey, customFieldFilterRowKey, useCustomFieldFilterRows } from '@/components/contact-details/useCustomFieldFilterRows'
 import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Loader2 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
@@ -426,6 +431,9 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
 }
 
 export default function LeadsPage() {
+  const filterDates = useOperationalDateFields()
+  const createLeadDates = useOperationalDateFields()
+  const createEventDates = useOperationalDateFields()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
   const crmWindowStorageScope = useCrmWindowStorageScope('leads')
   const isCompactListWorkspace = workspaceWidth > 0 && workspaceWidth < 900
@@ -483,6 +491,13 @@ export default function LeadsPage() {
 
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
+  const contactDetailRef = useRef<ContactDetailSurfaceHandle>(null)
+  const detachedDirtyRef = useRef(false)
+  const reportDetachedDirty = useCallback((dirty: boolean) => { detachedDirtyRef.current = dirty }, [])
+  const canLeaveDetail = useCallback(() => {
+    if (contactDetailRef.current && !contactDetailRef.current.canClose()) return false
+    return !detachedDirtyRef.current || window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')
+  }, [])
   const [detailLead, setDetailLead] = useState<Lead | null>(null)
   const [scrollToTasks, setScrollToTasks] = useState(false)
   const [observations, setObservations] = useState<Observation[]>([])
@@ -581,7 +596,7 @@ export default function LeadsPage() {
   const [cfVisibleIds, setCfVisibleIds] = useState<Set<string>>(new Set())
   const [showCfColumnPicker, setShowCfColumnPicker] = useState(false)
   const cfColumnPickerRef = useRef<HTMLDivElement>(null)
-  const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
+  const [cfFilters, setCfFilters] = useCustomFieldFilterRows()
 
   // "Más" dropdown menu
   const [showMoreMenu, setShowMoreMenu] = useState(false)
@@ -644,6 +659,7 @@ export default function LeadsPage() {
   } | null>(null)
 
   const openFilters = () => {
+    filterDates.reset()
     filterSnapshotRef.current = {
       stageIds: new Set(filterStageIds),
       includeTags: new Set(filterTagNames),
@@ -1397,6 +1413,7 @@ export default function LeadsPage() {
 
   const handleCreateLead = async (confirmDuplicate = false) => {
     if (!formData.title.trim() || !formData.name.trim() || creatingLead || creatingTag) return
+    if (!createLeadDates.validate()) return
     const token = localStorage.getItem('token')
     setCreatingLead(true)
     try {
@@ -1414,7 +1431,7 @@ export default function LeadsPage() {
           email: formData.email,
           notes: formData.notes,
           dni: formData.dni || undefined,
-          birth_date: formData.birth_date || undefined,
+          birth_date: createLeadDates.value('birth_date', formData.birth_date) || undefined,
           tag_ids: tagSelectionIds(newLeadTags),
           stage_id: stageId || undefined,
           confirm_duplicate: confirmDuplicate,
@@ -1964,6 +1981,7 @@ export default function LeadsPage() {
   }
 
   const openDetailPanel = (lead: Lead) => {
+    if (showDetailPanel && detailLead?.id !== lead.id && !canLeaveDetail()) return
     resetInlineChatState()
     setDetailLead(lead)
     setShowDetailPanel(true)
@@ -2288,13 +2306,15 @@ export default function LeadsPage() {
   // Create event from current lead filters
   const handleCreateEventFromLeads = async () => {
     if (!createEventForm.name) return
+    if (!createEventDates.validate()) return
+    const startsAt = createEventDates.value('start', createEventForm.event_date), endsAt = createEventDates.value('end', createEventForm.event_end)
     setCreatingEvent(true)
     try {
       const body: Record<string, unknown> = {
         name: createEventForm.name,
         description: createEventForm.description || undefined,
-        event_date: createEventForm.event_date ? new Date(createEventForm.event_date).toISOString() : undefined,
-        event_end: createEventForm.event_end ? new Date(createEventForm.event_end).toISOString() : undefined,
+        event_date: startsAt ? new Date(startsAt).toISOString() : undefined,
+        event_end: endsAt ? new Date(endsAt).toISOString() : undefined,
         location: createEventForm.location || undefined,
         color: createEventForm.color,
         // Lead filter criteria (current filters)
@@ -2337,7 +2357,7 @@ export default function LeadsPage() {
         if (showEditModal) { setShowEditModal(false); return }
         if (showFilterDropdown) { discardFilterDraft(); return }
         if (showInlineChat) { closeInlineChatAndRestoreFocus(); return }
-        if (showDetailPanel) { setShowDetailPanel(false); resetInlineChatState(); return }
+        if (showDetailPanel) { e.preventDefault(); e.stopImmediatePropagation(); if (!canLeaveDetail()) return; setShowDetailPanel(false); resetInlineChatState(); return }
       }
     }
     window.addEventListener('keydown', handleEscapeKey)
@@ -2823,21 +2843,11 @@ export default function LeadsPage() {
                       <div className="mt-2 space-y-1.5">
                         <div>
                           <label className="text-[9px] font-semibold text-slate-400 uppercase">Desde</label>
-                          <input
-                            type="date"
-                            value={filterDateFrom}
-                            onChange={e => setFilterDateFrom(e.target.value)}
-                            className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                          />
+                          <OperationalDatePicker mode="date" label="Desde" value={filterDateFrom} onChange={setFilterDateFrom} onDraftStateChange={filterDates.track('from')} showQuickValues={false} compact />
                         </div>
                         <div>
                           <label className="text-[9px] font-semibold text-slate-400 uppercase">Hasta</label>
-                          <input
-                            type="date"
-                            value={filterDateTo}
-                            onChange={e => setFilterDateTo(e.target.value)}
-                            className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                          />
+                          <OperationalDatePicker mode="date" label="Hasta" value={filterDateTo} onChange={setFilterDateTo} onDraftStateChange={filterDates.track('to')} showQuickValues={false} compact />
                         </div>
                       </div>
                     )}
@@ -3010,7 +3020,7 @@ export default function LeadsPage() {
                     })()
                     const needsValue = cf.operator !== 'is_empty' && cf.operator !== 'is_not_empty'
                     return (
-                      <div key={idx} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
+                      <div key={customFieldFilterRowKey(cf)} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
                         <div className="flex items-center gap-1">
                           <select
                             value={cf.field_id}
@@ -3067,12 +3077,13 @@ export default function LeadsPage() {
                           </select>
                         )}
                         {needsValue && fieldType === 'date' && (
-                          <input
-                            type="date"
+                          <OperationalDatePicker
+                            mode="date" label={def?.name || 'Fecha del campo personalizado'} compact showQuickValues={false}
+                            key={cf.field_id} onDraftStateChange={filterDates.track(customFieldFilterDateKey(cf))}
                             value={String(cf.value || '')}
-                            onChange={(e) => {
+                            onChange={(value) => {
                               const next = [...cfFilters]
-                              next[idx] = { ...next[idx], value: e.target.value }
+                              next[idx] = { ...next[idx], value }
                               setCfFilters(next)
                             }}
                             className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
@@ -3297,6 +3308,9 @@ export default function LeadsPage() {
                 </button>
                 <button
                   onClick={() => {
+                    if (!filterDates.validate()) return
+                    setFilterDateFrom(filterDates.value('from', filterDateFrom)); setFilterDateTo(filterDates.value('to', filterDateTo))
+                    setCfFilters(cfFilters.map(cf => cfDefs.find(def => def.id === cf.field_id)?.field_type === 'date' ? { ...cf, value: filterDates.value(customFieldFilterDateKey(cf), String(cf.value || '')) } : cf))
                     setAppliedFormulaType(leadFormulaType)
                     setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
                     filterSnapshotRef.current = null
@@ -4049,12 +4063,7 @@ export default function LeadsPage() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Fecha de nacimiento</label>
-                  <input
-                    type="date"
-                    value={formData.birth_date}
-                    onChange={(e) => setFormData({ ...formData, birth_date: e.target.value })}
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha de nacimiento" value={formData.birth_date} onChange={value => setFormData(current => ({ ...current, birth_date: value }))} onDraftStateChange={createLeadDates.track('birth_date')} showQuickValues={false} />
                 </div>
               </div>
               <div>
@@ -4186,7 +4195,7 @@ export default function LeadsPage() {
           align="right"
           overlayZIndex={110}
           temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"
-          onRequestClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
+          onRequestClose={() => { if (!canLeaveDetail()) return; setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
           contentClassName="min-h-0 flex-1 overflow-hidden"
         >
           <CrmDetailWorkspace
@@ -4277,6 +4286,7 @@ export default function LeadsPage() {
                 )
                 if (!detailLead.contact_id) return (
                   <DetachedLeadDetail
+                    onDirtyChange={reportDetachedDirty}
                     lead={detailLead}
                     context={<>{leadContextPanel}<div className="mt-3 border-t border-violet-100 pt-3">{opportunityPanel}</div></>}
                     activity={<ScopedActivityPanel embedded scope={{ kind: 'lead', leadId: detailLead.id }} description="Solo actividad vinculada a esta oportunidad." onChange={() => { if (viewMode === 'list') { setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next }); fetchBatchObservations([detailLead.id]) } }} />}
@@ -4304,6 +4314,7 @@ export default function LeadsPage() {
                 )
                 return (
                   <ContactDetailSurface
+                    ref={contactDetailRef}
                     contactId={detailLead.contact_id}
                     context={{ type: 'lead', id: detailLead.id }}
                     initialContact={{
@@ -4466,21 +4477,11 @@ export default function LeadsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-sm font-medium text-slate-700">Fecha inicio</label>
-                  <input
-                    type="datetime-local"
-                    value={createEventForm.event_date}
-                    onChange={e => setCreateEventForm(f => ({ ...f, event_date: e.target.value }))}
-                    className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                  />
+                  <OperationalDatePicker mode="datetime" label="Fecha inicio" value={createEventForm.event_date} onChange={value => setCreateEventForm(current => ({ ...current, event_date: value }))} onDraftStateChange={createEventDates.track('start')} showQuickValues={false} />
                 </div>
                 <div>
                   <label className="text-sm font-medium text-slate-700">Fecha fin</label>
-                  <input
-                    type="datetime-local"
-                    value={createEventForm.event_end}
-                    onChange={e => setCreateEventForm(f => ({ ...f, event_end: e.target.value }))}
-                    className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                  />
+                  <OperationalDatePicker mode="datetime" label="Fecha fin" value={createEventForm.event_end} onChange={value => setCreateEventForm(current => ({ ...current, event_end: value }))} onDraftStateChange={createEventDates.track('end')} showQuickValues={false} />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">

@@ -144,6 +144,49 @@ function canonicalComment(body: string, overrides: Partial<TaskComment> = {}): T
 }
 
 describe('TaskDetailDrawer simplified full-editor access', () => {
+  it('autosaves one complete pair after a typed delivery and does not write partial years', async () => {
+    mockTaskDetailAPI([task])
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    const date = screen.getByRole('textbox', { name: 'Fecha de entrega' })
+    fireEvent.change(date, { target: { value: '29/02/202' } }); fireEvent.keyDown(date, { key: 'Enter' })
+    expect(apiMocks.put).not.toHaveBeenCalled()
+    fireEvent.change(date, { target: { value: '29/02/2028' } }); fireEvent.keyDown(date, { key: 'Enter' }); fireEvent.blur(date)
+    await waitFor(() => expect(apiMocks.put).toHaveBeenCalledTimes(1))
+    expect(apiMocks.put).toHaveBeenCalledWith('/api/tasks/task-1', expect.objectContaining({ start_at: '', due_at: new Date('2028-02-29T23:59').toISOString(), is_all_day: true }))
+  })
+
+  it('preserves a partially written date when a newer task snapshot arrives', async () => {
+    mockTaskDetailAPI([task])
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    const date = screen.getByRole('textbox', { name: 'Fecha de entrega' })
+    fireEvent.change(date, { target: { value: '29/02/202' } })
+    const listener = apiMocks.subscribe.mock.calls.at(-1)![0]
+    await act(async () => listener({ event: 'task_update', data: { action: 'updated', task: { ...task, version: 2, due_at: '2030-06-30T18:00:00.000Z' } } }))
+    expect(date).toHaveValue('29/02/202')
+    expect(apiMocks.put).not.toHaveBeenCalled()
+  })
+
+  it('can discard an invalid date and close after edit permission is revoked without saving', async () => {
+    mockTaskDetailAPI([task])
+    const onClose = vi.fn(), confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const props = { taskId: task.id, allTasks: [task], users: [], lists: [], folders: [], workflows: [], onClose, onEdit: vi.fn(), onOpenTask: vi.fn(), onCreateSubtask: vi.fn(), onChanged: vi.fn(), onDeleted: vi.fn(() => true) }
+    render(<TaskDetailDrawer {...props} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Fecha de entrega' }), { target: { value: '31/04/2028' } })
+    const listener = apiMocks.subscribe.mock.calls.at(-1)![0]
+    await act(async () => listener({ event: 'task_update', data: { action: 'updated', task: { ...task, version: 2, permissions: { ...task.permissions!, can_edit: false, can_administer: false } } } }))
+    expect(screen.getByRole('textbox', { name: 'Fecha de entrega' })).toBeDisabled()
+    fireEvent.click(screen.getByTitle('Cerrar'))
+    expect(confirm).toHaveBeenCalledTimes(1); expect(onClose).not.toHaveBeenCalled()
+    confirm.mockReturnValue(true)
+    fireEvent.click(screen.getByTitle('Cerrar'))
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    expect(apiMocks.put).not.toHaveBeenCalled()
+    confirm.mockRestore()
+  })
+
   beforeAll(() => {
     class ResizeObserverMock {
       observe() {}
@@ -404,11 +447,11 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     />)
 
     await screen.findByDisplayValue(task.title)
-    expect(document.querySelectorAll('[data-task-date-range-trigger]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-task-date-range-field]')).toHaveLength(1)
     fireEvent.click(screen.getByRole('button', { name: /Fecha de entrega:/ }))
-    expect(screen.getByRole('dialog', { name: 'Editar Fecha de entrega' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Elegir Fecha de entrega' })).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fecha de entrega' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Elegir Fecha de entrega' })).not.toBeInTheDocument())
     expect(screen.getByRole('dialog', { name: 'Detalle de tarea' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Marcar como finalizada' }))
 
@@ -445,9 +488,7 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     const tomorrow = new Date()
     tomorrow.setDate(tomorrow.getDate() + 1)
     const dueAt = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 0, 0).toISOString()
-    fireEvent.click(screen.getByRole('button', { name: 'Fecha de entrega de la subtarea: Agregar fecha de entrega' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Mañana' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Fecha de entrega de la subtarea' }), { target: { value: `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}` } })
     fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
 
     await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith('/api/tasks/task-1/children', expect.objectContaining({

@@ -142,9 +142,7 @@ describe('TaskBoard semantic visibility', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Agregar tarea' }))
     fireEvent.change(screen.getByPlaceholderText('Nombre de la tarea…'), { target: { value: 'Entrega rápida' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Fecha de entrega: Sin fecha' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Mañana' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Fecha de entrega' }), { target: { value: `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}` } })
     fireEvent.click(screen.getByRole('button', { name: 'Crear' }))
 
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))

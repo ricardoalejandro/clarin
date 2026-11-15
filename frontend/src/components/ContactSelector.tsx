@@ -6,6 +6,7 @@ import FormulaEditor from '@/components/FormulaEditor'
 import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
 
 interface PersonResult {
   id: string
@@ -779,13 +780,11 @@ export default function ContactSelector({
                             <div className="mt-2 space-y-1.5">
                               <div>
                                 <label className="text-[9px] font-semibold text-slate-400 uppercase">Desde</label>
-                                <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)}
-                                  className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400" />
+                                <OperationalDatePicker mode="date" label="Desde" value={filterDateFrom} onChange={setFilterDateFrom} showQuickValues={false} compact />
                               </div>
                               <div>
                                 <label className="text-[9px] font-semibold text-slate-400 uppercase">Hasta</label>
-                                <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)}
-                                  className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400" />
+                                <OperationalDatePicker mode="date" label="Hasta" value={filterDateTo} onChange={setFilterDateTo} showQuickValues={false} compact />
                               </div>
                             </div>
                           )}

@@ -1,0 +1,64 @@
+{
+  "variant": "before",
+  "source": "Exact HEAD components, compiled without altering the checkout",
+  "syntheticOnly": true,
+  "scenarios": [
+    {
+      "width": 320,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "320-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 12,
+        "y": 189,
+        "width": 296,
+        "height": 405.5
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "1440-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 319,
+        "y": 181,
+        "width": 324,
+        "height": 405.5
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "open",
+      "eros": "closed",
+      "name": "1440-sidebar-open-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 405,
+        "y": 181,
+        "width": 324,
+        "height": 405.5
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "open",
+      "eros": "open",
+      "name": "1440-sidebar-open-eros-open",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 273,
+        "y": 181,
+        "width": 324,
+        "height": 405.5
+      }
+    }
+  ],
+  "errors": []
+}
