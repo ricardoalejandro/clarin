@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import JsonUtility from './JsonUtility'
-import { processJson, type DocumentWorkerRequest, type DocumentWorkerResponse } from './jsonOperations'
+import { processJson, type DocumentFileResult, type DocumentWorkerRequest, type DocumentWorkerResponse } from './jsonOperations'
 import { measureDocument } from './jsonLimits'
 import { UtilityDocumentProvider, type UtilityDocumentSession } from '../library/UtilityDocumentContext'
 
 vi.mock('monaco-editor', () => ({ editor: { setTheme: vi.fn(), setModelMarkers: vi.fn() } }))
+vi.mock('@/components/documents/EditorConfirmDialog', () => ({ default: ({ title, children, actions }: { title: string; children: React.ReactNode; actions: React.ReactNode }) => <div role="dialog" aria-label={title}>{children}{actions}</div> }))
+const fileResults: DocumentFileResult[] = []
 vi.mock('./JsonCodeEditor', () => ({
   DocumentCodeEditor: ({ label, model, visible, wrap, onFocus }: { label: string; model: { text: string; write: (text: string) => void }; visible: boolean; wrap: boolean; onFocus: () => void }) =>
     <textarea aria-label={label} hidden={!visible} wrap={wrap ? 'soft' : 'off'} value={model.text} onFocus={onFocus} onChange={event => model.write(event.target.value)} />,
@@ -48,7 +50,13 @@ class JsonWorker {
 
   postMessage(request: DocumentWorkerRequest) {
     queueMicrotask(() => {
-      if (!this.active || request.kind !== 'transform') return
+      if (!this.active) return
+      if (request.kind === 'read-file') {
+        const result = fileResults.shift()
+        if (result) this.onmessage?.({ data: { kind: 'read-file', result } })
+        return
+      }
+      if (request.kind !== 'transform') return
       const result = processJson(request)
       if (result.ok && result.text !== undefined) result.metrics = measureDocument(result.text)
       this.onmessage?.({ data: { kind: 'transform', result } })
@@ -60,6 +68,7 @@ class JsonWorker {
 
 let resizeEditor: (width: number) => void
 beforeEach(() => {
+  fileResults.length = 0
   const matches = Element.prototype.matches
   vi.spyOn(Element.prototype, 'matches').mockImplementation(function (this: Element, selector) { return selector === ':popover-open' ? false : matches.call(this, selector) })
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('pointer: fine'), addEventListener() {}, removeEventListener() {} }))
@@ -80,6 +89,63 @@ function editorAction(name: string) {
   if (!screen.queryByRole('menu', { name: 'Más acciones del editor' })) fireEvent.click(screen.getByRole('button', { name: 'Más acciones del editor' }))
   return screen.getByRole('menuitem', { name })
 }
+
+it('keeps an encoding preview out of autosave until accepted and preserves original-first import order', async () => {
+  vi.stubGlobal('Worker', JsonWorker)
+  const session: UtilityDocumentSession = { documentId: 'review', initialState: {}, readSlot: vi.fn(async () => null), setState: vi.fn(), setSlot: vi.fn(), getSlot: () => undefined, flush: async () => true }
+  render(<UtilityDocumentProvider value={session}><JsonUtility /></UtilityDocumentProvider>)
+  await waitFor(() => expect(session.readSlot).toHaveBeenCalledWith('panel-b'))
+  const input = screen.getByRole('textbox', { name: 'Documento A' })
+  fireEvent.change(input, { target: { value: 'existing draft' } })
+  vi.mocked(session.setSlot).mockClear()
+  const source = '<root>café �</root>'
+  const result: DocumentFileResult = { ok: true, source, syntaxHint: 'xml', metrics: measureDocument(source), warnings: ['El archivo ya contiene caracteres de sustitución.'] }
+  fileResults.push(result)
+  const chooser = screen.getByLabelText('Abrir archivo local')
+  const file = new File(['original bytes'], 'review.xml')
+  fireEvent.change(chooser, { target: { files: [file] } })
+  await screen.findByRole('dialog', { name: 'Revisar codificación' })
+  expect(input).toHaveValue('existing draft')
+  expect(session.setSlot).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+  expect(input).toHaveValue('existing draft')
+  expect(session.setSlot).not.toHaveBeenCalled()
+  fileResults.push(result)
+  fireEvent.change(chooser, { target: { files: [file] } })
+  fireEvent.click(await screen.findByRole('button', { name: 'Usar esta codificación y abrir' }))
+  expect(input).toHaveValue(source)
+  expect(vi.mocked(session.setSlot).mock.calls.map(([slot]) => slot)).toEqual(['original-a', 'panel-a'])
+  expect(vi.mocked(session.setSlot).mock.calls[0][1]).toMatchObject({ type: 'application/octet-stream' })
+})
+
+it('cancels an encoding trial worker and rejects its late preview without touching autosave', async () => {
+  class PendingWorker {
+    static current: PendingWorker
+    onmessage?: (event: { data: DocumentWorkerResponse }) => void
+    terminated = false
+    constructor() { PendingWorker.current = this }
+    postMessage() {}
+    terminate() { this.terminated = true }
+  }
+  vi.stubGlobal('Worker', PendingWorker)
+  const session: UtilityDocumentSession = { documentId: 'cancel-read', initialState: {}, readSlot: vi.fn(async () => null), setState: vi.fn(), setSlot: vi.fn(), getSlot: () => undefined, flush: async () => true }
+  render(<UtilityDocumentProvider value={session}><JsonUtility /></UtilityDocumentProvider>)
+  await waitFor(() => expect(session.readSlot).toHaveBeenCalledWith('panel-b'))
+  const input = screen.getByRole('textbox', { name: 'Documento A' })
+  fireEvent.change(input, { target: { value: 'existing draft' } })
+  vi.mocked(session.setSlot).mockClear()
+  fireEvent.change(screen.getByLabelText('Abrir archivo local'), { target: { files: [new File(['bytes'], 'cancel.xml')] } })
+  act(() => PendingWorker.current.onmessage?.({ data: { kind: 'read-file', result: { ok: false, encodingConflict: true, message: 'Choose encoding' } } }))
+  fireEvent.click(screen.getByRole('button', { name: 'Abrir con esta codificación' }))
+  const trial = PendingWorker.current
+  fireEvent.click(screen.getByRole('button', { name: 'Cancelar apertura' }))
+  expect(trial.terminated).toBe(true)
+  act(() => trial.onmessage?.({ data: { kind: 'read-file', result: { ok: true, source: 'late', converted: true, metrics: measureDocument('late') } } }))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(input).toHaveValue('existing draft')
+  expect(session.setSlot).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Cancelar operación' })).not.toBeInTheDocument()
+})
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -102,6 +168,22 @@ it('restores a selected empty second panel and tolerates invalid saved editor pr
   expect(await screen.findByRole('textbox', { name: 'Documento B' })).toBeVisible()
   expect(screen.getByRole('combobox', { name: 'Formato del documento' })).toHaveValue('strict')
   expect(screen.getByRole('button', { name: 'Restablecer zoom del editor' })).toHaveTextContent('100%')
+})
+
+it('restores normalized UTF-8 slots explicitly even when XML retains its original legacy declaration', async () => {
+  vi.stubGlobal('Worker', JsonWorker)
+  const post = vi.spyOn(JsonWorker.prototype, 'postMessage')
+  const source = '<?xml version="1.0" encoding="windows-1252"?><root>café</root>'
+  fileResults.push({ ok: true, source, syntaxHint: 'xml', metrics: measureDocument(source) })
+  const session: UtilityDocumentSession = {
+    documentId: 'legacy-xml', initialState: { 'json.formats': { a: 'xml', b: 'strict' } },
+    readSlot: vi.fn(async name => name === 'panel-a' ? new Blob([source]) : null),
+    setState: vi.fn(), setSlot: vi.fn(), getSlot: vi.fn(), flush: vi.fn(async () => true),
+  }
+  render(<UtilityDocumentProvider value={session}><JsonUtility /></UtilityDocumentProvider>)
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Documento A' })).toHaveValue(source))
+  expect(post).toHaveBeenCalledWith(expect.objectContaining({ kind: 'read-file', encoding: 'utf-8' }))
+  expect(session.setSlot).not.toHaveBeenCalled()
 })
 
 it('keeps secondary actions in More and limits JSON actions to JSON modes', () => {

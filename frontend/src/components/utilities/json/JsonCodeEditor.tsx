@@ -4,6 +4,7 @@ import { useLayoutEffect, useRef } from 'react'
 import { editor, json, KeyCode, KeyMod, languages, Position, Range } from 'monaco-editor'
 import { jsonLiteralCompletions, xmlClosingTagCompletion } from './documentCompletions'
 import { acceptsEditorZoom, documentRevealSelection, documentWrapOptions, tramRange } from './editorWorkspaceState'
+import { registerLargeJsonSyntax } from './largeJsonSyntax'
 
 globalThis.MonacoEnvironment = {
   getWorker(_moduleId, label) {
@@ -14,7 +15,8 @@ globalThis.MonacoEnvironment = {
 
 // JSON and JSONC can be open together. Explicit local validation owns diagnostics.
 json.jsonDefaults.setDiagnosticsOptions({ validate: false, schemas: [], enableSchemaRequest: false })
-json.jsonDefaults.setModeConfiguration({ ...json.jsonDefaults.modeConfiguration, documentFormattingEdits: false, documentRangeFormattingEdits: false })
+json.jsonDefaults.setModeConfiguration({ ...json.jsonDefaults.modeConfiguration, diagnostics: false, documentFormattingEdits: false, documentRangeFormattingEdits: false })
+registerLargeJsonSyntax(languages)
 
 export function registerDocumentCompletions() {
   const readPrefix = (model: editor.ITextModel, position: Position) =>
@@ -49,6 +51,7 @@ const baseOptions: editor.IStandaloneEditorConstructionOptions = {
   editContext: false,
   fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
   minimap: { enabled: false },
+  maxTokenizationLineLength: 20_000,
   mouseWheelZoom: false,
   padding: { top: 6, bottom: 6 },
   scrollBeyondLastLine: false,

@@ -36,6 +36,26 @@ function decode(bytes: Uint8Array<ArrayBuffer>, encoding: DocumentEncoding) {
   return new TextDecoder(encoding, { fatal: true }).decode(bytes)
 }
 
+/** Validate the whole file without retaining a second decoded large document. */
+function hasNonAsciiUtf8(bytes: Uint8Array<ArrayBuffer>) {
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let nonAscii = false
+  try {
+    for (let at = 0; at < bytes.length; at += 65_536) {
+      const block = decoder.decode(bytes.subarray(at, at + 65_536), { stream: true })
+      nonAscii ||= /[^\x00-\x7f]/.test(block)
+    }
+    return /[^\x00-\x7f]/.test(decoder.decode()) || nonAscii
+  } catch { return false }
+}
+
+function legacyCandidate(bytes: Uint8Array) {
+  // This is an offered choice, never an automatic fallback for invalid UTF-8.
+  // Avoid suggesting a text encoding for obvious binary/control data.
+  return bytes.some(byte => byte >= 0x80) && !bytes.some(byte => byte < 0x20 && byte !== 9 && byte !== 10 && byte !== 13)
+    ? 'windows-1252' as const : undefined
+}
+
 export async function readDocumentFile(file: File, selectedEncoding?: string): Promise<DocumentFileResult> {
   if (file.size > JSON_INPUT_LIMIT) return { ok: false, message: 'El archivo supera el límite de 60 MiB.' }
   let buffer: ArrayBuffer
@@ -50,17 +70,28 @@ export async function readDocumentFile(file: File, selectedEncoding?: string): P
   const declared = normalizedEncoding(declaredInBytes)
   const encoding = explicit ?? detected ?? declared ?? 'utf-8'
   if (!explicit && declaredInBytes && !declared) return { ok: false, encodingConflict: true, message: `El XML declara ${declaredInBytes}. Selecciona explícitamente una codificación compatible.` }
+  if (!explicit && !detected && (declared === 'windows-1252' || declared === 'iso-8859-1') && hasNonAsciiUtf8(bytes)) {
+    return { ok: false, encodingConflict: true, suggestedEncoding: 'utf-8', message: `El XML declara ${declaredInBytes}, pero sus bytes también forman texto UTF-8 válido con caracteres no ASCII. Elige la codificación del archivo; UTF-8 es una opción para revisar.` }
+  }
   let source: string
-  try { source = decode(bytes, encoding) } catch { return { ok: false, encodingConflict: true, message: `El archivo no es texto ${encoding.toUpperCase()} válido. Selecciona su codificación para abrirlo sin reemplazar caracteres.` } }
+  try { source = decode(bytes, encoding) } catch {
+    const suggestedEncoding = encoding === 'utf-8' && !detected ? legacyCandidate(bytes) : undefined
+    return { ok: false, encodingConflict: true, ...(suggestedEncoding ? { suggestedEncoding } : {}), message: `El archivo no es texto ${encoding.toUpperCase()} válido. Selecciona su codificación para abrirlo sin reemplazar caracteres.${suggestedEncoding ? ' Puedes probar WINDOWS-1252 si coincide con el origen del archivo.' : ''}` }
+  }
   const declaration = getXmlDeclaredEncoding(source)
   const actualDeclared = normalizedEncoding(declaration)
   const genericUtf16 = /^utf-16$/i.test(declaration ?? '') && /^utf-16/.test(encoding)
-  if (!explicit && declaration && (!actualDeclared || actualDeclared !== encoding && !genericUtf16)) return { ok: false, encodingConflict: true, message: `La firma del archivo indica ${encoding.toUpperCase()} y la declaración XML indica ${declaration}. Elige la codificación correcta.` }
+  const declarationConflict = declaration && (!actualDeclared || actualDeclared !== encoding && !genericUtf16)
+  if (!explicit && declarationConflict) return { ok: false, encodingConflict: true, suggestedEncoding: encoding, message: `La firma del archivo indica ${encoding.toUpperCase()} y la declaración XML indica ${declaration}. Elige la codificación correcta.` }
   const name = file.name.toLowerCase()
   const syntaxHint = name.endsWith('.xml') ? 'xml' : name.endsWith('.jsonc') ? 'jsonc' : name.endsWith('.json') ? 'strict' : source.trimStart().startsWith('<') ? 'xml' : undefined
   const metrics = measureDocument(source)
   if (metrics.bytes > JSON_INPUT_LIMIT) return { ok: false, message: 'El texto decodificado supera el límite de 60 MiB UTF-8. Se conservó el documento anterior.' }
-  return { ok: true, source, syntaxHint, metrics, xmlEncoding: syntaxHint === 'xml' ? declaration : undefined, ...(encoding !== 'utf-8' ? { encoding, converted: true } : {}) }
+  const warnings: string[] = []
+  if (explicit && detected && explicit !== detected) warnings.push(`La codificación elegida (${encoding.toUpperCase()}) difiere de la firma del archivo (${detected.toUpperCase()}). Revisa los caracteres; el original se conserva.`)
+  if (explicit && declarationConflict) warnings.push(`Se abrió como ${encoding.toUpperCase()}, aunque el XML declara ${declaration}. La declaración se conserva hasta la exportación editada.`)
+  if (source.includes('\uFFFD')) warnings.push('El archivo ya contiene caracteres de sustitución (�). Pueden corresponder a texto perdido antes de abrirlo; cambiar la codificación no permite recuperar con certeza esos caracteres. El original se conserva.')
+  return { ok: true, source, syntaxHint, metrics, xmlEncoding: syntaxHint === 'xml' ? declaration : undefined, ...(encoding !== 'utf-8' ? { encoding, converted: true } : {}), ...(warnings.length ? { warnings } : {}) }
 }
 
 export function prepareUtf8XmlDownload(source: string, signed: boolean) {

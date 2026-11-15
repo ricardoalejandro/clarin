@@ -1,7 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { acceptsEditorZoom, adjustFont, canCompare, DEFAULT_FONT, DIFF_LIMIT, documentRevealSelection, documentWrapOptions, fontZoomPercent, MAX_FONT, MIN_FONT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
+import { acceptsEditorZoom, adjustFont, canCompare, DEFAULT_FONT, DIFF_LIMIT, documentLanguage, documentRevealSelection, documentWrapOptions, fontZoomPercent, LARGE_JSON_LANGUAGE, MAX_FONT, MIN_FONT, repairPreview, tramRange, TRAM_LENGTH, visiblePanels } from './editorWorkspaceState'
 
 describe('estado del espacio de edición', () => {
+  it('keeps XML syntax and uses lexical-only JSON in reduced mode without changing text and long-line safety', () => {
+    const ordinary = { reduced: false, huge: false, plainText: false }
+    const large = { ...ordinary, reduced: true }
+    expect(documentLanguage('xml', ordinary)).toBe('xml')
+    expect(documentLanguage('xml', large)).toBe('xml')
+    for (const format of ['strict', 'jsonc'] as const) {
+      expect(documentLanguage(format, ordinary)).toBe('json')
+      expect(documentLanguage(format, large)).toBe(LARGE_JSON_LANGUAGE)
+    }
+    for (const format of ['xml', 'strict', 'jsonc'] as const) {
+      expect(documentLanguage(format, { ...large, huge: true })).toBe('plaintext')
+      expect(documentLanguage(format, { ...ordinary, plainText: true })).toBe('plaintext')
+      expect(documentLanguage(format, { ...large, plainText: true })).toBe('plaintext')
+    }
+  })
   it('consumes search selection once and never reselects it after typing or undo', () => {
     const target = { offset: TRAM_LENGTH + 10, length: 6, nonce: 1 }
     const selection = documentRevealSelection(null, target, TRAM_LENGTH, TRAM_LENGTH)

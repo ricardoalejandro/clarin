@@ -10,6 +10,77 @@ beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob) })
 afterEach(() => vi.unstubAllGlobals())
 
 describe('utility autosave session', () => {
+  it('reports a per-document display mode without dirtying or persisting it', async () => {
+    const notify = vi.fn(), draft = new UtilityDraft(base(), notify), neighbor = new UtilityDraft({ ...base(), id: 'b' }, vi.fn())
+    const status = { lightPanels: ['a'], chunkedPanels: [] }
+    draft.session.reportDisplayStatus?.(status)
+    expect(draft.displayStatus).toEqual(status)
+    expect(neighbor.displayStatus).toBeUndefined()
+    expect(draft.dirty).toBe(false)
+    expect(await draft.flush()).toBe(true)
+    expect(request).not.toHaveBeenCalled()
+    expect(notify).toHaveBeenCalledTimes(1)
+    draft.session.reportDisplayStatus?.(status)
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('backs up original bytes before persisting the editable import and retries safely after backup failure', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const original = new Blob([new Uint8Array([0xe9, 0x80])], { type: 'application/octet-stream' })
+    draft.session.setSlot('panel-a', 'é€')
+    draft.session.setSlot('original-a', original)
+    request.mockRejectedValueOnce(new UtilityRequestError('Backup unavailable', 503))
+    expect(await draft.flush()).toBe(false)
+    expect(request.mock.calls.map(([path]) => path)).toEqual(['/documents/document-a/content/original-a'])
+    const operation = request.mock.calls[0][1]?.headers
+    request.mockImplementation(async path => ({ document: { ...base(), version: 2 }, content: { slot: path.endsWith('original-a') ? 'original-a' : 'panel-a', version: 1, bytes: 4 } }) as never)
+    expect(await draft.flush()).toBe(true)
+    expect(request.mock.calls.map(([path]) => path)).toEqual(['/documents/document-a/content/original-a', '/documents/document-a/content/original-a', '/documents/document-a/content/panel-a'])
+    expect(request.mock.calls[1][1]?.headers).toEqual(operation)
+    expect(new Uint8Array(await (request.mock.calls[1][1]!.body as Blob).arrayBuffer())).toEqual(new Uint8Array([0xe9, 0x80]))
+  })
+
+  it.each([false, true])('backs up an import arriving during another panel upload before evaluating its text (backup failure: %s)', async backupFails => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    let source = 'previous panel B'
+    const staleProvider = vi.fn(() => source), importedProvider = vi.fn(() => source)
+    draft.session.setSlot('panel-a', 'panel A')
+    draft.session.setSlot('panel-b', staleProvider)
+    let finishPanelA!: (result: unknown) => void
+    request.mockImplementationOnce(() => new Promise(resolve => { finishPanelA = resolve }))
+    request.mockImplementationOnce(async () => {
+      expect(importedProvider).not.toHaveBeenCalled()
+      if (backupFails) throw new UtilityRequestError('Backup unavailable', 503)
+      return { document: { ...base(), version: 3 }, content: { slot: 'original-b', version: 1, bytes: 2 } } as never
+    })
+    request.mockResolvedValueOnce({ document: { ...base(), version: 4 }, content: { slot: 'panel-b', version: 1, bytes: 5 } })
+    const saving = draft.flush()
+    source = 'é€'
+    draft.session.setSlot('original-b', new Blob([new Uint8Array([0xe9, 0x80])], { type: 'application/octet-stream' }))
+    draft.session.setSlot('panel-b', importedProvider)
+    finishPanelA({ document: { ...base(), version: 2 }, content: { slot: 'panel-a', version: 1, bytes: 7 } })
+    expect(await saving).toBe(!backupFails)
+    expect(staleProvider).not.toHaveBeenCalled()
+    expect(request.mock.calls.map(([path]) => path)).toEqual([
+      '/documents/document-a/content/panel-a', '/documents/document-a/content/original-b',
+      ...backupFails ? [] : ['/documents/document-a/content/panel-b'],
+    ])
+    if (backupFails) {
+      expect(importedProvider).not.toHaveBeenCalled()
+      expect(draft.dirty).toBe(true)
+      const failedBackup = request.mock.calls[1][1]!
+      request.mockReset()
+      request.mockImplementation(async path => ({ document: { ...base(), version: 4 }, content: { slot: path.endsWith('original-b') ? 'original-b' : 'panel-b', version: 1, bytes: 5 } }) as never)
+      expect(await draft.flush()).toBe(true)
+      expect(request.mock.calls.map(([path]) => path)).toEqual(['/documents/document-a/content/original-b', '/documents/document-a/content/panel-b'])
+      expect(request.mock.calls[0][1]!.headers).toEqual(failedBackup.headers)
+      expect(request.mock.calls[0][1]!.body).toBe(failedBackup.body)
+    }
+    expect(importedProvider).toHaveBeenCalledOnce()
+    expect(await (request.mock.calls.at(-1)![1]!.body as Blob).text()).toBe('é€')
+    expect(draft.dirty).toBe(false)
+  })
+
   it('does not write empty/unmodified documents, merges configuration and saves once', async () => {
     const draft = new UtilityDraft(base(), vi.fn())
     expect(await draft.flush()).toBe(true)
