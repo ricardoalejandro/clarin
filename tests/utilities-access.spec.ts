@@ -269,6 +269,49 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   expect(await viewport()).toEqual(initialViewport)
 })
 
+test('search text, caret and placeholder remain legible without selection in both editor themes', async ({ page }, testInfo) => {
+  await mockAccount(page, { permission: true })
+  await page.setViewportSize({ width: 1263, height: 650 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  await expect(page.getByTestId('document-editor-a')).toBeVisible()
+  await typeDocument(page, page.getByTestId('document-editor-a'), '{"texto":"Peña café"}')
+  await clickEditorAction(page, 'Buscar en todo el documento')
+  const input = page.getByRole('textbox', { name: 'Texto para buscar en todo el documento' })
+  await input.fill('café')
+  const contrast = () => input.evaluate(element => {
+    const luminance = (color: string) => {
+      const values = (color.match(/[\d.]+/g) ?? []).slice(0, 3).map(component => {
+        const value = Number(component) / 255
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+      })
+      return values[0] * 0.2126 + values[1] * 0.7152 + values[2] * 0.0722
+    }
+    const ratio = (a: string, b: string) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05)
+    const style = getComputedStyle(element)
+    const selected = getComputedStyle(element, '::selection')
+    return {
+      text: ratio(style.color, style.backgroundColor),
+      placeholder: ratio(getComputedStyle(element, '::placeholder').color, style.backgroundColor),
+      selection: ratio(selected.color, selected.backgroundColor),
+      caret: style.caretColor === style.color,
+    }
+  })
+  for (const theme of ['dark', 'light'] as const) {
+    await clickEditorAction(page, 'Preferencias del editor')
+    await page.getByRole('combobox', { name: 'Tema' }).selectOption(theme)
+    await page.keyboard.press('Escape')
+    await input.focus()
+    await input.evaluate(element => element.setSelectionRange(element.value.length, element.value.length))
+    const measured = await contrast()
+    expect(measured.text).toBeGreaterThanOrEqual(4.5)
+    expect(measured.placeholder).toBeGreaterThanOrEqual(4.5)
+    expect(measured.selection).toBeGreaterThanOrEqual(4.5)
+    expect(measured.caret).toBe(true)
+    await expect(input).toHaveValue('café')
+    await page.screenshot({ path: testInfo.outputPath(`search-${theme}-contrast.png`) })
+  }
+})
+
 test('smart formatting groups short properties without flattening the JSON document', async ({ page }) => {
   await mockAccount(page, { permission: true })
   await page.setViewportSize({ width: 1440, height: 900 })

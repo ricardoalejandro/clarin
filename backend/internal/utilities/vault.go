@@ -11,11 +11,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 )
 
 type VaultInput struct {
 	ID          uuid.UUID       `json:"id"`
+	DocumentID  uuid.UUID       `json:"document_id"`
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Kind        string          `json:"kind"`
@@ -27,12 +29,14 @@ type VaultInput struct {
 	OperationID uuid.UUID       `json:"operation_id"`
 }
 type VaultPatch struct {
+	DocumentID  uuid.UUID `json:"document_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	Version     int64     `json:"version"`
 	OperationID uuid.UUID `json:"operation_id"`
 }
 type VaultMaterialInput struct {
+	DocumentID  uuid.UUID       `json:"document_id"`
 	Version     int64           `json:"version"`
 	Material    string          `json:"material"`
 	PublicData  *string         `json:"public_data"`
@@ -40,15 +44,54 @@ type VaultMaterialInput struct {
 	OperationID uuid.UUID       `json:"operation_id"`
 }
 
-const vaultColumns = `id,name,description,kind,algorithm,bits,public_data,metadata,version,created_at,updated_at`
+const vaultColumns = `id,document_id,name,description,kind,algorithm,bits,public_data,metadata,version,created_at,updated_at`
 
 func scanVault(row scanner) (domain.UtilityVaultItem, error) {
 	var v domain.UtilityVaultItem
-	err := row.Scan(&v.ID, &v.Name, &v.Description, &v.Kind, &v.Algorithm, &v.Bits, &v.PublicData, &v.Metadata, &v.Version, &v.CreatedAt, &v.UpdatedAt)
+	err := row.Scan(&v.ID, &v.DocumentID, &v.Name, &v.Description, &v.Kind, &v.Algorithm, &v.Bits, &v.PublicData, &v.Metadata, &v.Version, &v.CreatedAt, &v.UpdatedAt)
 	return v, missing(err)
 }
-func (s *Service) GetVault(ctx context.Context, account, owner, id uuid.UUID) (domain.UtilityVaultItem, error) {
-	return scanVault(s.Store.DB.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3`, account, owner, id))
+
+type vaultQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func requireVaultDocument(ctx context.Context, q vaultQuerier, account, owner, document uuid.UUID, lock bool) error {
+	if document == uuid.Nil {
+		return ErrInvalid
+	}
+	statement := `SELECT id FROM utility_documents WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND type='criptografia'`
+	if lock {
+		var activeAccount uuid.UUID
+		if err := q.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR KEY SHARE`, account).Scan(&activeAccount); err != nil {
+			return missing(err)
+		}
+		statement += ` FOR UPDATE`
+	}
+	var found uuid.UUID
+	return missing(q.QueryRow(ctx, statement, account, owner, document).Scan(&found))
+}
+
+func (s *Service) vaultOperation(ctx context.Context, tx pgx.Tx, account, owner, document, operation, resource uuid.UUID, input any) (json.RawMessage, error) {
+	if err := requireVaultDocument(ctx, tx, account, owner, document, false); err != nil {
+		return nil, err
+	}
+	previous, err := s.Store.operation(ctx, tx, account, owner, operation, resource, input)
+	if err != nil || previous != nil {
+		return previous, err
+	}
+	return nil, requireVaultDocument(ctx, tx, account, owner, document, true)
+}
+
+func (s *Service) GetVault(ctx context.Context, account, owner, document, id uuid.UUID) (domain.UtilityVaultItem, error) {
+	if err := requireVaultDocument(ctx, s.Store.DB, account, owner, document, false); err != nil {
+		return domain.UtilityVaultItem{}, err
+	}
+	return scanVault(s.Store.DB.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4`, account, owner, id, document))
+}
+
+func (s *Service) GetLegacyVault(ctx context.Context, account, owner, id uuid.UUID) (domain.UtilityVaultItem, error) {
+	return scanVault(s.Store.DB.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id IS NULL`, account, owner, id))
 }
 
 func validateVault(in *VaultInput) error {
@@ -147,7 +190,18 @@ func validPublicProjection(value string) bool {
 	return true
 }
 
-func (s *Service) ListVault(ctx context.Context, account, owner uuid.UUID, q, cursorValue string) ([]domain.UtilityVaultItem, string, error) {
+func (s *Service) ListVault(ctx context.Context, account, owner, document uuid.UUID, q, cursorValue string) ([]domain.UtilityVaultItem, string, error) {
+	if err := requireVaultDocument(ctx, s.Store.DB, account, owner, document, false); err != nil {
+		return nil, "", err
+	}
+	return s.listVault(ctx, account, owner, &document, q, cursorValue)
+}
+
+func (s *Service) ListLegacyVault(ctx context.Context, account, owner uuid.UUID, q, cursorValue string) ([]domain.UtilityVaultItem, string, error) {
+	return s.listVault(ctx, account, owner, nil, q, cursorValue)
+}
+
+func (s *Service) listVault(ctx context.Context, account, owner uuid.UUID, document *uuid.UUID, q, cursorValue string) ([]domain.UtilityVaultItem, string, error) {
 	if utf8.RuneCountInString(q) > 128 {
 		return nil, "", ErrInvalid
 	}
@@ -163,9 +217,9 @@ func (s *Service) ListVault(ctx context.Context, account, owner uuid.UUID, q, cu
 		}
 		at = &v
 	}
-	rows, err := s.Store.DB.Query(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2
+	rows, err := s.Store.DB.Query(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND document_id IS NOT DISTINCT FROM $7::uuid
 	 AND ($3='' OR name ILIKE $4 ESCAPE '\' OR description ILIKE $4 ESCAPE '\' OR metadata->>'fingerprint' ILIKE $4 ESCAPE '\')
-	 AND ($5::timestamptz IS NULL OR (created_at,id)<($5::timestamptz,$6::uuid)) ORDER BY created_at DESC,id DESC LIMIT 51`, account, owner, q, escapedPattern(q), at, c.ID)
+	 AND ($5::timestamptz IS NULL OR (created_at,id)<($5::timestamptz,$6::uuid)) ORDER BY created_at DESC,id DESC LIMIT 51`, account, owner, q, escapedPattern(q), at, c.ID, document)
 	if err != nil {
 		return nil, "", err
 	}
@@ -189,8 +243,9 @@ func (s *Service) ListVault(ctx context.Context, account, owner uuid.UUID, q, cu
 	}
 	return items, next, nil
 }
-func (s *Service) CreateVault(ctx context.Context, account, owner uuid.UUID, in VaultInput) (domain.UtilityVaultItem, error) {
+func (s *Service) CreateVault(ctx context.Context, account, owner, document uuid.UUID, in VaultInput) (domain.UtilityVaultItem, error) {
 	var result domain.UtilityVaultItem
+	in.DocumentID = document
 	if s.Cipher == nil {
 		return result, ErrVaultUnavailable
 	}
@@ -205,7 +260,7 @@ func (s *Service) CreateVault(ctx context.Context, account, owner uuid.UUID, in 
 		return result, err
 	}
 	defer tx.Rollback(ctx)
-	previous, err := s.Store.operation(ctx, tx, account, owner, in.OperationID, in.ID, in)
+	previous, err := s.vaultOperation(ctx, tx, account, owner, document, in.OperationID, in.ID, in)
 	if err != nil {
 		return result, err
 	}
@@ -222,8 +277,8 @@ func (s *Service) CreateVault(ctx context.Context, account, owner uuid.UUID, in 
 	if err != nil {
 		return result, err
 	}
-	result, err = scanVault(tx.QueryRow(ctx, `INSERT INTO utility_vault(id,account_id,owner_id,name,description,kind,algorithm,bits,public_data,metadata,object_key,master_key_id,wrapped_key)
-	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING `+vaultColumns, in.ID, account, owner, in.Name, in.Description, in.Kind, in.Algorithm, in.Bits, in.PublicData, in.Metadata, key, keyID, wrapped))
+	result, err = scanVault(tx.QueryRow(ctx, `INSERT INTO utility_vault(id,account_id,owner_id,name,description,kind,algorithm,bits,public_data,metadata,object_key,master_key_id,wrapped_key,document_id)
+	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING `+vaultColumns, in.ID, account, owner, in.Name, in.Description, in.Kind, in.Algorithm, in.Bits, in.PublicData, in.Metadata, key, keyID, wrapped, document))
 	if err != nil {
 		return result, err
 	}
@@ -238,14 +293,17 @@ func (s *Service) CreateVault(ctx context.Context, account, owner uuid.UUID, in 
 	}
 	return result, tx.Commit(ctx)
 }
-func (s *Service) VaultMaterial(ctx context.Context, account, owner, id uuid.UUID) (string, string, json.RawMessage, error) {
+func (s *Service) VaultMaterial(ctx context.Context, account, owner, document, id uuid.UUID) (string, string, json.RawMessage, error) {
+	if err := requireVaultDocument(ctx, s.Store.DB, account, owner, document, false); err != nil {
+		return "", "", nil, err
+	}
 	if s.Cipher == nil {
 		return "", "", nil, ErrVaultUnavailable
 	}
 	var objectKey, keyID, public string
 	var wrapped []byte
 	var metadata json.RawMessage
-	err := s.Store.DB.QueryRow(ctx, `SELECT object_key,master_key_id,wrapped_key,public_data,metadata FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3`, account, owner, id).Scan(&objectKey, &keyID, &wrapped, &public, &metadata)
+	err := s.Store.DB.QueryRow(ctx, `SELECT object_key,master_key_id,wrapped_key,public_data,metadata FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4`, account, owner, id, document).Scan(&objectKey, &keyID, &wrapped, &public, &metadata)
 	if err != nil {
 		return "", "", nil, missing(err)
 	}
@@ -319,8 +377,9 @@ func (s *Service) rotateVaultKeys(ctx context.Context) error {
 	}
 	return tx.Commit(ctx)
 }
-func (s *Service) PatchVault(ctx context.Context, account, owner, id uuid.UUID, in VaultPatch) (domain.UtilityVaultItem, error) {
+func (s *Service) PatchVault(ctx context.Context, account, owner, document, id uuid.UUID, in VaultPatch) (domain.UtilityVaultItem, error) {
 	var result domain.UtilityVaultItem
+	in.DocumentID = document
 	in.Name = strings.TrimSpace(in.Name)
 	if !validName(in.Name, 200) || utf8.RuneCountInString(in.Description) > 2000 || strings.IndexByte(in.Description, 0) >= 0 {
 		return result, ErrInvalid
@@ -333,7 +392,7 @@ func (s *Service) PatchVault(ctx context.Context, account, owner, id uuid.UUID, 
 		return result, err
 	}
 	defer tx.Rollback(ctx)
-	previous, err := s.Store.operation(ctx, tx, account, owner, in.OperationID, id, in)
+	previous, err := s.vaultOperation(ctx, tx, account, owner, document, in.OperationID, id, in)
 	if err != nil {
 		return result, err
 	}
@@ -341,14 +400,14 @@ func (s *Service) PatchVault(ctx context.Context, account, owner, id uuid.UUID, 
 		err = json.Unmarshal(previous, &result)
 		return result, err
 	}
-	result, err = scanVault(tx.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 FOR UPDATE`, account, owner, id))
+	result, err = scanVault(tx.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4 FOR UPDATE`, account, owner, id, document))
 	if err != nil {
 		return result, err
 	}
 	if result.Version != in.Version {
 		return result, ErrConflict
 	}
-	result, err = scanVault(tx.QueryRow(ctx, `UPDATE utility_vault SET name=$4,description=$5,version=version+1,updated_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND version=$6 RETURNING `+vaultColumns, account, owner, id, in.Name, in.Description, in.Version))
+	result, err = scanVault(tx.QueryRow(ctx, `UPDATE utility_vault SET name=$4,description=$5,version=version+1,updated_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND version=$6 AND document_id=$7 RETURNING `+vaultColumns, account, owner, id, in.Name, in.Description, in.Version, document))
 	if errors.Is(err, ErrMissing) {
 		return result, ErrConflict
 	}
@@ -360,38 +419,36 @@ func (s *Service) PatchVault(ctx context.Context, account, owner, id uuid.UUID, 
 	}
 	return result, tx.Commit(ctx)
 }
-func (s *Service) DeleteVault(ctx context.Context, account, owner, id uuid.UUID, version int64) error {
+func (s *Service) DeleteVault(ctx context.Context, account, owner, document, id uuid.UUID, version int64) error {
 	tx, err := s.Store.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireVaultDocument(ctx, tx, account, owner, document, true); err != nil {
+		return err
+	}
 	var current int64
 	var key string
-	err = tx.QueryRow(ctx, `SELECT version,object_key FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 FOR UPDATE`, account, owner, id).Scan(&current, &key)
+	err = tx.QueryRow(ctx, `SELECT version,object_key FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4 FOR UPDATE`, account, owner, id, document).Scan(&current, &key)
 	if err != nil {
 		return missing(err)
 	}
 	if current != version {
 		return ErrConflict
 	}
-	if err = scheduleObject(ctx, tx, account, key, true); err != nil {
+	if err = deleteVaultEntries(ctx, tx, account, owner, []uuid.UUID{id}); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO security_events(type,account_id,user_id,metadata) VALUES('utility_vault_deleted',$1,$2,jsonb_build_object('entry_id',$3::text))`, account, owner, id.String()); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM utility_operations WHERE account_id=$1 AND owner_id=$2 AND resource_id=$3`, account, owner, id); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3`, account, owner, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE utility_documents SET config=jsonb_set(config,'{key_id}','""'::jsonb),version=version+1,updated_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND config->>'key_id'=$4`, account, owner, document, id.String()); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, id uuid.UUID, in VaultMaterialInput) (domain.UtilityVaultItem, error) {
+func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, document, id uuid.UUID, in VaultMaterialInput) (domain.UtilityVaultItem, error) {
 	var result domain.UtilityVaultItem
+	in.DocumentID = document
 	if s.Cipher == nil {
 		return result, ErrVaultUnavailable
 	}
@@ -400,7 +457,7 @@ func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, id uui
 		return result, err
 	}
 	defer tx.Rollback(ctx)
-	previous, err := s.Store.operation(ctx, tx, account, owner, in.OperationID, id, in)
+	previous, err := s.vaultOperation(ctx, tx, account, owner, document, in.OperationID, id, in)
 	if err != nil {
 		return result, err
 	}
@@ -408,7 +465,7 @@ func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, id uui
 		err = json.Unmarshal(previous, &result)
 		return result, err
 	}
-	result, err = scanVault(tx.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 FOR UPDATE`, account, owner, id))
+	result, err = scanVault(tx.QueryRow(ctx, `SELECT `+vaultColumns+` FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4 FOR UPDATE`, account, owner, id, document))
 	if err != nil {
 		return result, err
 	}
@@ -427,7 +484,7 @@ func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, id uui
 		return result, err
 	}
 	var old string
-	if err = tx.QueryRow(ctx, `SELECT object_key FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3`, account, owner, id).Scan(&old); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT object_key FROM utility_vault WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$4`, account, owner, id, document).Scan(&old); err != nil {
 		return result, err
 	}
 	keyID, wrapped, body, err := s.Cipher.Seal(account, owner, id, []byte(in.Material))
@@ -439,7 +496,7 @@ func (s *Service) WriteVaultMaterial(ctx context.Context, account, owner, id uui
 	if err != nil {
 		return result, err
 	}
-	result, err = scanVault(tx.QueryRow(ctx, `UPDATE utility_vault SET object_key=$4,master_key_id=$5,wrapped_key=$6,public_data=$7,metadata=$8,version=version+1,updated_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND id=$3 RETURNING `+vaultColumns, account, owner, id, key, keyID, wrapped, public, metadata))
+	result, err = scanVault(tx.QueryRow(ctx, `UPDATE utility_vault SET object_key=$4,master_key_id=$5,wrapped_key=$6,public_data=$7,metadata=$8,version=version+1,updated_at=NOW() WHERE account_id=$1 AND owner_id=$2 AND id=$3 AND document_id=$9 RETURNING `+vaultColumns, account, owner, id, key, keyID, wrapped, public, metadata, document))
 	if err != nil {
 		return result, err
 	}

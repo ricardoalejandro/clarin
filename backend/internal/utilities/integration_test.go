@@ -3,6 +3,7 @@ package utilities
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -22,6 +23,12 @@ import (
 )
 
 type integrationObjects struct{ *storage.Storage }
+
+type failedUploadObjects struct{ ObjectStorage }
+
+func (s failedUploadObjects) UploadObject(context.Context, string, []byte, string) (string, error) {
+	return "", errors.New("fixture upload failure")
+}
 
 func (s integrationObjects) DeleteFile(ctx context.Context, key string) error {
 	return s.DeleteUtilityObject(ctx, key)
@@ -174,15 +181,19 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 		}
 	})
 	t.Run("vault envelope recovery rotation and physical cleanup", func(t *testing.T) {
-		in := VaultInput{Name: "Clave prueba", Kind: "rsa", Algorithm: "RSA", Material: `{"privateKey":"fixture-private"}`, OperationID: uuid.New()}
-		item, e := s.CreateVault(ctx, a, u, in)
+		cryptoDoc, e := s.Store.Create(ctx, a, u, DocumentInput{Type: "criptografia", Title: "Claves QA", OperationID: uuid.New()})
 		if e != nil {
 			t.Fatal(e)
 		}
-		if _, _, _, e = s.VaultMaterial(ctx, a, v, item.ID); !errors.Is(e, ErrMissing) {
+		in := VaultInput{Name: "Clave prueba", Kind: "rsa", Algorithm: "RSA", Material: `{"privateKey":"fixture-private"}`, OperationID: uuid.New()}
+		item, e := s.CreateVault(ctx, a, u, cryptoDoc.ID, in)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, _, _, e = s.VaultMaterial(ctx, a, v, cryptoDoc.ID, item.ID); !errors.Is(e, ErrMissing) {
 			t.Fatal("vault owner boundary failed", e)
 		}
-		plain, _, _, e := s.VaultMaterial(ctx, a, u, item.ID)
+		plain, _, _, e := s.VaultMaterial(ctx, a, u, cryptoDoc.ID, item.ID)
 		if e != nil || plain != in.Material {
 			t.Fatal("vault recovery failed", e)
 		}
@@ -193,7 +204,7 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 		if e = s.rotateVaultKeys(ctx); e != nil {
 			t.Fatal("rotation maintenance failed", e)
 		}
-		plain, _, _, e = s.VaultMaterial(ctx, a, u, item.ID)
+		plain, _, _, e = s.VaultMaterial(ctx, a, u, cryptoDoc.ID, item.ID)
 		if e != nil || plain != in.Material {
 			t.Fatal("rotated backup recovery failed", e)
 		}
@@ -210,11 +221,11 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 		if _, e = store.UploadObject(ctx, key, stored, "application/octet-stream"); e != nil {
 			t.Fatal(e)
 		}
-		updated, e := s.WriteVaultMaterial(ctx, a, u, item.ID, VaultMaterialInput{Version: item.Version, Material: `{"privateKey":"changed-fixture"}`, OperationID: uuid.New()})
+		updated, e := s.WriteVaultMaterial(ctx, a, u, cryptoDoc.ID, item.ID, VaultMaterialInput{Version: item.Version, Material: `{"privateKey":"changed-fixture"}`, OperationID: uuid.New()})
 		if e != nil {
 			t.Fatal(e)
 		}
-		if e = s.DeleteVault(ctx, a, u, item.ID, updated.Version); e != nil {
+		if e = s.DeleteVault(ctx, a, u, cryptoDoc.ID, item.ID, updated.Version); e != nil {
 			t.Fatal(e)
 		}
 		exec(`UPDATE utility_objects SET available_at=NOW() WHERE account_id=$1 AND resource_id=$2`, a, item.ID)
@@ -233,6 +244,329 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 			if version.Key == key {
 				t.Fatal("a physical object version or delete marker remains")
 			}
+		}
+	})
+	t.Run("document vault ownership independent copies legacy recovery and scoped cleanup", func(t *testing.T) {
+		createDoc := func(account, owner uuid.UUID) domain.UtilityDocument {
+			t.Helper()
+			d, e := s.Store.Create(ctx, account, owner, DocumentInput{Type: "criptografia", Title: "Vault scope fixture", OperationID: uuid.New()})
+			if e != nil {
+				t.Fatal(e)
+			}
+			return d
+		}
+		left, right := createDoc(a, u), createDoc(a, u)
+		input := VaultInput{Name: "Independent fixture", Kind: "rsa", Algorithm: "RSA", Material: `{"privateKey":"fixture-key","certificates":["fixture-cert"],"requests":["fixture-csr"]}`, OperationID: uuid.New()}
+		key, e := s.CreateVault(ctx, a, u, left.ID, input)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if key.DocumentID == nil || *key.DocumentID != left.ID {
+			t.Fatal("missing document ownership")
+		}
+		for _, read := range []func() error{
+			func() error { _, e := s.GetVault(ctx, a, u, right.ID, key.ID); return e },
+			func() error { _, _, _, e := s.VaultMaterial(ctx, a, u, right.ID, key.ID); return e },
+			func() error {
+				_, e := s.PatchVault(ctx, a, u, right.ID, key.ID, VaultPatch{Name: "Forbidden", Version: key.Version, OperationID: uuid.New()})
+				return e
+			},
+			func() error {
+				_, e := s.WriteVaultMaterial(ctx, a, u, right.ID, key.ID, VaultMaterialInput{Version: key.Version, Material: input.Material, OperationID: uuid.New()})
+				return e
+			},
+			func() error { return s.DeleteVault(ctx, a, u, right.ID, key.ID, key.Version) },
+		} {
+			if e = read(); !errors.Is(e, ErrMissing) {
+				t.Fatal("cross-document key access", e)
+			}
+		}
+		if _, e = s.CreateVault(ctx, a, u, right.ID, input); !errors.Is(e, ErrConflict) {
+			t.Fatal("cross-document create replay", e)
+		}
+		page, _, e := s.ListVault(ctx, a, u, right.ID, "", "")
+		if e != nil || len(page) != 0 {
+			t.Fatal("neighbor key leaked into list", e)
+		}
+		if _, e = s.CreateVault(ctx, a, u, doc.ID, VaultInput{Name: "Wrong type", Kind: "aes", Algorithm: "AES", Material: "fixture", OperationID: uuid.New()}); !errors.Is(e, ErrMissing) {
+			t.Fatal("non-crypto vault accepted", e)
+		}
+		config := json.RawMessage(fmt.Sprintf(`{"key_id":%q}`, key.ID.String()))
+		if _, e = s.Store.Patch(ctx, a, u, right.ID, DocumentPatch{BaseVersion: right.Version, Config: config, OperationID: uuid.New()}); !errors.Is(e, ErrMissing) {
+			t.Fatal("cross-document config reference accepted", e)
+		}
+		left, e = s.Store.Patch(ctx, a, u, left.ID, DocumentPatch{BaseVersion: left.Version, Config: config, OperationID: uuid.New()})
+		if e != nil {
+			t.Fatal(e)
+		}
+		extraInput := input
+		extraInput.OperationID = uuid.New()
+		extraKey, e := s.CreateVault(ctx, a, u, left.ID, extraInput)
+		if e != nil {
+			t.Fatal(e)
+		}
+		request := DocumentDuplicate{BaseVersion: left.Version, OperationID: uuid.New(), Title: "Independent copy", Config: left.Config}
+		cloneContext, stopClone := context.WithTimeout(ctx, 30*time.Second)
+		copy, e := s.DuplicateCryptoDocument(cloneContext, a, u, left.ID, request)
+		stopClone()
+		if e != nil {
+			t.Fatal(e)
+		}
+		copiedID, parseError := uuid.Parse(configuredKey(copy.Config))
+		if parseError != nil || copiedID == key.ID {
+			t.Fatal("selected key not remapped")
+		}
+		if copiedKeys, _, e := s.ListVault(ctx, a, u, copy.ID, "", ""); e != nil || len(copiedKeys) != 2 {
+			t.Fatal("clone did not complete both independent uploads", e)
+		}
+		plain, _, _, e := s.VaultMaterial(ctx, a, u, copy.ID, copiedID)
+		if e != nil || plain != input.Material {
+			t.Fatal("copy lost key/certificate/CSR", e)
+		}
+		var originalObject, copyObject string
+		var originalEnvelope, copyEnvelope []byte
+		if e = db.QueryRow(ctx, `SELECT object_key,wrapped_key FROM utility_vault WHERE id=$1`, key.ID).Scan(&originalObject, &originalEnvelope); e != nil {
+			t.Fatal(e)
+		}
+		if e = db.QueryRow(ctx, `SELECT object_key,wrapped_key FROM utility_vault WHERE id=$1`, copiedID).Scan(&copyObject, &copyEnvelope); e != nil {
+			t.Fatal(e)
+		}
+		if originalObject == copyObject || bytes.Equal(originalEnvelope, copyEnvelope) {
+			t.Fatal("copy reused source ciphertext/envelope")
+		}
+		replay, e := s.DuplicateCryptoDocument(ctx, a, u, left.ID, request)
+		if e != nil || replay.ID != copy.ID {
+			t.Fatal("duplicate replay created another document", e)
+		}
+		request.OperationID = uuid.New()
+		request.BaseVersion++
+		if _, e = s.DuplicateCryptoDocument(ctx, a, u, left.ID, request); !errors.Is(e, ErrConflict) {
+			t.Fatal("stale source accepted", e)
+		}
+		request.OperationID = uuid.New()
+		request.BaseVersion = left.Version
+		originalStore := s.Objects
+		s.Objects = failedUploadObjects{s.Objects}
+		_, e = s.DuplicateCryptoDocument(ctx, a, u, left.ID, request)
+		s.Objects = originalStore
+		if e == nil {
+			t.Fatal("failed upload appeared successful")
+		}
+		failedID := uuid.NewSHA1(a, []byte(u.String()+"duplicate|"+request.OperationID.String()))
+		if _, e = s.Store.Get(ctx, a, u, failedID); !errors.Is(e, ErrMissing) {
+			t.Fatal("failed duplicate left a document", e)
+		}
+		var candidates int
+		if e = db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1 AND resource_id=ANY($2::uuid[]) AND state='uploading'`, a, []uuid.UUID{uuid.NewSHA1(failedID, []byte(key.ID.String())), uuid.NewSHA1(failedID, []byte(extraKey.ID.String()))}).Scan(&candidates); e != nil || candidates != 1 {
+			t.Fatal("failed clone has no durable cleanup", e)
+		}
+		if e = s.Store.Delete(ctx, a, u, left.ID, left.Version); e != nil {
+			t.Fatal(e)
+		}
+		if _, _, _, e = s.VaultMaterial(ctx, a, u, copy.ID, copiedID); e != nil {
+			t.Fatal("source deletion damaged copy", e)
+		}
+		if e = db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1 AND resource_id=$2 AND state='gc'`, a, key.ID).Scan(&candidates); e != nil || candidates < 1 {
+			t.Fatal("document deletion omitted key objects", e)
+		}
+		legacyDoc := createDoc(a, u)
+		input.OperationID = uuid.New()
+		legacy, e := s.CreateVault(ctx, a, u, legacyDoc.ID, input)
+		if e != nil {
+			t.Fatal(e)
+		}
+		exec(`UPDATE utility_vault SET document_id=NULL WHERE id=$1`, legacy.ID)
+		exec(`UPDATE utility_documents SET config=jsonb_build_object('key_id',$2::text) WHERE id=$1`, legacyDoc.ID, legacy.ID.String())
+		legacyConfig := json.RawMessage(fmt.Sprintf(`{"key_id":%q,"active":"hash"}`, legacy.ID.String()))
+		legacyDoc, e = s.Store.Patch(ctx, a, u, legacyDoc.ID, DocumentPatch{BaseVersion: legacyDoc.Version, Config: legacyConfig, OperationID: uuid.New()})
+		if e != nil {
+			t.Fatal("legacy reference blocked unrelated preference save", e)
+		}
+		metadata, e := s.GetLegacyVault(ctx, a, u, legacy.ID)
+		if e != nil || metadata.DocumentID != nil {
+			t.Fatal("legacy metadata unavailable", e)
+		}
+		if _, _, _, e = s.VaultMaterial(ctx, a, u, legacyDoc.ID, legacy.ID); !errors.Is(e, ErrMissing) {
+			t.Fatal("legacy material reachable without import", e)
+		}
+		importRequest := LegacyVaultImport{SourceID: legacy.ID, SourceVersion: legacy.Version, OperationID: uuid.New()}
+		imported, e := s.ImportLegacyVault(ctx, a, u, right.ID, importRequest)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if imported.ID == legacy.ID {
+			t.Fatal("legacy key was moved/shared")
+		}
+		if plain, _, _, e = s.VaultMaterial(ctx, a, u, right.ID, imported.ID); e != nil || plain != input.Material {
+			t.Fatal("legacy import changed material", e)
+		}
+		if again, e := s.ImportLegacyVault(ctx, a, u, right.ID, importRequest); e != nil || again.ID != imported.ID {
+			t.Fatal("legacy retry duplicated material", e)
+		}
+		if _, e = s.ImportLegacyVault(ctx, a, u, copy.ID, importRequest); !errors.Is(e, ErrConflict) {
+			t.Fatal("legacy replay crossed document", e)
+		}
+		otherDoc := createDoc(a, v)
+		input.OperationID = uuid.New()
+		otherKey, e := s.CreateVault(ctx, a, v, otherDoc.ID, input)
+		if e != nil {
+			t.Fatal(e)
+		}
+		exec(`UPDATE utility_vault SET document_id=NULL WHERE id=$1`, otherKey.ID)
+		outsideMembership := createDoc(b, u)
+		input.OperationID = uuid.New()
+		outsideKey, e := s.CreateVault(ctx, b, u, outsideMembership.ID, input)
+		if e != nil {
+			t.Fatal(e)
+		}
+		exec(`UPDATE utility_vault SET document_id=NULL WHERE id=$1`, outsideKey.ID)
+		exec(`UPDATE users SET is_super_admin=TRUE WHERE id=$1`, u)
+		manifest, e := s.Store.PrepareLegacyCleanup(ctx, u, u.String())
+		if e != nil || len(manifest.Accounts) != 2 {
+			t.Fatal("superadmin legacy outside membership omitted", e)
+		}
+		exec(`UPDATE utility_vault SET version=version+1 WHERE id=$1`, legacy.ID)
+		for _, scope := range manifest.Accounts {
+			if scope.AccountID == a {
+				if _, e = s.Store.ApplyLegacyCleanupAccount(ctx, manifest, scope); !errors.Is(e, ErrConflict) {
+					t.Fatal("stale cleanup manifest accepted", e)
+				}
+			}
+		}
+		manifest, e = s.Store.PrepareLegacyCleanup(ctx, u, u.String())
+		if e != nil {
+			t.Fatal(e)
+		}
+		deleted := 0
+		for _, scope := range manifest.Accounts {
+			result, e := s.Store.ApplyLegacyCleanupAccount(ctx, manifest, scope)
+			if e != nil {
+				t.Fatal(e)
+			}
+			deleted += result.Deleted
+			if again, e := s.Store.ApplyLegacyCleanupAccount(ctx, manifest, scope); e != nil || again != result {
+				t.Fatal("cleanup replay failed", e)
+			}
+		}
+		if deleted != 2 {
+			t.Fatal("cleanup did not cover both owned scopes", deleted)
+		}
+		if _, e = s.GetLegacyVault(ctx, a, v, otherKey.ID); e != nil {
+			t.Fatal("cleanup deleted another user", e)
+		}
+		if _, _, _, e = s.VaultMaterial(ctx, a, u, right.ID, imported.ID); e != nil {
+			t.Fatal("cleanup deleted new scoped key", e)
+		}
+		legacyDoc, e = s.Store.Get(ctx, a, u, legacyDoc.ID)
+		if e != nil || configuredKey(legacyDoc.Config) != "" {
+			t.Fatal("cleanup left stale document reference", e)
+		}
+		if _, e = s.Store.PrepareLegacyCleanup(ctx, u, "different-user"); !errors.Is(e, ErrMissing) {
+			t.Fatal("cleanup did not verify exact identity", e)
+		}
+	})
+	t.Run("quota reservations serialize without blocking parent foreign keys", func(t *testing.T) {
+		account := uuid.New()
+		exec(`INSERT INTO accounts(id,name,storage_limit_bytes) VALUES($1,'Quota lock fixture',11)`, account)
+		t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM accounts WHERE id=$1`, account) })
+		parent, e := db.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer parent.Rollback(ctx)
+		if _, e = parent.Exec(ctx, `INSERT INTO utility_documents(id,account_id,owner_id,type,title) VALUES($1,$2,$3,'criptografia','Uncommitted parent')`, uuid.New(), account, u); e != nil {
+			t.Fatal(e)
+		}
+		quotaContext, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		if _, e = s.prepareObject(quotaContext, account, u, uuid.New(), 1, "application/octet-stream", "secret"); e != nil {
+			t.Fatal("parent FK blocked reservation", e)
+		}
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		for i := 0; i < 2; i++ {
+			go func() {
+				<-start
+				_, e := s.prepareObject(quotaContext, account, u, uuid.New(), 6, "application/octet-stream", "secret")
+				results <- e
+			}()
+		}
+		close(start)
+		allowed, denied := 0, 0
+		for i := 0; i < 2; i++ {
+			e := <-results
+			if e == nil {
+				allowed++
+			} else if errors.Is(e, ErrQuota) {
+				denied++
+			} else {
+				t.Fatal(e)
+			}
+		}
+		if allowed != 1 || denied != 1 {
+			t.Fatal("quota reservations were not serialized", allowed, denied)
+		}
+		if e = parent.Rollback(ctx); e != nil {
+			t.Fatal(e)
+		}
+	})
+	t.Run("queued account removal cannot hang a child upload reservation", func(t *testing.T) {
+		account := uuid.New()
+		exec(`INSERT INTO accounts(id,name) VALUES($1,'Account lock fixture')`, account)
+		parent, e := db.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer parent.Rollback(ctx)
+		var id uuid.UUID
+		if e = parent.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR KEY SHARE`, account).Scan(&id); e != nil {
+			t.Fatal(e)
+		}
+		connection, e := db.Acquire(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer connection.Release()
+		var pid int
+		if e = connection.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); e != nil {
+			t.Fatal(e)
+		}
+		removed := make(chan error, 1)
+		go func() { _, e := connection.Exec(ctx, `DELETE FROM accounts WHERE id=$1`, account); removed <- e }()
+		waitingContext, stopWaiting := context.WithTimeout(ctx, 5*time.Second)
+		defer stopWaiting()
+		for {
+			var waiting bool
+			if e = db.QueryRow(waitingContext, `SELECT COALESCE(wait_event_type='Lock',FALSE) FROM pg_stat_activity WHERE pid=$1`, pid).Scan(&waiting); e != nil {
+				t.Fatal(e)
+			}
+			if waiting {
+				break
+			}
+			select {
+			case <-waitingContext.Done():
+				t.Fatal("account removal did not queue")
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		reservationContext, stopReservation := context.WithTimeout(ctx, 2*time.Second)
+		_, reservationError := s.prepareObject(reservationContext, account, u, uuid.New(), 1, "application/octet-stream", "secret")
+		stopReservation()
+		// Either compatible locks pass immediately or the queued deletion wins;
+		// the reservation must be cancellable before releasing the parent barrier.
+		if reservationError != nil && !errors.Is(reservationError, context.DeadlineExceeded) && !errors.Is(reservationError, context.Canceled) {
+			t.Fatal("unexpected reservation failure", reservationError)
+		}
+		if e = parent.Rollback(ctx); e != nil {
+			t.Fatal(e)
+		}
+		select {
+		case e = <-removed:
+			if e != nil {
+				t.Fatal(e)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("account removal remained blocked")
 		}
 	})
 	t.Run("original bytes preserve non UTF8 and do not index", func(t *testing.T) {
@@ -285,6 +619,10 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 		}
 	})
 	t.Run("delete removes search journal and all objects", func(t *testing.T) {
+		var liveVaultObjects int
+		if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_vault WHERE account_id=$1`, a).Scan(&liveVaultObjects); e != nil {
+			t.Fatal(e)
+		}
 		if e := s.Store.Delete(ctx, a, u, doc.ID, doc.Version); e != nil {
 			t.Fatal(e)
 		}
@@ -292,17 +630,50 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 			t.Fatal("deleted document readable", e)
 		}
 		exec(`UPDATE utility_objects SET available_at=NOW() WHERE account_id=$1`, a)
-		for i := 0; i < 8; i++ {
+		for i := 0; i < 64; i++ {
+			var due int
+			if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1 AND state IN ('gc','uploading') AND available_at<=NOW()`, a).Scan(&due); e != nil {
+				t.Fatal(e)
+			}
+			if due == 0 {
+				break
+			}
 			if e := s.processGC(ctx); e != nil {
 				t.Fatal(e)
 			}
 		}
 		var count int
-		if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1`, a).Scan(&count); e != nil || count != 0 {
-			t.Fatal("cleanup remains", count, e)
+		if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1 AND resource_id=$2`, a, doc.ID).Scan(&count); e != nil || count != 0 {
+			t.Fatal("deleted document objects remain", count, e)
 		}
+		if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_objects WHERE account_id=$1 AND state IN ('gc','uploading')`, a).Scan(&count); e != nil || count != 0 {
+			t.Fatal("deleted source cleanup remains", count, e)
+		}
+		if e := db.QueryRow(ctx, `SELECT count(*) FROM utility_vault v JOIN utility_objects o ON o.account_id=v.account_id AND o.object_key=v.object_key AND o.state='active' WHERE v.account_id=$1`, a).Scan(&count); e != nil || count != liveVaultObjects {
+			t.Fatal("cleanup removed another live document's key", count, e)
+		}
+		rows, e := db.Query(ctx, `SELECT object_key FROM utility_vault WHERE account_id=$1`, a)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for rows.Next() {
+			var key string
+			if e = rows.Scan(&key); e != nil {
+				rows.Close()
+				t.Fatal(e)
+			}
+			if _, e = store.GetFileInfo(ctx, key); e != nil {
+				rows.Close()
+				t.Fatal("live key bytes were removed", e)
+			}
+		}
+		if e = rows.Err(); e != nil {
+			rows.Close()
+			t.Fatal(e)
+		}
+		rows.Close()
 		for _, table := range []string{"utility_search_chunks", "utility_changes", "utility_content"} {
-			if e := db.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE account_id=$1", table), a).Scan(&count); e != nil || count != 0 {
+			if e := db.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE account_id=$1 AND document_id=$2", table), a, doc.ID).Scan(&count); e != nil || count != 0 {
 				t.Fatal("dependent data remains", table, e)
 			}
 		}

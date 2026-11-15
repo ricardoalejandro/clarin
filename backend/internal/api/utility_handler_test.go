@@ -61,6 +61,34 @@ func TestUtilityVaultStatusNeedsAuthenticatedUtilityPermissionAndIsNoStore(t *te
 	}
 }
 
+func TestUtilityVaultClosesUnscopedMaterialRoutesAndRejectsInvalidDocumentContext(t *testing.T) {
+	app := fiber.New()
+	server := &Server{utilities: &utilities.Service{}}
+	claims := &service.JWTClaims{AccountID: uuid.New(), UserID: uuid.New(), Permissions: []string{domain.PermUtilities}}
+	group := app.Group("/api", func(c *fiber.Ctx) error { c.Locals("claims", claims); return c.Next() })
+	server.registerUtilityRoutes(group)
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/vault", 404}, {http.MethodPost, "/vault", 404},
+		{http.MethodGet, "/vault/" + uuid.NewString() + "/material", 404},
+		{http.MethodPut, "/vault/" + uuid.NewString() + "/material", 404},
+		{http.MethodGet, "/vault/legacy/" + uuid.NewString() + "/material", 404},
+		{http.MethodGet, "/documents/invalid/vault", 400},
+		{http.MethodGet, "/documents/" + uuid.NewString() + "/vault/invalid", 400},
+	} {
+		response, err := app.Test(httptest.NewRequest(tc.method, "/api/utilities"+tc.path, strings.NewReader(`{}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != tc.status {
+			t.Fatalf("%s %s: got %d expected %d", tc.method, tc.path, response.StatusCode, tc.status)
+		}
+	}
+}
+
 type utilityRetentionRow struct {
 	value bool
 	err   error
@@ -176,7 +204,7 @@ func TestUtilityInvalidIDsAndMissingVersionsNeverReachStorage(t *testing.T) {
 	claims := &service.JWTClaims{AccountID: uuid.New(), UserID: uuid.New(), Permissions: []string{domain.PermUtilities}}
 	group := app.Group("/api", func(c *fiber.Ctx) error { c.Locals("claims", claims); return c.Next() })
 	server.registerUtilityRoutes(group)
-	for _, path := range []string{"/api/utilities/documents/not-uuid", "/api/utilities/vault/not-uuid"} {
+	for _, path := range []string{"/api/utilities/documents/not-uuid", "/api/utilities/documents/" + uuid.NewString() + "/vault/not-uuid"} {
 		response, err := app.Test(httptest.NewRequest(http.MethodDelete, path, strings.NewReader("")))
 		if err != nil {
 			t.Fatal(err)

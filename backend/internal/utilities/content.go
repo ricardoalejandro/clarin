@@ -112,8 +112,17 @@ func (s *Service) prepareObject(ctx context.Context, account, owner, resource uu
 		return "", err
 	}
 	defer tx.Rollback(ctx)
+	// A concurrent account removal can be queued ahead of this separate quota
+	// reservation. Bound row-lock waits so no parent transaction can wait on its
+	// own child indefinitely while the removal waits for the parent's FK locks.
+	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'`); err != nil {
+		return "", err
+	}
 	var limit int64
-	if err = tx.QueryRow(ctx, `SELECT storage_limit_bytes FROM accounts WHERE id=$1 FOR UPDATE`, account).Scan(&limit); err != nil {
+	// Quota reservations must serialize without blocking KEY SHARE locks held
+	// by a parent transaction's new document/key foreign keys. FOR UPDATE here
+	// deadlocks a document clone waiting on its own upload reservation.
+	if err = tx.QueryRow(ctx, `SELECT storage_limit_bytes FROM accounts WHERE id=$1 FOR NO KEY UPDATE`, account).Scan(&limit); err != nil {
 		return "", missing(err)
 	}
 	if limit > 0 {

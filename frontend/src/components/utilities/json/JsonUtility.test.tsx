@@ -159,6 +159,22 @@ it('uses Clarin’s high-contrast form style only in the dark theme', () => {
   expect(syntax).not.toHaveClass('dark-input')
 })
 
+it('keeps the search and format fields in the editor theme through light and dark changes', () => {
+  render(<JsonUtility />)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Documento A' }), { target: { value: '{"texto":"Peña café"}' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Buscar en todo el documento' }))
+  const search = screen.getByRole('textbox', { name: 'Texto para buscar en todo el documento' })
+  const syntax = screen.getByRole('combobox', { name: 'Formato del documento' })
+  expect(search).toHaveClass('json-editor-field')
+  expect(syntax).toHaveClass('json-editor-field')
+  expect(search.closest('[data-editor-theme]')).toHaveAttribute('data-editor-theme', 'dark')
+  fireEvent.change(search, { target: { value: 'Peña café' } })
+  fireEvent.change(screen.getByLabelText('Tema'), { target: { value: 'light' } })
+  expect(search.closest('[data-editor-theme]')).toHaveAttribute('data-editor-theme', 'light')
+  expect(search).toHaveValue('Peña café')
+  expect(screen.getByRole('textbox', { name: 'Documento A' })).not.toHaveClass('json-editor-field')
+})
+
 it('restores a selected empty second panel and tolerates invalid saved editor preferences', async () => {
   const session: UtilityDocumentSession = {
     documentId: 'document-b', initialState: { 'json.active': 'b', 'json.split': true, 'json.font': 5000, 'json.formats': null },

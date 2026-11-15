@@ -14,6 +14,24 @@ function definitivelyRejected(error: unknown) {
     && error.status >= 400 && error.status < 500 && ![408, 409, 429].includes(error.status)
 }
 
+export function mergeUtilityConfig(baseline: Record<string, unknown>, local: Record<string, unknown>, server: Record<string, unknown>, deletedKeys: ReadonlySet<string>) {
+  const merged: Record<string, unknown> = {}, conflicts: string[] = []
+  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+  for (const key of new Set([...Object.keys(baseline), ...Object.keys(local), ...Object.keys(server)])) {
+    const before = baseline[key], remote = server[key]
+    const current = key === 'key_id' && deletedKeys.has(String(local[key])) ? '' : local[key]
+    // Deleting the former selection cannot erase a different key selected later.
+    const laterSelection = key === 'key_id' && deletedKeys.has(String(before)) && !remote && Boolean(current) && !deletedKeys.has(String(current))
+    const value = same(current, before) ? remote : same(remote, before) || same(current, remote) || laterSelection ? current : (conflicts.push(key), current)
+    if (value !== undefined) merged[key] = value
+  }
+  return { config: merged, conflicts }
+}
+
+function sameConfig(left: Record<string, unknown>, right: Record<string, unknown>) {
+  return Object.keys(left).length === Object.keys(right).length && Object.keys(left).every(key => Object.hasOwn(right, key) && JSON.stringify(left[key]) === JSON.stringify(right[key]))
+}
+
 /** Owns one document's draft. Nothing is written to browser persistence. */
 export class UtilityDraft {
   document: UtilityDocument
@@ -26,6 +44,12 @@ export class UtilityDraft {
   private saving: Promise<boolean> | null = null
   private disposed = false
   private pendingConfig?: PendingConfig
+  private baselineConfig: Record<string, unknown>
+  private configConflicts = new Set<string>()
+  private vaultPending = new Set<string>()
+  private vaultReconciled = new Set<string>()
+  private reconciling: Promise<boolean> | null = null
+  private stateListeners = new Set<(state: Record<string, unknown>) => void>()
   private pendingSlots = new Map<string, PendingSlot>()
   private readonly controller = new AbortController()
   private readers = new Map<string, Promise<Blob | null>>()
@@ -34,6 +58,7 @@ export class UtilityDraft {
 
   constructor(document: UtilityDocument, private notify: () => void) {
     this.document = { ...document, config: { ...document.config } }
+    this.baselineConfig = { ...document.config }
     this.session = {
       documentId: document.id, initialState: this.document.config,
       readSlot: name => this.read(name),
@@ -61,14 +86,17 @@ export class UtilityDraft {
         if (this.disposed || JSON.stringify(this.displayStatus) === JSON.stringify(status)) return
         this.displayStatus = status; this.notify()
       },
+      reconcileVaultDeletion: keyId => this.reconcileVaultDeletion(keyId),
+      subscribeState: listener => { this.stateListeners.add(listener); return () => { this.stateListeners.delete(listener) } },
       flush: () => this.flush(),
     }
   }
 
   private value(source: UtilitySlotSource): UtilitySlotValue { return typeof source === 'function' ? source() : source }
   private blob(source: UtilitySlotValue) { return typeof source === 'string' ? new Blob([source], { type: 'text/plain;charset=utf-8' }) : source }
-  private changed() { this.phase = 'dirty'; this.error = ''; this.notify() }
-  get dirty() { return this.configRevision !== this.savedConfigRevision || [...this.slots.values()].some(slot => slot.saved !== slot.revision) }
+  private changed() { this.phase = this.configConflicts.size ? 'conflict' : 'dirty'; if (!this.configConflicts.size) this.error = ''; this.notify() }
+  get dirty() { return this.vaultPending.size > 0 || this.configRevision !== this.savedConfigRevision || [...this.slots.values()].some(slot => slot.saved !== slot.revision) }
+  get reconcilingVault() { return this.vaultPending.size > 0 || this.reconciling !== null }
   get loading() { return this.readers.size > 0 }
 
   private async read(name: string): Promise<Blob | null> {
@@ -92,7 +120,9 @@ export class UtilityDraft {
 
   flush(): Promise<boolean> {
     if (this.disposed) return Promise.resolve(false)
+    if (this.reconciling || this.vaultPending.size) return this.reconcileVaultDeletion().then(success => success ? this.flush() : false)
     if (this.saving) return this.saving
+    if (this.configConflicts.size) return Promise.resolve(false)
     if (!this.dirty) return Promise.resolve(true)
     this.saving = this.save().finally(() => { this.saving = null })
     return this.saving
@@ -101,7 +131,7 @@ export class UtilityDraft {
   private async save() {
     this.phase = 'saving'; this.notify()
     try {
-      saveDraft: while (this.dirty && !this.disposed) {
+      saveDraft: while (this.dirty && !this.disposed && !this.vaultPending.size) {
         if (this.configRevision !== this.savedConfigRevision) {
           const pending = this.pendingConfig ??= { revision: this.configRevision, config: { ...this.document.config }, baseVersion: this.document.version, operation: operationId() }
           const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { ...jsonRequest('PATCH', { base_version: pending.baseVersion, operation_id: pending.operation, config: pending.config }), signal: this.controller.signal }).catch(error => {
@@ -109,7 +139,7 @@ export class UtilityDraft {
             throw error
           })
           if (this.disposed) return false
-          this.accept(result.document); this.savedConfigRevision = pending.revision; this.pendingConfig = undefined
+          this.accept(result.document); this.baselineConfig = { ...pending.config }; this.savedConfigRevision = pending.revision; this.pendingConfig = undefined
         }
         // An import must never persist the editable interpretation before its opaque original.
         const slots = [...this.slots].sort(([a], [b]) => Number(/^original-[ab]$/.test(b)) - Number(/^original-[ab]$/.test(a)))
@@ -152,13 +182,55 @@ export class UtilityDraft {
         }
       }
       if (this.disposed) return false
+      if (this.vaultPending.size) return false
       this.phase = 'saved'; this.error = ''; this.notify(); return true
     } catch (error) {
       if (this.disposed) return false
+      if (this.vaultPending.size) { this.phase = 'saving'; this.error = ''; this.notify(); return false }
       this.phase = error instanceof UtilityRequestError && error.status === 409 ? 'conflict' : 'error'
       this.error = error instanceof Error ? error.message : 'No se pudo guardar. Tu trabajo sigue abierto.'
       this.notify(); return false
     }
+  }
+
+  reconcileVaultDeletion(keyId?: string): Promise<boolean> {
+    if (this.disposed || this.document.type !== 'criptografia') return Promise.resolve(false)
+    if (keyId && !this.vaultReconciled.has(keyId)) this.vaultPending.add(keyId)
+    if (this.reconciling) return this.reconciling
+    if (!this.vaultPending.size) return Promise.resolve(!this.configConflicts.size)
+    const saving = this.saving
+    // Install the barrier synchronously, before awaiting any in-flight save or GET.
+    this.reconciling = Promise.resolve().then(async () => {
+      if (saving) await saving
+      try {
+        while (this.vaultPending.size && !this.disposed) {
+          const deleted = new Set(this.vaultPending)
+          const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { signal: this.controller.signal })
+          if (this.disposed) return false
+          const canonical = result.document
+          if (canonical.id !== this.document.id || canonical.type !== 'criptografia' || canonical.version < this.document.version) throw new Error('La versión del documento no está actualizada. Reintenta.')
+          const merged = mergeUtilityConfig(this.baselineConfig, this.document.config, canonical.config, deleted)
+          for (const key of this.configConflicts) if (JSON.stringify(merged.config[key]) !== JSON.stringify(canonical.config[key])) merged.conflicts.push(key)
+          this.configConflicts = new Set(merged.conflicts)
+          this.baselineConfig = { ...canonical.config }
+          this.pendingConfig = undefined
+          this.document = { ...canonical, config: merged.config }
+          this.session.initialState = merged.config
+          this.configRevision++
+          if (sameConfig(merged.config, canonical.config)) this.savedConfigRevision = this.configRevision
+          for (const id of deleted) { this.vaultPending.delete(id); this.vaultReconciled.add(id) }
+          for (const listener of this.stateListeners) listener(merged.config)
+          this.phase = this.configConflicts.size ? 'conflict' : this.dirty ? 'dirty' : 'saved'
+          this.error = this.configConflicts.size ? 'Las preferencias cambiaron también en otra sesión. Tu borrador se conservó; recarga o guarda una copia para resolver el conflicto.' : ''
+          this.notify()
+        }
+        return !this.disposed && !this.configConflicts.size
+      } catch {
+        if (!this.disposed) { this.phase = 'error'; this.error = 'La clave fue eliminada. Falta actualizar la versión del documento; reintenta para guardar tus preferencias.'; this.notify() }
+        return false
+      }
+    }).finally(() => { this.reconciling = null })
+    return this.reconciling
   }
 
   private accept(document: UtilityDocument) { this.document = { ...document, config: this.document.config }; this.notify() }
@@ -194,7 +266,7 @@ export class UtilityDraft {
     try {
       for (const callback of this.beforeDeactivate) { try { callback() } catch { /* Resource teardown must continue even when one worker fails. */ } }
     } finally {
-      this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined
+      this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined; this.stateListeners.clear(); this.vaultPending.clear(); this.vaultReconciled.clear()
     }
   }
 }

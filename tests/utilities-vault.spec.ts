@@ -7,36 +7,55 @@ test.use({ channel: process.env.PLAYWRIGHT_CHANNEL })
 test.setTimeout(120_000)
 
 async function setup(page: Page) {
-  const library = createUtilitiesLibraryMock()
   const vault = new Map<string, Record<string, any>>()
   const material = new Map<string, string>()
+  const library = createUtilitiesLibraryMock({
+    duplicateCrypto(source, copy) {
+      for (const entry of [...vault.values()].filter(item => item.document_id === source.id)) {
+        const id = randomUUID()
+        vault.set(id, { ...structuredClone(entry), id, document_id: copy.id, version: 1 })
+        material.set(id, material.get(entry.id)!)
+        if (copy.config.key_id === entry.id) copy.config.key_id = id
+      }
+    },
+    deleteDocument(document) {
+      for (const item of [...vault.values()].filter(entry => entry.document_id === document.id)) { vault.delete(item.id); material.delete(item.id) }
+    },
+  })
   await page.context().addCookies([{ name: 'auth-token', value: 'vault-browser-session', url: baseURL }])
   await page.addInitScript(() => { localStorage.setItem('token', 'cookie-session'); localStorage.setItem('clarin:auth_refreshed_at', String(Date.now())) })
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method()
     const reply = (data: unknown, status = 200) => route.fulfill({ status, json: { success: status < 400, data }, headers: { 'cache-control': 'no-store' } })
     if (path === '/api/utilities/vault/status') return reply({ configured: true })
-    if (path === '/api/utilities/vault') {
+    const documentVault = /^\/api\/utilities\/documents\/([^/]+)\/vault$/.exec(path)
+    if (documentVault) {
+      if (!library.documents.has(documentVault[1])) return reply({}, 404)
       if (method === 'POST') {
         const input = request.postDataJSON(), id = randomUUID()
         const { material: secret, operation_id: _operation, ...publicValues } = input
-        const item = { ...publicValues, id, version: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+        const item = { ...publicValues, id, document_id: documentVault[1], version: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
         vault.set(id, item); material.set(id, secret)
         return reply({ item })
       }
       const q = (url.searchParams.get('q') || '').toLowerCase()
-      return reply({ items: [...vault.values()].filter(item => item.name.toLowerCase().includes(q)), has_more: false })
+      return reply({ items: [...vault.values()].filter(item => item.document_id === documentVault[1] && item.name.toLowerCase().includes(q)), has_more: false })
     }
-    const entry = /^\/api\/utilities\/vault\/([^/]+)(\/material)?$/.exec(path)
+    const entry = /^\/api\/utilities\/documents\/([^/]+)\/vault\/([^/]+)(\/material)?$/.exec(path)
     if (entry) {
-      const item = vault.get(entry[1])
-      if (!item) return reply({}, 404)
-      if (method === 'DELETE') { vault.delete(entry[1]); material.delete(entry[1]); return reply({ deleted: true, cleanup_pending: true }) }
-      if (entry[2]) {
-        if (method === 'GET') return reply({ material: material.get(entry[1]), public_data: item.public_data, metadata: item.metadata })
+      const item = vault.get(entry[2])
+      if (!item || item.document_id !== entry[1]) return reply({}, 404)
+      if (method === 'DELETE') {
+        vault.delete(entry[2]); material.delete(entry[2])
+        const document = library.documents.get(entry[1])!
+        if (document.config.key_id === entry[2]) { document.config = { ...document.config, key_id: '' }; document.version++; document.updated_at = new Date().toISOString() }
+        return reply({ deleted: true, cleanup_pending: true, document })
+      }
+      if (entry[3]) {
+        if (method === 'GET') return reply({ material: material.get(entry[2]), public_data: item.public_data, metadata: item.metadata })
         const input = request.postDataJSON()
         if (input.version !== item.version) return reply({}, 409)
-        material.set(entry[1], input.material); item.version++; if (input.metadata) item.metadata = input.metadata
+        material.set(entry[2], input.material); item.version++; if (input.metadata) item.metadata = input.metadata
         return reply({ item })
       }
       if (method === 'PATCH') { const input = request.postDataJSON(); Object.assign(item, { name: input.name, description: input.description, version: item.version + 1 }) }
@@ -101,6 +120,10 @@ test('generates and saves EC identity, CSR and certificate, verifies JWT and exp
   await page.getByRole('dialog', { name: 'Eliminar clave o certificado' }).getByRole('button', { name: 'Eliminar definitivamente' }).click()
   await expect.poll(() => state.vault.size).toBe(0)
   expect(state.material.size).toBe(0)
+  await page.getByRole('button', { name: 'Hash y HMAC', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Algoritmo', exact: true }).selectOption('SHA-512')
+  await expect.poll(() => [...state.library.documents.values()][0]?.config.hash_algorithm).toBe('SHA-512')
+  await expect(page.getByText('Conflicto de versión', { exact: true })).toHaveCount(0)
 })
 
 test('uses a saved AES key without placing its material in document configuration', async ({ page }) => {
@@ -120,4 +143,54 @@ test('uses a saved AES key without placing its material in document configuratio
   await expect(page.getByRole('textbox', { name: 'JWE cifrado' })).toHaveValue(/^[\w-]+\.\.[\w-]+\.[\w-]+\.[\w-]+$/)
   await expect.poll(() => [...state.library.documents.values()].some(document => typeof document.config.key_id === 'string')).toBe(true)
   expect(JSON.stringify([...state.library.documents.values()])).not.toContain('contenido temporal de prueba')
+})
+
+test('keeps new documents empty, duplicates keys independently and deletes only the selected document keys', async ({ page }) => {
+  const state = await setup(page)
+  await page.goto(`${baseURL}/dashboard/utilities/criptografia`)
+  await page.getByRole('button', { name: 'Mis claves', exact: true }).click()
+  await page.getByRole('button', { name: 'Nueva clave', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Nombre', exact: true }).fill('Clave del original')
+  await page.getByRole('combobox', { name: 'Tipo de clave' }).selectOption('aes')
+  await page.getByRole('button', { name: 'Generar y guardar' }).click()
+  await expect(page.getByRole('region', { name: 'Entrada seleccionada' })).toBeVisible()
+  const originalId = [...state.library.documents.keys()][0], originalKey = [...state.vault.keys()][0]
+  await expect.poll(() => state.library.documents.get(originalId)?.config.key_id).toBe(originalKey)
+
+  await page.getByRole('button', { name: 'Nuevo documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Criptografía', exact: true }).click()
+  await page.getByRole('button', { name: 'Mis claves', exact: true }).click()
+  await expect(page.getByText('Este documento todavía no tiene claves.')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Entrada seleccionada' })).toHaveCount(0)
+  expect(state.vault.size).toBe(1)
+
+  await page.locator(`[data-utility-tab-id="${originalId}"]`).getByRole('tab').click()
+  await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Duplicar documento', exact: true }).click()
+  await expect.poll(() => state.library.documents.size).toBe(3)
+  await expect.poll(() => state.vault.size).toBe(2)
+  const copy = [...state.library.documents.values()].find(document => document.title.endsWith('· copia'))!
+  await expect(page.locator(`[data-utility-tab-id="${copy.id}"]`).getByRole('tab')).toHaveAttribute('aria-selected', 'true')
+  const copiedKey = state.vault.get(copy.config.key_id as string)!
+  expect(copiedKey.id).not.toBe(originalKey)
+  expect(copiedKey.document_id).toBe(copy.id)
+  expect(state.material.get(copiedKey.id)).toBe(state.material.get(originalKey))
+  await expect(page.getByRole('region', { name: 'Entrada seleccionada' })).toBeVisible()
+  await page.getByRole('button', { name: 'Renombrar', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Nombre de entrada' }).fill('Clave de la copia')
+  await page.getByRole('button', { name: 'Guardar nombre', exact: true }).click()
+  await expect.poll(() => state.vault.get(copiedKey.id)?.name).toBe('Clave de la copia')
+  expect(state.vault.get(originalKey)?.name).toBe('Clave del original')
+
+  await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Eliminar documento', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Eliminar documento' }).getByRole('button', { name: 'Eliminar definitivamente' }).click()
+  await expect.poll(() => state.library.documents.has(copy.id)).toBe(false)
+  expect(state.vault.has(copiedKey.id)).toBe(false)
+  expect(state.vault.has(originalKey)).toBe(true)
+  await page.locator(`[data-utility-tab-id="${originalId}"]`).getByRole('tab').click()
+  await expect(page.getByRole('region', { name: 'Entrada seleccionada' })).toContainText('Clave del original')
+  await page.reload()
+  await expect(page.getByRole('region', { name: 'Entrada seleccionada' })).toContainText('Clave del original')
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('"secret"')
 })

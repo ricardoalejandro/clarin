@@ -63,13 +63,17 @@ func (s *Server) registerUtilityRoutes(protected fiber.Router) {
 	r.Get("/workspace", s.handleUtilityWorkspace)
 	r.Put("/workspace", s.handleUtilitySaveWorkspace)
 	r.Get("/vault/status", func(c *fiber.Ctx) error { return utilityData(c, fiber.Map{"configured": s.utilities.Cipher != nil}) })
-	r.Get("/vault", s.handleUtilityVaultList)
-	r.Post("/vault", s.handleUtilityVaultCreate)
-	r.Get("/vault/:id", s.handleUtilityVaultGet)
-	r.Patch("/vault/:id", s.handleUtilityVaultPatch)
-	r.Delete("/vault/:id", s.handleUtilityVaultDelete)
-	r.Get("/vault/:id/material", s.handleUtilityVaultMaterial)
-	r.Put("/vault/:id/material", s.handleUtilityVaultMaterialWrite)
+	r.Get("/vault/legacy", s.handleUtilityLegacyVaultList)
+	r.Get("/vault/legacy/:keyId", s.handleUtilityLegacyVaultGet)
+	r.Post("/documents/:id/duplicate", s.handleUtilityDuplicate)
+	r.Get("/documents/:id/vault", s.handleUtilityVaultList)
+	r.Post("/documents/:id/vault", s.handleUtilityVaultCreate)
+	r.Post("/documents/:id/vault/import-legacy", s.handleUtilityLegacyVaultImport)
+	r.Get("/documents/:id/vault/:keyId", s.handleUtilityVaultGet)
+	r.Patch("/documents/:id/vault/:keyId", s.handleUtilityVaultPatch)
+	r.Delete("/documents/:id/vault/:keyId", s.handleUtilityVaultDelete)
+	r.Get("/documents/:id/vault/:keyId/material", s.handleUtilityVaultMaterial)
+	r.Put("/documents/:id/vault/:keyId/material", s.handleUtilityVaultMaterialWrite)
 }
 func utilityScope(c *fiber.Ctx) (account, owner uuid.UUID, err error) {
 	claims, ok := c.Locals("claims").(*service.JWTClaims)
@@ -364,19 +368,83 @@ func (s *Server) handleUtilitySaveWorkspace(c *fiber.Ctx) error {
 	}
 	return utilityData(c, fiber.Map{"workspace": w})
 }
+func utilityVaultScope(c *fiber.Ctx) (a, u, d, k uuid.UUID, err error) {
+	a, u, err = utilityScope(c)
+	if err != nil {
+		return
+	}
+	d, err = utilityID(c)
+	if err != nil {
+		return
+	}
+	if c.Params("keyId") != "" {
+		k, err = uuid.Parse(c.Params("keyId"))
+		if k == uuid.Nil {
+			err = utilities.ErrInvalid
+		}
+	}
+	return
+}
+func (s *Server) utilityVaultEvent(a, u, d uuid.UUID, kind string, id uuid.UUID) {
+	if s.hub != nil {
+		s.hub.BroadcastToAccountUsersWithPermission(a, []uuid.UUID{u}, domain.PermUtilities, "utility_updated", fiber.Map{"kind": kind, "id": id, "document_id": d})
+	}
+}
 func (s *Server) handleUtilityVaultList(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
+	a, u, d, _, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
-	items, next, err := s.utilities.ListVault(c.UserContext(), a, u, c.Query("q"), c.Query("cursor"))
+	items, next, err := s.utilities.ListVault(c.UserContext(), a, u, d, c.Query("q"), c.Query("cursor"))
 	if err != nil {
 		return utilityError(c, err)
 	}
 	return utilityData(c, fiber.Map{"items": items, "next_cursor": next, "has_more": next != ""})
 }
-func (s *Server) handleUtilityVaultCreate(c *fiber.Ctx) error {
+func (s *Server) handleUtilityLegacyVaultList(c *fiber.Ctx) error {
 	a, u, err := utilityScope(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	items, next, err := s.utilities.ListLegacyVault(c.UserContext(), a, u, c.Query("q"), c.Query("cursor"))
+	if err != nil {
+		return utilityError(c, err)
+	}
+	return utilityData(c, fiber.Map{"items": items, "next_cursor": next, "has_more": next != ""})
+}
+func (s *Server) handleUtilityLegacyVaultGet(c *fiber.Ctx) error {
+	a, u, err := utilityScope(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	key, err := uuid.Parse(c.Params("keyId"))
+	if err != nil || key == uuid.Nil {
+		return utilityError(c, utilities.ErrInvalid)
+	}
+	item, err := s.utilities.GetLegacyVault(c.UserContext(), a, u, key)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	return utilityData(c, fiber.Map{"item": item})
+}
+func (s *Server) handleUtilityLegacyVaultImport(c *fiber.Ctx) error {
+	a, u, d, _, err := utilityVaultScope(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	var in utilities.LegacyVaultImport
+	if len(c.Body()) > 4096 || c.BodyParser(&in) != nil {
+		return utilityError(c, utilities.ErrInvalid)
+	}
+	item, err := s.utilities.ImportLegacyVault(c.UserContext(), a, u, d, in)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	s.utilityVaultEvent(a, u, d, "vault", item.ID)
+	return utilityData(c, fiber.Map{"item": item})
+}
+func (s *Server) handleUtilityVaultCreate(c *fiber.Ctx) error {
+	a, u, d, _, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
@@ -384,19 +452,26 @@ func (s *Server) handleUtilityVaultCreate(c *fiber.Ctx) error {
 	if len(c.Body()) > 3*1024*1024 || c.BodyParser(&in) != nil {
 		return utilityError(c, utilities.ErrInvalid)
 	}
-	item, err := s.utilities.CreateVault(c.UserContext(), a, u, in)
+	item, err := s.utilities.CreateVault(c.UserContext(), a, u, d, in)
 	if err != nil {
 		return utilityError(c, err)
 	}
-	s.utilityEvent(a, u, "vault", item.ID)
+	s.utilityVaultEvent(a, u, d, "vault", item.ID)
+	return utilityData(c, fiber.Map{"item": item})
+}
+func (s *Server) handleUtilityVaultGet(c *fiber.Ctx) error {
+	a, u, d, k, err := utilityVaultScope(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	item, err := s.utilities.GetVault(c.UserContext(), a, u, d, k)
+	if err != nil {
+		return utilityError(c, err)
+	}
 	return utilityData(c, fiber.Map{"item": item})
 }
 func (s *Server) handleUtilityVaultPatch(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	id, err := utilityID(c)
+	a, u, d, k, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
@@ -404,19 +479,15 @@ func (s *Server) handleUtilityVaultPatch(c *fiber.Ctx) error {
 	if len(c.Body()) > 16*1024 || c.BodyParser(&in) != nil {
 		return utilityError(c, utilities.ErrInvalid)
 	}
-	item, err := s.utilities.PatchVault(c.UserContext(), a, u, id, in)
+	item, err := s.utilities.PatchVault(c.UserContext(), a, u, d, k, in)
 	if err != nil {
 		return utilityError(c, err)
 	}
-	s.utilityEvent(a, u, "vault", id)
+	s.utilityVaultEvent(a, u, d, "vault", k)
 	return utilityData(c, fiber.Map{"item": item})
 }
 func (s *Server) handleUtilityVaultDelete(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	id, err := utilityID(c)
+	a, u, d, k, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
@@ -424,48 +495,31 @@ func (s *Server) handleUtilityVaultDelete(c *fiber.Ctx) error {
 	if err != nil {
 		return utilityError(c, err)
 	}
-	if err = s.utilities.DeleteVault(c.UserContext(), a, u, id, version); err != nil {
+	if err = s.utilities.DeleteVault(c.UserContext(), a, u, d, k, version); err != nil {
 		return utilityError(c, err)
 	}
-	s.utilityEvent(a, u, "vault_deleted", id)
-	return utilityData(c, fiber.Map{"deleted": true, "cleanup_pending": true})
+	s.utilityVaultEvent(a, u, d, "vault_deleted", k)
+	// The deletion is committed. A failed follow-up read cannot turn it into a
+	// reported failure; clients can retry reconciliation while preserving drafts.
+	var canonical *domain.UtilityDocument
+	if document, readError := s.utilities.Store.Get(c.UserContext(), a, u, d); readError == nil {
+		canonical = &document
+	}
+	return utilityData(c, fiber.Map{"deleted": true, "cleanup_pending": true, "document": canonical})
 }
 func (s *Server) handleUtilityVaultMaterial(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
+	a, u, d, k, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
-	id, err := utilityID(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	material, public, metadata, err := s.utilities.VaultMaterial(c.UserContext(), a, u, id)
+	material, public, metadata, err := s.utilities.VaultMaterial(c.UserContext(), a, u, d, k)
 	if err != nil {
 		return utilityError(c, err)
 	}
 	return utilityData(c, fiber.Map{"material": material, "public_data": public, "metadata": metadata})
 }
-func (s *Server) handleUtilityVaultGet(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	id, err := utilityID(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	item, err := s.utilities.GetVault(c.UserContext(), a, u, id)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	return utilityData(c, fiber.Map{"item": item})
-}
 func (s *Server) handleUtilityVaultMaterialWrite(c *fiber.Ctx) error {
-	a, u, err := utilityScope(c)
-	if err != nil {
-		return utilityError(c, err)
-	}
-	id, err := utilityID(c)
+	a, u, d, k, err := utilityVaultScope(c)
 	if err != nil {
 		return utilityError(c, err)
 	}
@@ -473,10 +527,30 @@ func (s *Server) handleUtilityVaultMaterialWrite(c *fiber.Ctx) error {
 	if len(c.Body()) > 3*1024*1024 || c.BodyParser(&in) != nil {
 		return utilityError(c, utilities.ErrInvalid)
 	}
-	item, err := s.utilities.WriteVaultMaterial(c.UserContext(), a, u, id, in)
+	item, err := s.utilities.WriteVaultMaterial(c.UserContext(), a, u, d, k, in)
 	if err != nil {
 		return utilityError(c, err)
 	}
-	s.utilityEvent(a, u, "vault", id)
+	s.utilityVaultEvent(a, u, d, "vault", k)
 	return utilityData(c, fiber.Map{"item": item})
+}
+func (s *Server) handleUtilityDuplicate(c *fiber.Ctx) error {
+	a, u, err := utilityScope(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	id, err := utilityID(c)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	var in utilities.DocumentDuplicate
+	if len(c.Body()) > 128*1024 || c.BodyParser(&in) != nil {
+		return utilityError(c, utilities.ErrInvalid)
+	}
+	document, err := s.utilities.DuplicateCryptoDocument(c.UserContext(), a, u, id, in)
+	if err != nil {
+		return utilityError(c, err)
+	}
+	s.utilityEvent(a, u, "document", document.ID)
+	return utilityData(c, fiber.Map{"document": document})
 }
