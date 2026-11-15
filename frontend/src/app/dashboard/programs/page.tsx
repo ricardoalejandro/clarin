@@ -7,6 +7,7 @@ import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/
 import Link from 'next/link';
 import { es } from 'date-fns/locale';
 import { formatCalendarDate } from '@/utils/calendarDate';
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
@@ -833,8 +834,8 @@ export default function ProgramsPage() {
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <p className="text-xs text-slate-500">Metas de asistencia y traspaso para probacionistas</p>
               <div className="flex flex-wrap items-center gap-2">
-                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} aria-label="Desde" className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500" />
-                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} aria-label="Hasta" className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500" />
+                <OperationalDatePicker mode="date" label="Desde" value={dateFrom} onChange={setDateFrom} showQuickValues={false} compact />
+                <OperationalDatePicker mode="date" label="Hasta" value={dateTo} onChange={setDateTo} showQuickValues={false} compact />
                 {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-50 rounded-lg">Limpiar</button>}
                 <button type="button" onClick={(e) => { e.stopPropagation(); if (requireOnline('Administrar las metas globales de Programas')) setGoalsOpen(true); }} title={isOffline ? 'Administrar metas globales necesita conexión' : undefined} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-50">
                   <Settings2 className="w-3.5 h-3.5" /> Metas

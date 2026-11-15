@@ -22,6 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import CrmDetailAccordion, { defaultCrmDetailAccordionState, type CrmDetailSectionKey } from './CrmDetailAccordion'
 
 export type DetachedEventParticipant = {
@@ -66,6 +67,7 @@ type Props = {
   activity: ReactNode
   readOnly?: boolean
   onSave: (patch: DetachedParticipantPatch) => Promise<SaveResult>
+  onDirtyChange?: (dirty: boolean) => void
   onMessage?: (phone: string) => void
   onRemove?: () => void
 }
@@ -118,15 +120,17 @@ function Datum({ icon: Icon, label, value }: { icon: typeof Phone; label: string
   )
 }
 
-export default function DetachedEventParticipantDetail({ participant, eventName, context, activity, readOnly = false, onSave, onMessage, onRemove }: Props) {
+export default function DetachedEventParticipantDetail({ participant, eventName, context, activity, readOnly = false, onSave, onDirtyChange, onMessage, onRemove }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [editing, setEditing] = useState(false)
+  const dates = useOperationalDateFields()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [form, setForm] = useState<FormState>(() => formFromParticipant(participant))
   const [accordionOpen, setAccordionOpen] = useState(defaultCrmDetailAccordionState)
 
   useEffect(() => {
+    dates.reset()
     setForm(formFromParticipant(participant))
     setEditing(false)
     setSaving(false)
@@ -134,16 +138,27 @@ export default function DetachedEventParticipantDetail({ participant, eventName,
     setAccordionOpen(defaultCrmDetailAccordionState())
   }, [participant.id])
 
+  const dirty = editing && (dates.dirty || JSON.stringify(form) !== JSON.stringify(formFromParticipant(participant)))
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
+  useEffect(() => {
+    if (!dirty) return
+    const protectDraft = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', protectDraft)
+    return () => window.removeEventListener('beforeunload', protectDraft)
+  }, [dirty])
   const initials = useMemo(() => displayName(participant).split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(''), [participant])
   const change = (key: keyof FormState, value: string) => setForm(current => ({ ...current, [key]: value }))
-  const cancelEdit = () => { setForm(formFromParticipant(participant)); setEditing(false); setError('') }
+  const cancelEdit = () => { dates.reset(); setForm(formFromParticipant(participant)); setEditing(false); setError('') }
 
   const save = async () => {
     if (!form.name.trim() || saving || readOnly) return
+    if (!dates.validate()) return
     setSaving(true)
     setError('')
     const result = await onSave({
       ...form,
+      birth_date: dates.value('birth_date', form.birth_date),
       name: form.name.trim(),
       age: form.age ? Number.parseInt(form.age, 10) || 0 : 0,
     })
@@ -177,7 +192,7 @@ export default function DetachedEventParticipantDetail({ participant, eventName,
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-800"><span className="font-bold">Sin contacto canónico</span>. Este registro histórico conserva sus datos y observaciones únicamente dentro de esta participación.</div>
 
         <CrmDetailAccordion id="detached-contact" title="Información del contacto" summary="Datos históricos de este registro" icon={UserRound} tone="emerald" open={accordionOpen.contact} onToggle={() => toggleSection('contact')}>
-          {editing ? <div><div className="grid gap-3 sm:grid-cols-2">{fieldDefinitions.map(field => <div key={field.key} className="block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{field.label}</span>{field.type === 'date' ? <OperationalDatePicker mode="date" label={field.label} value={form[field.key]} onChange={value => change(field.key, value)} /> : <input aria-label={field.label} type={field.type || 'text'} value={form[field.key]} onChange={event => change(field.key, event.target.value)} placeholder={field.placeholder} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100" />}</div>)}</div><label className="mt-3 block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Nota histórica</span><textarea rows={3} value={form.notes} onChange={event => change('notes', event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" /></label>{error && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}<div className="mt-3 flex justify-end gap-2"><button type="button" onClick={cancelEdit} className="min-h-11 px-3 text-sm font-bold text-slate-600">Cancelar</button><button type="button" onClick={() => void save()} disabled={saving || !form.name.trim()} className="min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white disabled:opacity-45">{saving ? 'Guardando…' : 'Guardar'}</button></div></div> : <div className="grid gap-2 sm:grid-cols-2"><Datum icon={Phone} label="Teléfono" value={participant.phone} /><Datum icon={Mail} label="Correo" value={participant.email} /><Datum icon={Building2} label="Organización" value={participant.company} /><Datum icon={BriefcaseBusiness} label="Ocupación" value={participant.ocupacion} /><Datum icon={MapPin} label="Ubicación" value={[participant.address, participant.distrito].filter(Boolean).join(', ')} /><Datum icon={CalendarDays} label="Nacimiento / edad" value={[participant.birth_date?.split('T')[0], participant.age ? `${participant.age} años` : ''].filter(Boolean).join(' · ')} />{participant.notes && <div className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5 sm:col-span-2"><p className="text-[10px] font-bold uppercase text-amber-700">Nota histórica</p><p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{participant.notes}</p></div>}</div>}
+          {editing ? <div><div className="grid gap-3 sm:grid-cols-2">{fieldDefinitions.map(field => <div key={field.key} className="block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{field.label}</span>{field.type === 'date' ? <OperationalDatePicker mode="date" disabled={saving || readOnly} label={field.label} value={form[field.key]} onDraftStateChange={dates.track(field.key)} onChange={value => change(field.key, value)} /> : <input aria-label={field.label} type={field.type || 'text'} value={form[field.key]} onChange={event => change(field.key, event.target.value)} placeholder={field.placeholder} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100" />}</div>)}</div><label className="mt-3 block"><span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Nota histórica</span><textarea rows={3} value={form.notes} onChange={event => change('notes', event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" /></label>{error && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}<div className="mt-3 flex justify-end gap-2"><button type="button" onClick={cancelEdit} className="min-h-11 px-3 text-sm font-bold text-slate-600">Cancelar</button><button type="button" onClick={() => void save()} disabled={saving || !form.name.trim() || !dates.valid} className="min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white disabled:opacity-45">{saving ? 'Guardando…' : 'Guardar'}</button></div></div> : <div className="grid gap-2 sm:grid-cols-2"><Datum icon={Phone} label="Teléfono" value={participant.phone} /><Datum icon={Mail} label="Correo" value={participant.email} /><Datum icon={Building2} label="Organización" value={participant.company} /><Datum icon={BriefcaseBusiness} label="Ocupación" value={participant.ocupacion} /><Datum icon={MapPin} label="Ubicación" value={[participant.address, participant.distrito].filter(Boolean).join(', ')} /><Datum icon={CalendarDays} label="Nacimiento / edad" value={[participant.birth_date?.split('T')[0], participant.age ? `${participant.age} años` : ''].filter(Boolean).join(' · ')} />{participant.notes && <div className="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5 sm:col-span-2"><p className="text-[10px] font-bold uppercase text-amber-700">Nota histórica</p><p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{participant.notes}</p></div>}</div>}
         </CrmDetailAccordion>
 
         <CrmDetailAccordion id="detached-tags" title="Etiquetas" summary={`${participant.tags?.length || 0} asignada${participant.tags?.length === 1 ? '' : 's'} · solo lectura`} icon={Tag} tone="cyan" open={accordionOpen.tags} onToggle={() => toggleSection('tags')}>{participant.tags?.length ? <div className="flex flex-wrap gap-2">{participant.tags.map(tag => <span key={tag.id} className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold text-white" style={{ backgroundColor: tag.color || '#64748b' }}>{tag.name}</span>)}</div> : <p className="text-xs italic text-slate-400">Sin etiquetas asociadas.</p>}</CrmDetailAccordion>

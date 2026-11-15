@@ -30,6 +30,7 @@ import useTaskWindow, { type TaskWindowResizeEdge } from './useTaskWindow'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { isTaskEditorSubmitShortcut, taskWindowVisualState } from './taskInteractionVisuals'
 import TaskDateRangePicker from './TaskDateRangePicker'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import TaskDescriptionEditor from './TaskDescriptionEditor'
 import TaskParticipantGrantConfirmDialog from './TaskParticipantGrantConfirmDialog'
@@ -117,6 +118,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const [startAt, setStartAt] = useState('')
   const [dueAt, setDueAt] = useState('')
   const [allDay, setAllDay] = useState(true)
+  const dateFields = useOperationalDateFields()
   const [progressMode, setProgressMode] = useState<'manual' | 'automatic'>('manual')
   const [manualProgress, setManualProgress] = useState(0)
   const [progressInput, setProgressInput] = useState('0')
@@ -153,7 +155,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const taskWindow = useTaskWindow({ storageKey: 'clarin:tasks:editor-window', storageScope, defaultMode: 'floating', defaultWidth: 980, defaultHeight: 820, minWidth: 560, minHeight: 520, align: 'center' })
   onCloseRef.current = onClose
   savingRef.current = saving
-  dirtyRef.current = dirty
+  dirtyRef.current = dirty || dateFields.dirty
   const markDirty = () => setDirty(true)
 
   const taskEditable = !task || task.permissions?.can_edit === true
@@ -176,6 +178,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     savingRef.current = false
     setSaving(false)
     if (!open) return
+    dateFields.reset()
     if (typeof URL.revokeObjectURL === 'function') for (const url of Array.from(attachmentObjectURLsRef.current.values())) URL.revokeObjectURL(url)
     attachmentObjectURLsRef.current.clear()
     createOperationRef.current = null
@@ -359,7 +362,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const taskCompleted = statuses.find(status => status.id === statusId)?.category === 'done'
   const manualProgressValidation = validateManualProgress(progressInput)
   const progressValid = taskCompleted || progressMode === 'automatic' || manualProgressValidation.valid
-  const baseCanSave = Boolean(taskEditable && title.trim() && ownerId && listId && statusId && progressValid && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt)))
+  const currentStart = dateFields.value('start', startAt), currentDue = dateFields.value('due', dueAt)
+  const baseCanSave = Boolean(taskEditable && title.trim() && ownerId && listId && statusId && progressValid && dateFields.valid && (!currentStart || !currentDue || new Date(currentDue) >= new Date(currentStart)))
   const queueProgress = taskAttachmentQueueProgress(attachmentQueue)
   const saveIntent = taskCreationAttachmentSaveIntent(createdTask?.id, attachmentQueue, baseCanSave)
   const leadCreationBlocked = !task && !createdTask && Boolean(relatedScope?.leadId) && !leadsEnabled
@@ -422,6 +426,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   useEffect(() => () => settleCloseDecision(false), [settleCloseDecision])
 
   const save = async (confirmGrants = false) => {
+    if (!dateFields.validate()) return false
+    const submittedStart = dateFields.value('start', startAt), submittedDue = dateFields.value('due', dueAt)
     if (!taskEditable || !canSave || savingRef.current) return false
     const creationSession = creationSessionRef.current
     savingRef.current = true
@@ -443,9 +449,9 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
       title: title.trim(), description, type, priority,
       assigned_to: ownerId, collaborator_ids: collaboratorIds,
       list_id: listId, status_id: statusId,
-      start_at: startAt ? new Date(startAt).toISOString() : '',
-      due_at: dueAt ? new Date(dueAt).toISOString() : '',
-      is_all_day: Boolean(startAt || dueAt) && allDay,
+      start_at: submittedStart ? new Date(submittedStart).toISOString() : '',
+      due_at: submittedDue ? new Date(submittedDue).toISOString() : '',
+      is_all_day: Boolean(submittedStart || submittedDue) && allDay,
       progress: taskCompleted ? 100 : progressMode === 'automatic' ? (task?.progress || 0) : manualProgress,
       progress_mode: progressMode,
       manual_progress: manualProgress,
@@ -577,7 +583,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
 
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><CalendarRange className="h-4 w-4 text-emerald-600" /> Planificación</div>
-              <TaskDateRangePicker label="Fecha de entrega" startValue={startAt} endValue={dueAt} allDay={allDay} disabled={saving || Boolean(createdTask)} pending={saving} onApply={range => { setStartAt(range.startAt); setDueAt(range.endAt); setAllDay(range.isAllDay); markDirty() }} />
+              <TaskDateRangePicker label="Fecha de entrega" startValue={startAt} endValue={dueAt} allDay={allDay} disabled={saving || Boolean(createdTask)} pending={saving} onStartDraftStateChange={dateFields.track('start')} onEndDraftStateChange={dateFields.track('due')} onAllDayDraftChange={value => { setAllDay(value); markDirty() }} onApply={range => { setStartAt(range.startAt); setDueAt(range.endAt); setAllDay(range.isAllDay); markDirty() }} />
               {startAt && dueAt && new Date(dueAt) < new Date(startAt) && <p className="text-xs font-medium text-rose-600">La entrega no puede ser anterior al inicio.</p>}
             </section>
           </div>

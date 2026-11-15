@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { MoreVertical, Calendar, Clock, Plus, Trash2, Edit2, CheckCircle2, ListTodo, ExternalLink, Star, GripVertical } from 'lucide-react'
+import OperationalDatePicker from './operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from './operational-date/useOperationalDateFields'
 import { Task, Subtask, TASK_TYPE_CONFIG, TASK_PRIORITY_CONFIG } from '@/types/task'
 
 interface Props {
@@ -47,6 +49,7 @@ export default function TaskInlineCard({
   const dueDate = hasDueDate ? new Date(task.due_at!) : null
 
   // Inline editing state
+  const dateFields = useOperationalDateFields()
   const [editTitle, setEditTitle] = useState(task.title)
   const [editDescription, setEditDescription] = useState(task.description || '')
   const [subtasks, setSubtasks] = useState<Subtask[]>([])
@@ -54,7 +57,6 @@ export default function TaskInlineCard({
   const [showSubtaskInput, setShowSubtaskInput] = useState(false)
   const [loadingSubtasks, setLoadingSubtasks] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
-  const [showDatePicker, setShowDatePicker] = useState(false)
   const [checkHover, setCheckHover] = useState(false)
   const [completing, setCompleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -104,12 +106,15 @@ export default function TaskInlineCard({
   useEffect(() => {
     if (!isExpanded) return
     const handleClickOutside = (e: MouseEvent) => {
+      if (e.target instanceof Element && e.target.closest('[data-operational-date-picker], [data-operational-picker-backdrop]')) return
       if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
+        if (!dateFields.validate()) return
+        if (dateFields.dirty) handleDatePickerChange(dateFields.value('due', task.due_at ? toLocalDate(task.due_at) : ''))
         onCollapse()
       }
     }
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCollapse()
+      if (e.key === 'Escape' && !document.querySelector('[data-operational-date-picker]') && !(e.target instanceof Element && e.target.closest('[data-operational-date-owner]'))) onCollapse()
     }
     document.addEventListener('mousedown', handleClickOutside)
     document.addEventListener('keydown', handleEscape)
@@ -117,7 +122,7 @@ export default function TaskInlineCard({
       document.removeEventListener('mousedown', handleClickOutside)
       document.removeEventListener('keydown', handleEscape)
     }
-  }, [isExpanded, onCollapse])
+  }, [isExpanded, onCollapse, dateFields.dirty, dateFields.validate, dateFields.value, task.due_at, task.id, onUpdate])
 
   const fetchSubtasks = async () => {
     setLoadingSubtasks(true)
@@ -174,15 +179,14 @@ export default function TaskInlineCard({
     const m = dueDate ? dueDate.getMinutes() : 0
     const d = parseDateLocal(dateStr, h, m)
     onUpdate(task.id, { due_at: d.toISOString() })
-    setShowDatePicker(false)
   }
 
-  const handleDatePickerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDatePickerChange = (value: string) => {
+    if (!value) { onUpdate(task.id, { due_at: '' }); return }
     const h = dueDate ? dueDate.getHours() : 9
     const m = dueDate ? dueDate.getMinutes() : 0
-    const d = parseDateLocal(e.target.value, h, m)
+    const d = parseDateLocal(value, h, m)
     onUpdate(task.id, { due_at: d.toISOString() })
-    setShowDatePicker(false)
   }
 
   // Origin badge helper — smart navigation with auto-select + scroll to tasks
@@ -419,7 +423,8 @@ export default function TaskInlineCard({
                 onMouseDown={e => {
                   e.preventDefault(); e.stopPropagation()
                   setShowMenu(false)
-                  setShowDatePicker(true)
+                  onExpand()
+                  requestAnimationFrame(() => document.getElementById(`legacy-task-date-${task.id}`)?.focus())
                 }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-slate-700 hover:bg-slate-50 transition"
               >
@@ -494,10 +499,10 @@ export default function TaskInlineCard({
           />
 
           {/* Quick date bar */}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11px] text-slate-400 font-medium">Fecha:</span>
             <button
-              onClick={() => handleQuickDate(todayStr)}
+              data-task-quick-date onClick={() => handleQuickDate(todayStr)}
               className={`px-2.5 py-1 text-xs rounded-lg font-medium transition ${
                 hasDueDate && toLocalDate(task.due_at!) === todayStr
                   ? 'bg-amber-100 text-amber-700 ring-1 ring-amber-300'
@@ -507,7 +512,7 @@ export default function TaskInlineCard({
               Hoy
             </button>
             <button
-              onClick={() => handleQuickDate(tomorrowStr)}
+              data-task-quick-date onClick={() => handleQuickDate(tomorrowStr)}
               className={`px-2.5 py-1 text-xs rounded-lg font-medium transition ${
                 hasDueDate && toLocalDate(task.due_at!) === tomorrowStr
                   ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300'
@@ -516,27 +521,7 @@ export default function TaskInlineCard({
             >
               Mañana
             </button>
-            <div className="relative">
-              <button
-                onClick={() => setShowDatePicker(!showDatePicker)}
-                className="p-1.5 bg-slate-100 text-slate-500 hover:bg-slate-200 rounded-lg transition"
-                title="Elegir fecha"
-              >
-                <Calendar className="w-3.5 h-3.5" />
-              </button>
-              {showDatePicker && (
-                <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-lg p-2">
-                  <input
-                    type="date"
-                    value={hasDueDate ? toLocalDate(task.due_at!) : ''}
-                    onChange={handleDatePickerChange}
-                    className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500"
-                    autoFocus
-                    onBlur={() => setTimeout(() => setShowDatePicker(false), 200)}
-                  />
-                </div>
-              )}
-            </div>
+            <OperationalDatePicker id={`legacy-task-date-${task.id}`} mode="date" label="Fecha de la tarea" value={hasDueDate ? toLocalDate(task.due_at!) : ''} compact onDraftStateChange={dateFields.track('due')} onChange={() => {}} onCommit={(value, meta) => { if (meta?.reason === 'blur' && meta.relatedTarget instanceof Element && meta.relatedTarget.closest('[data-task-quick-date]')) return; handleDatePickerChange(value) }} className="min-w-[160px] flex-1" />
             <span className="text-[11px] text-slate-400 ml-auto">
               {dueDate
                 ? <>{dueDate.toLocaleDateString('es', { weekday: 'short', day: 'numeric', month: 'short' })} {dueDate.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}</>

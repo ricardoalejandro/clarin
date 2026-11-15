@@ -26,7 +26,11 @@ const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
 const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
 
 function validLocalDate(year: number, month: number, day: number, hours = 0, minutes = 0, seconds = 0) {
-  const date = new Date(year, month - 1, day, hours, minutes, seconds, 0)
+  if (year < 1 || year > 9999) return null
+  const date = new Date(0)
+  date.setHours(0, 0, 0, 0)
+  date.setFullYear(year, month - 1, day)
+  date.setHours(hours, minutes, seconds, 0)
   if (
     date.getFullYear() !== year
     || date.getMonth() !== month - 1
@@ -55,6 +59,7 @@ export function operationalDateValue(value: string | undefined, mode: Operationa
       Number(localMatch[6] || 0),
     )
   }
+  if (DATE_PATTERN.test(value)) return operationalDateValue(value, 'date')
   const parsed = new Date(value)
   return Number.isFinite(parsed.getTime()) ? parsed : null
 }
@@ -62,7 +67,7 @@ export function operationalDateValue(value: string | undefined, mode: Operationa
 export function operationalDateLocalValue(date: Date | null, mode: OperationalDatePickerMode) {
   if (!date) return ''
   const pad = (value: number) => String(value).padStart(2, '0')
-  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  const day = `${String(date.getFullYear()).padStart(4, '0')}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
   if (mode === 'date') return day
   return `${day}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
@@ -87,6 +92,7 @@ export function operationalDateDayKey(date: Date) {
 }
 
 export function operationalDateWithinRange(date: Date, min?: string, max?: string) {
+  if (!Number.isFinite(date.getTime())) return false
   const candidate = operationalDateDayKey(date)
   const minimum = operationalDateValue(min, 'date')
   const maximum = operationalDateValue(max, 'date')

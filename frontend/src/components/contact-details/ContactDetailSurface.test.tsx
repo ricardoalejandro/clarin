@@ -94,6 +94,45 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('blocks partial and impossible dates while preserving their text and other edits', async () => {
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByLabelText('Nombre visible'), { target: { value: 'Nombre pendiente' } })
+    const birthday = screen.getByRole('textbox', { name: 'Fecha de nacimiento' })
+    fireEvent.change(birthday, { target: { value: '31/02/1992' } })
+    fireEvent.submit(screen.getByRole('form', { name: 'Editar contacto' }))
+    expect(mocks.updateContact).not.toHaveBeenCalled()
+    expect(birthday).toHaveValue('31/02/1992')
+    expect(screen.getByLabelText('Nombre visible')).toHaveValue('Nombre pendiente')
+    fireEvent.change(birthday, { target: { value: '09/05/1992' } })
+    const customDate = screen.getByRole('textbox', { name: 'Renovación' })
+    fireEvent.change(customDate, { target: { value: '20/06/' } })
+    fireEvent.submit(screen.getByRole('form', { name: 'Editar contacto' }))
+    expect(mocks.updateContact).not.toHaveBeenCalled()
+    expect(customDate).toHaveValue('20/06/')
+    fireEvent.change(customDate, { target: { value: '20/06/2026' } })
+    fireEvent.submit(screen.getByRole('form', { name: 'Editar contacto' }))
+    await waitFor(() => expect(mocks.updateContact).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      custom_name: 'Nombre pendiente', birth_date: '1992-05-09',
+      custom_field_values: [expect.objectContaining({ field_id: 'field-date', value_date: '2026-06-20' })],
+    })))
+  })
+
+  it('treats a partial date as dirty and preserves it while the editor is paused', () => {
+    const ref = createRef<ContactDetailSurfaceHandle>()
+    const props = { contactId: 'contact-1', context: { type: 'contact' as const, id: 'contact-1' }, onClose: vi.fn() }
+    const view = render(<ContactDetailSurface ref={ref} {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Fecha de nacimiento' }), { target: { value: '04/05/' } })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    expect(ref.current?.requestClose()).toBe(false)
+    expect(props.onClose).not.toHaveBeenCalled()
+    view.rerender(<ContactDetailSurface ref={ref} {...props} readOnly />)
+    view.rerender(<ContactDetailSurface ref={ref} {...props} />)
+    expect(screen.getByRole('textbox', { name: 'Fecha de nacimiento' })).toHaveValue('04/05/')
+    expect(screen.getByRole('button', { name: 'Guardar contacto' })).toBeDisabled()
+  })
+
   it('keeps Contact identity read-only while Observation opens only the module composer', () => {
     const prepare = vi.fn()
     const contextObservation = vi.fn()

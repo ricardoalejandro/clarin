@@ -1,0 +1,343 @@
+{
+  "source": "TypeScript JSX AST; source occurrences, not runtime screen counts",
+  "nativeDateInputs": 0,
+  "sharedControlOccurrences": 67,
+  "native": [],
+  "shared": [
+    {
+      "file": "frontend/src/app/dashboard/admin/page.tsx",
+      "line": 3467,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/admin/page.tsx",
+      "line": 3472,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/chats/page.tsx",
+      "line": 1710,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/chats/page.tsx",
+      "line": 1710,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/contacts/page.tsx",
+      "line": 1600,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/contacts/page.tsx",
+      "line": 1604,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/contacts/page.tsx",
+      "line": 1716,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/dynamics/[id]/page.tsx",
+      "line": 1824,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/dynamics/[id]/page.tsx",
+      "line": 1830,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/dynamics/[id]/page.tsx",
+      "line": 1902,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/dynamics/[id]/page.tsx",
+      "line": 1908,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/events/[id]/page.tsx",
+      "line": 2058,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/events/[id]/page.tsx",
+      "line": 2062,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 2846,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 2850,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 3080,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 4066,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 4480,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/leads/page.tsx",
+      "line": 4484,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/page.tsx",
+      "line": 837,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/page.tsx",
+      "line": 838,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/[id]/page.tsx",
+      "line": 3559,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/[id]/page.tsx",
+      "line": 3665,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/[id]/page.tsx",
+      "line": 3782,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/[id]/page.tsx",
+      "line": 3786,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/programs/[id]/page.tsx",
+      "line": 4127,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/dashboard/settings/page.tsx",
+      "line": 958,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/app/f/[slug]/page.tsx",
+      "line": 750,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/contact-details/ContactDetailSurface.tsx",
+      "line": 828,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/contact-details/ContactDetailSurface.tsx",
+      "line": 853,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/ContactSelector.tsx",
+      "line": 783,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/ContactSelector.tsx",
+      "line": 787,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/CreateCampaignModal.tsx",
+      "line": 930,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/CreateContactModal.tsx",
+      "line": 179,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/crm-detail/DetachedEventParticipantDetail.tsx",
+      "line": 195,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/crm-detail/DetachedLeadDetail.tsx",
+      "line": 179,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/CustomFieldInput.tsx",
+      "line": 406,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/events/EventConfigurationWindow.tsx",
+      "line": 308,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/events/EventConfigurationWindow.tsx",
+      "line": 308,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/events/EventLogbooksWorkspace.tsx",
+      "line": 101,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/LeadDetailPanel.tsx",
+      "line": 1186,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/ObservationHistoryModal.tsx",
+      "line": 459,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/ObservationHistoryModal.tsx",
+      "line": 463,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/offline-v3/OfflineTasksView.tsx",
+      "line": 205,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/programs/ProgramParticipantEnrollmentDate.tsx",
+      "line": 117,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/programs/ProgramParticipantOutcomeDate.tsx",
+      "line": 135,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/surveys/StandaloneSurveyApplicationDialog.tsx",
+      "line": 63,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/surveys/StandaloneSurveyApplicationDialog.tsx",
+      "line": 63,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskBoard.tsx",
+      "line": 562,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskDateRangePicker.tsx",
+      "line": 158,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskDateRangePicker.tsx",
+      "line": 159,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskDateTimePicker.tsx",
+      "line": 9,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskDetailDrawer.tsx",
+      "line": 1891,
+      "component": "TaskDateRangePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskEditorModal.tsx",
+      "line": 586,
+      "component": "TaskDateRangePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskFilters.tsx",
+      "line": 177,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskFilters.tsx",
+      "line": 178,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskFilters.tsx",
+      "line": 179,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskFilters.tsx",
+      "line": 180,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskListView.tsx",
+      "line": 774,
+      "component": "TaskDateTimePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/TaskQuickSubtaskComposer.tsx",
+      "line": 109,
+      "component": "TaskDateRangePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/WorkEventEditor.tsx",
+      "line": 268,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/WorkEventEditor.tsx",
+      "line": 268,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/WorkEventEditor.tsx",
+      "line": 273,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/WorkEventEditor.tsx",
+      "line": 278,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/task-work/WorkEventEditor.tsx",
+      "line": 278,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/TaskFormModal.tsx",
+      "line": 269,
+      "component": "OperationalDatePicker"
+    },
+    {
+      "file": "frontend/src/components/TaskInlineCard.tsx",
+      "line": 524,
+      "component": "OperationalDatePicker"
+    }
+  ]
+}

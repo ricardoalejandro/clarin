@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { X, UserPlus, Phone, Tag, Loader2 } from 'lucide-react'
 import CatalogTagPicker from '@/components/tags/CatalogTagPicker'
 import { tagSelectionIds } from '@/components/tags/tagFormAdapters'
@@ -25,6 +27,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
     birth_date: '',
     notes: '',
   })
+  const dates = useOperationalDateFields()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -39,9 +42,9 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   }
 
   const handleSubmit = async () => {
-    if (loading || creatingTag) return
+    if (loading || creatingTag || !dates.validate()) return
     const phone = form.phone.trim()
-    const validationError = validateContactCreation(form)
+    const validationError = validateContactCreation({ ...form, birth_date: dates.value('birth_date', form.birth_date) })
     if (validationError) {
       setError(validationError)
       return
@@ -59,7 +62,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
           email: form.email.trim(),
           company: form.company.trim(),
           dni: form.dni.trim(),
-          birth_date: form.birth_date || undefined,
+          birth_date: dates.value('birth_date', form.birth_date) || undefined,
           notes: form.notes.trim(),
           tag_ids: tagSelectionIds(selectedTags),
         }),
@@ -71,6 +74,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
       }
       setForm({ phone: '', name: '', last_name: '', email: '', company: '', dni: '', birth_date: '', notes: '' })
       setSelectedTags([])
+      dates.reset()
       onSuccess()
       onClose()
     } catch {
@@ -78,6 +82,13 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
     } finally {
       setLoading(false)
     }
+  }
+
+  const requestClose = () => {
+    if (loading) return
+    if (dates.dirty && !window.confirm('Hay una fecha sin guardar. ¿Deseas descartarla?')) return
+    dates.reset()
+    onClose()
   }
 
   if (!open) return null
@@ -101,7 +112,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={requestClose}
             className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 sm:h-8 sm:w-8 sm:rounded-lg"
           >
             <X className="w-4 h-4" />
@@ -165,7 +176,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Fecha de nacimiento</label>
-                <input type="date" value={form.birth_date} onChange={e => handleChange('birth_date', e.target.value)} className={inputCls} />
+                <OperationalDatePicker mode="date" label="Fecha de nacimiento" disabled={loading} value={form.birth_date} onDraftStateChange={dates.track('birth_date')} onChange={value => handleChange('birth_date', value)} />
               </div>
 
               <div>
@@ -187,12 +198,12 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
 
         {/* Footer */}
         <div className="safe-area-bottom flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 bg-slate-50 px-4 py-3 sm:px-6 sm:py-4">
-          <button onClick={onClose} className="min-h-11 flex-1 rounded-lg px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-800 sm:flex-none">
+          <button onClick={requestClose} className="min-h-11 flex-1 rounded-lg px-4 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-800 sm:flex-none">
             Cancelar
           </button>
           <button
             onClick={handleSubmit}
-            disabled={loading || creatingTag || (!form.phone.trim() && !form.name.trim())}
+            disabled={!dates.valid || loading || creatingTag || (!form.phone.trim() && !form.name.trim())}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}

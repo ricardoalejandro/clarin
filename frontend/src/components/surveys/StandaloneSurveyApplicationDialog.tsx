@@ -7,6 +7,8 @@ import { api } from '@/lib/api'
 import type { SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template'
 import SurveyInstanceNameField from './SurveyInstanceNameField'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 
 export default function StandaloneSurveyApplicationDialog({ template, onClose, onCreated }: {
   template: SurveyTemplate
@@ -18,6 +20,7 @@ export default function StandaloneSurveyApplicationDialog({ template, onClose, o
   const [nameAvailable, setNameAvailable] = useState<boolean | null>(null)
   const [opensAt, setOpensAt] = useState('')
   const [closesAt, setClosesAt] = useState('')
+  const dates = useOperationalDateFields()
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [conflictSuggestion, setConflictSuggestion] = useState('')
@@ -26,7 +29,9 @@ export default function StandaloneSurveyApplicationDialog({ template, onClose, o
 
   const create = async () => {
     if (creating || !name.trim() || nameAvailable === false) return
-    if (opensAt && closesAt && new Date(closesAt) <= new Date(opensAt)) {
+    if (!dates.validate()) return
+    const opening = dates.value('opens_at', opensAt), closing = dates.value('closes_at', closesAt)
+    if (opening && closing && new Date(closing) <= new Date(opening)) {
       setError('El cierre debe ser posterior a la apertura.')
       return
     }
@@ -34,7 +39,7 @@ export default function StandaloneSurveyApplicationDialog({ template, onClose, o
     try {
       const response = await api<SurveyInstanceSummary & { suggested_name?: string }>(`/api/survey-templates/${template.id}/instances`, {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opensAt ? new Date(opensAt).toISOString() : null, closes_at: closesAt ? new Date(closesAt).toISOString() : null }),
+        body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opening ? new Date(opening).toISOString() : null, closes_at: closing ? new Date(closing).toISOString() : null }),
       })
       if (!response.success || !response.data) {
         if (response.status === 409 && response.data?.suggested_name) setConflictSuggestion(response.data.suggested_name)
@@ -55,7 +60,7 @@ export default function StandaloneSurveyApplicationDialog({ template, onClose, o
       </header>
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
         <SurveyInstanceNameField templateId={template.id} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} autoFocus />
-        <div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-semibold text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={opensAt} onChange={event => setOpensAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" /></label><label className="block"><span className="mb-1.5 block text-sm font-semibold text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={closesAt} onChange={event => setClosesAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" /></label></div>
+        <div className="grid gap-4 sm:grid-cols-2"><div><span className="mb-1.5 block text-sm font-semibold text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><OperationalDatePicker mode="datetime" label="Apertura" value={opensAt} onChange={setOpensAt} onDraftStateChange={dates.track('opens_at')} disabled={creating} showQuickValues={false} /></div><div><span className="mb-1.5 block text-sm font-semibold text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><OperationalDatePicker mode="datetime" label="Cierre" value={closesAt} onChange={setClosesAt} onDraftStateChange={dates.track('closes_at')} disabled={creating} showQuickValues={false} /></div></div>
         {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p>{conflictSuggestion && <button type="button" onClick={() => setName(conflictSuggestion)} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm">Usar “{conflictSuggestion}”</button>}</div>}
       </div>
       <footer className="flex gap-3 border-t border-slate-100 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-5"><button type="button" onClick={onClose} disabled={creating} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancelar</button><button type="button" onClick={() => void create()} disabled={creating || !name.trim() || nameAvailable === false} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}Crear aplicación</button></footer>

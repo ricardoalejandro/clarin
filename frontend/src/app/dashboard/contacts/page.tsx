@@ -3,6 +3,9 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
+import { customFieldFilterDateKey, customFieldFilterRowKey, useCustomFieldFilterRows } from '@/components/contact-details/useCustomFieldFilterRows'
 import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -319,6 +322,7 @@ function ContactOpportunitySummary({
 }
 
 export default function ContactsPage() {
+  const filterDates = useOperationalDateFields()
   const { leadsEnabled } = useLeadPolicy()
   const { requireOnline } = useClarinRuntime()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
@@ -532,7 +536,7 @@ export default function ContactsPage() {
   const [cfVisibleIds, setCfVisibleIds] = useState<Set<string>>(new Set())
   const [showCfColumnPicker, setShowCfColumnPicker] = useState(false)
   const cfColumnPickerRef = useRef<HTMLDivElement>(null)
-  const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
+  const [cfFilters, setCfFilters] = useCustomFieldFilterRows()
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
   const filterQuery = useMemo(() => contactFilterParams(appliedFilters, debouncedSearch).toString(), [appliedFilters, debouncedSearch])
@@ -563,11 +567,12 @@ export default function ContactsPage() {
     setDraftSortBy(sortBy)
     setDraftSortOrder(sortOrder)
   }
-  const openContactFilters = () => { restoreFilterDraft(); setShowFilterDropdown(true) }
+  const openContactFilters = () => { filterDates.reset(); restoreFilterDraft(); setShowFilterDropdown(true) }
   const applyContactFilters = () => {
-    const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+    if (!filterDates.validate()) return
+    const resolved = resolveDatePreset(filterDatePreset, filterDates.value('from', filterDateFrom), filterDates.value('to', filterDateTo))
     invalidateContactQuery()
-    setAppliedFilters({ deviceId: filterDevice, tagNames: [...filterTagNames], excludedTagNames: [...excludeFilterTagNames], tagMode: tagFilterMode, formulaType: leadFormulaType, formulaText: leadFormulaType === 'advanced' ? leadFormulaText : '', dateField: filterDateField, datePreset: filterDatePreset, dateFrom: resolved?.from || '', dateTo: resolved?.to || '', customFields: structuredClone(cfFilters) })
+    setAppliedFilters({ deviceId: filterDevice, tagNames: [...filterTagNames], excludedTagNames: [...excludeFilterTagNames], tagMode: tagFilterMode, formulaType: leadFormulaType, formulaText: leadFormulaType === 'advanced' ? leadFormulaText : '', dateField: filterDateField, datePreset: filterDatePreset, dateFrom: resolved?.from || '', dateTo: resolved?.to || '', customFields: cfFilters.map(cf => cfDefs.find(def => def.id === cf.field_id)?.field_type === 'date' ? { ...cf, value: filterDates.value(customFieldFilterDateKey(cf), String(cf.value || '')) } : structuredClone(cf)) })
     setAppliedFormulaType(leadFormulaType)
     setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
     setSortBy(draftSortBy)
@@ -1592,13 +1597,11 @@ export default function ContactsPage() {
                     <div className="mt-2 space-y-1.5">
                       <div>
                         <label className="text-[9px] font-semibold text-slate-400 uppercase">Desde</label>
-                        <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)}
-                          className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400" />
+                        <OperationalDatePicker mode="date" label="Desde" value={filterDateFrom} onChange={setFilterDateFrom} onDraftStateChange={filterDates.track('from')} showQuickValues={false} compact />
                       </div>
                       <div>
                         <label className="text-[9px] font-semibold text-slate-400 uppercase">Hasta</label>
-                        <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)}
-                          className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400" />
+                        <OperationalDatePicker mode="date" label="Hasta" value={filterDateTo} onChange={setFilterDateTo} onDraftStateChange={filterDates.track('to')} showQuickValues={false} compact />
                       </div>
                     </div>
                   )}
@@ -1653,7 +1656,7 @@ export default function ContactsPage() {
                     })()
                     const needsValue = cf.operator !== 'is_empty' && cf.operator !== 'is_not_empty'
                     return (
-                      <div key={idx} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
+                      <div key={customFieldFilterRowKey(cf)} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
                         <div className="flex items-center gap-1">
                           <select
                             value={cf.field_id}
@@ -1710,12 +1713,13 @@ export default function ContactsPage() {
                           </select>
                         )}
                         {needsValue && fieldType === 'date' && (
-                          <input
-                            type="date"
+                          <OperationalDatePicker
+                            mode="date" label={def?.name || 'Fecha del campo personalizado'} compact showQuickValues={false}
+                            key={cf.field_id} onDraftStateChange={filterDates.track(customFieldFilterDateKey(cf))}
                             value={String(cf.value || '')}
-                            onChange={(e) => {
+                            onChange={(value) => {
                               const next = [...cfFilters]
-                              next[idx] = { ...next[idx], value: e.target.value }
+                              next[idx] = { ...next[idx], value }
                               setCfFilters(next)
                             }}
                             className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"

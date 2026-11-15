@@ -13,6 +13,8 @@ import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAp
 import EmojiPicker from '@/components/chat/EmojiPicker'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { compressImageStandard } from '@/utils/imageCompression'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 
 interface Device {
   id: string
@@ -226,6 +228,7 @@ export default function CreateCampaignModal({
   const activeRef = useRef(open && !suspended)
   activeRef.current = open && !suspended
   const submittingRef = useRef(false)
+  const scheduleDates = useOperationalDateFields()
   const [formData, setFormData] = useState({
     name: '',
     device_id: '',
@@ -264,6 +267,7 @@ export default function CreateCampaignModal({
   // Right column sections collapse state
   const [showSettings, setShowSettings] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
+  const [scheduleError, setScheduleError] = useState('')
   const [mobileStep, setMobileStep] = useState<MobileStep>('message')
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -280,6 +284,8 @@ export default function CreateCampaignModal({
   // Reset form when modal opens
   useEffect(() => {
     if (open) {
+      scheduleDates.reset()
+      setScheduleError('')
       const s = initialData?.settings || {}
       let schedDate = ''
       let schedTime = ''
@@ -481,9 +487,18 @@ export default function CreateCampaignModal({
 
   const handleSubmit = async () => {
     if (!activeRef.current || !canSubmit || submittingRef.current) return
+    if (!scheduleDates.validate()) {
+      setShowSchedule(true)
+      setMobileStep('settings')
+      setScheduleError('Revisa la fecha de envío antes de continuar. Tu programación se conserva.')
+      requestAnimationFrame(() => scheduleDates.validate())
+      return
+    }
+    setScheduleError('')
+    const scheduledDate = scheduleDates.value('scheduled_date', formData.scheduled_date)
     let scheduledAt: string | undefined
-    if (hasSchedule) {
-      const dt = new Date(`${formData.scheduled_date}T${formData.scheduled_time}:00`)
+    if (scheduledDate && formData.scheduled_time) {
+      const dt = new Date(`${scheduledDate}T${formData.scheduled_time}:00`)
       const now = new Date()
       if (dt <= now) { alert('La fecha programada debe ser en el futuro'); return }
       if (dt > new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)) {
@@ -907,12 +922,12 @@ export default function CreateCampaignModal({
                 </div>
                 {showSchedule ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
               </button>
-              {showSchedule && (
-                <div className="p-4 border-t border-gray-200">
+                <div hidden={!showSchedule} inert={!showSchedule || undefined} className="p-4 border-t border-gray-200">
+                  {scheduleError && <p role="alert" className="mb-3 text-xs text-red-700">{scheduleError}</p>}
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">Fecha</label>
-                      <input type="date" value={formData.scheduled_date} onChange={e => setFormData({ ...formData, scheduled_date: e.target.value })} min={new Date().toISOString().split('T')[0]} max={new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900" />
+                      <OperationalDatePicker mode="date" label="Fecha de envío" value={formData.scheduled_date} onChange={value => setFormData(current => ({ ...current, scheduled_date: value }))} onDraftStateChange={scheduleDates.track('scheduled_date')} min={new Date().toISOString().split('T')[0]} max={new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} showQuickValues={false} compact />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">Hora</label>
@@ -924,14 +939,13 @@ export default function CreateCampaignModal({
                       <p className="text-xs text-blue-600">
                         Se enviará el {format(new Date(`${formData.scheduled_date}T${formData.scheduled_time}`), "d 'de' MMMM 'a las' HH:mm", { locale: es })}
                       </p>
-                      <button type="button" onClick={() => setFormData({ ...formData, scheduled_date: '', scheduled_time: '' })} className="text-xs text-red-500 hover:text-red-700">
+                      <button type="button" onClick={() => { scheduleDates.reset(); setFormData({ ...formData, scheduled_date: '', scheduled_time: '' }) }} className="text-xs text-red-500 hover:text-red-700">
                         Quitar
                       </button>
                     </div>
                   )}
                   <p className="text-[10px] text-gray-400 mt-2">Máximo 1 semana. Deja vacío para enviar manualmente.</p>
                 </div>
-              )}
             </div>
 
             {/* ── Speed estimator ── */}

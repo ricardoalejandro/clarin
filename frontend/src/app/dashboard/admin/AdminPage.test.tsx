@@ -284,8 +284,10 @@ describe('AdminPage administrative creation flows', () => {
     fireEvent.change(within(dialog).getByLabelText('Límite de usuarios'), { target: { value: '25' } })
     fireEvent.change(within(dialog).getByLabelText('Almacenamiento (GB)'), { target: { value: '2' } })
     fireEvent.change(within(dialog).getByLabelText('Estado de suscripción'), { target: { value: 'trialing' } })
-    fireEvent.change(within(dialog).getByLabelText('Prueba hasta'), { target: { value: '2026-09-15' } })
-    fireEvent.change(within(dialog).getByLabelText('Periodo hasta'), { target: { value: '2026-10-01' } })
+    fireEvent.change(within(dialog).getByLabelText('Prueba hasta'), { target: { value: '15/09/2026' } })
+    const period = within(dialog).getByLabelText('Periodo hasta')
+    fireEvent.focus(period)
+    fireEvent.change(period, { target: { value: '01/10/2026' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Crear cuenta' }))
 
     await waitFor(() => expect(matchingCalls(fetchMock, '/api/admin/accounts', 'POST')).toHaveLength(1))
@@ -304,6 +306,29 @@ describe('AdminPage administrative creation flows', () => {
     expect(fetchMock.mock.calls.some(([input, init]) =>
       String(input).includes('/subscription') && Boolean((init as RequestInit | undefined)?.method),
     )).toBe(false)
+  })
+
+  it('retains invalid typed dates and sends neither partial nor impossible account dates', async () => {
+    const fetchMock = installFetch()
+    await renderAdminPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Nueva Cuenta' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Crear cuenta' })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Límites y suscripción/ }))
+    fireEvent.change(within(dialog).getByLabelText('Nombre'), { target: { value: 'Cuenta con fecha' } })
+    const trial = within(dialog).getByRole('textbox', { name: 'Prueba hasta' })
+    for (const value of ['15/09/', '29/02/2027']) {
+      fireEvent.focus(trial)
+      fireEvent.change(trial, { target: { value } })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Crear cuenta' }))
+      expect(trial).toHaveValue(value)
+      expect(trial).toHaveAttribute('aria-invalid', 'true')
+      expect(matchingCalls(fetchMock, '/api/admin/accounts', 'POST')).toHaveLength(0)
+    }
+    fireEvent.change(trial, { target: { value: '29/02/2028' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Crear cuenta' }))
+    await waitFor(() => expect(matchingCalls(fetchMock, '/api/admin/accounts', 'POST')).toHaveLength(1))
+    const [, init] = matchingCalls(fetchMock, '/api/admin/accounts', 'POST')[0]
+    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({ trial_ends_at: '2028-02-29', current_period_end: '' })
   })
 
   it('renders the full permission catalog and protects role creation from double submission', async () => {

@@ -6,6 +6,7 @@ import { api, subscribeWebSocket } from '@/lib/api'
 import { getAuthScope, subscribeAuthScope } from '@/lib/authScope'
 import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
 import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { TaskColorPicker } from '@/components/task-work/TaskContainerAppearance'
 import { TaskSelectPicker } from '@/components/task-work/TaskSelectPicker'
 import { isEventContextReadOnly } from '@/app/dashboard/events/eventForm'
@@ -49,6 +50,8 @@ async function request<T extends { success?: boolean; error?: string }>(path: st
   return response.data
 }
 export default function EventConfigurationWindow({ open, eventId, initialSection = 'data', folderId, storageScope, onClose, onSaved, onCreated }: EventConfigurationWindowProps) {
+  const dates = useOperationalDateFields()
+  const [dateRevision, setDateRevision] = useState(0)
   const [section, setSection] = useState<EventConfigurationSection>(initialSection)
   const [record, setRecord] = useState<EventConfigurationRecord | null>(null)
   const [closedRemotely, setClosedRemotely] = useState(false)
@@ -78,7 +81,7 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
   const newController = () => { const controller = new AbortController(); requests.current.add(controller); return controller }
   const release = (controller: AbortController) => requests.current.delete(controller)
   const dirty = {
-    data: JSON.stringify(data) !== JSON.stringify(dataBase),
+    data: dates.dirty || JSON.stringify(data) !== JSON.stringify(dataBase),
     stages: Boolean(layout && eventStageSignature(stages) !== eventStageSignature(eventStageDrafts(layout))),
     rules: ruleLoaded && eventRuleSignature(rule) !== eventRuleSignature(ruleBase),
   }
@@ -87,6 +90,8 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
   currentMetadataDraft.current = { dataBase, dirty: dirty.data }
   const readOnly = closedRemotely || isEventContextReadOnly(record?.status)
   useEffect(() => {
+    dates.reset()
+    setDateRevision(value => value + 1)
     const session = ++generation.current
     requests.current.forEach(controller => controller.abort()); requests.current.clear()
     busy.current = false
@@ -140,6 +145,10 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
   }, [open, activeId, record, section, layout, ruleLoaded, retry])
   const changeSection = (next: EventConfigurationSection) => {
     if (saving || !activeId || !record) return
+    if (section === 'data') {
+      if (!dates.validate()) return
+      setData(previous => ({ ...previous, event_date: dates.value('event_date', previous.event_date), event_end: dates.value('event_end', previous.event_end) }))
+    }
     if (scrollRef.current) scrollPositions.current[section] = scrollRef.current.scrollTop
     setSection(next); setNotice('')
     requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollPositions.current[next] })
@@ -165,14 +174,15 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
     }
   }
   const saveData = (confirmed = false) => {
-    if (readOnly) return
+    if (readOnly || !dates.validate()) return
+    const nextData = { ...data, event_date: dates.value('event_date', data.event_date), event_end: dates.value('event_end', data.event_end) }
     if (activeId && data.status !== record?.status) {
       if (dirty.stages || dirty.rules) { setErrors(previous => ({ ...previous, data: 'Guarda o descarta los cambios de Etapas y Reglas antes de cambiar el estado.' })); return }
       if (!confirmed) { setConfirm('lifecycle'); return }
     }
     setConfirm(null)
     void runSave('data', async (controller, session) => {
-      const payload = eventConfigurationDataPayload(data, record), isNew = !activeId
+      const payload = eventConfigurationDataPayload(nextData, record), isNew = !activeId
       const result = await request<{ success: boolean; event: EventConfigurationRecord }>('/api/events' + (activeId ? '/' + activeId : ''), controller.signal, activeId ? 'PUT' : 'POST', { ...payload, ...(isNew ? { status: 'draft', folder_id: folderId || null } : { expected_updated_at: record?.updated_at }) })
       if (generation.current !== session || controller.signal.aborted) return
       setRecord(result.event); setData(eventDataDraft(result.event)); setDataBase(eventDataDraft(result.event)); setActiveId(result.event.id)
@@ -255,6 +265,7 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
       void runSave('data', async (controller, session) => {
         const result = await request<{ success: boolean; event: EventConfigurationRecord }>('/api/events/' + activeId, controller.signal)
         if (generation.current !== session || controller.signal.aborted) return
+        dates.reset(); setDateRevision(value => value + 1)
         setRecord(result.event); setData(eventDataDraft(result.event)); setDataBase(eventDataDraft(result.event))
       })
     }
@@ -275,7 +286,7 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
     <OperationalWindowShell open={open} storageKey="clarin:event-configuration" storageScope={storageScope || getAuthScope()} title={record?.name || 'Nuevo evento'} eyebrow="Configuración del evento" icon={Settings2} defaultMode="floating" defaultWidth={920} defaultHeight={760} minWidth={520} minHeight={480} dockedWidth={672} busy={saving} onRequestClose={close} dataAttribute="event-configuration" temporaryOverlaySelector="[data-operational-confirmation], [data-operational-picker-backdrop], [data-task-picker-backdrop], [data-task-color-picker]" contentClassName="flex min-h-0 flex-1 flex-col"
       footer={<div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-white px-4 py-3 sm:px-6">
         <p className="text-xs text-slate-500">{readOnly ? 'Historial de solo lectura' : hasChanges ? 'Hay cambios sin guardar' : 'Cambios guardados'}</p>
-        <div className="ml-auto flex gap-2"><button type="button" disabled={saving} onClick={close} className="min-h-11 rounded-xl px-4 text-sm font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">Cerrar</button>{!readOnly && <button type="button" disabled={saving || loading !== null || !sectionReady || (activeId ? !dirty[section] : !data.name.trim()) || conflicts[section]} onClick={() => { if (section === 'data') saveData(); else if (section === 'stages') saveStages(); else previewRules() }} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{saving ? 'Guardando…' : submitLabel}</button>}</div>
+        <div className="ml-auto flex gap-2"><button type="button" disabled={saving} onClick={close} className="min-h-11 rounded-xl px-4 text-sm font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">Cerrar</button>{!readOnly && <button type="button" disabled={saving || loading !== null || !sectionReady || (section === 'data' && !dates.valid) || (activeId ? !dirty[section] : !data.name.trim()) || conflicts[section]} onClick={() => { if (section === 'data') saveData(); else if (section === 'stages') saveStages(); else previewRules() }} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{saving ? 'Guardando…' : submitLabel}</button>}</div>
       </div>}>
       <nav aria-label="Secciones de configuración" className="flex shrink-0 gap-1 border-b border-slate-100 px-3 py-2 sm:px-5" role="tablist" onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || saving || !activeId || !record) return
@@ -294,7 +305,7 @@ export default function EventConfigurationWindow({ open, eventId, initialSection
             {!activeId && <p className="rounded-xl bg-slate-50 p-3 text-sm leading-6 text-slate-600">Crea el borrador para preparar sus etapas y reglas. Podrás activarlo cuando esté listo.</p>}
             <div><label className={labelClass} htmlFor="event-configuration-name">Nombre del evento</label><input id="event-configuration-name" autoFocus maxLength={255} value={data.name} disabled={disabled} onChange={event => updateData({ name: event.target.value })} className={fieldClass} placeholder="Nombre del evento" /></div>
             <div><label className={labelClass} htmlFor="event-configuration-description">Descripción</label><textarea id="event-configuration-description" rows={3} value={data.description} disabled={disabled} onChange={event => updateData({ description: event.target.value })} className={fieldClass + ' resize-y'} placeholder="Propósito y detalles del evento" /></div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div><span className={labelClass}>Inicio</span><OperationalDatePicker mode="datetime" label="Inicio del evento" value={data.event_date} onChange={event_date => updateData({ event_date })} disabled={disabled} showQuickValues={false} /></div><div><span className={labelClass}>Fin</span><OperationalDatePicker mode="datetime" label="Fin del evento" value={data.event_end} onChange={event_end => updateData({ event_end })} disabled={disabled} showQuickValues={false} min={data.event_date.slice(0, 10)} /></div></div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div><span className={labelClass}>Inicio</span><OperationalDatePicker key={`start:${dateRevision}`} mode="datetime" label="Inicio del evento" onDraftStateChange={dates.track('event_date')} value={data.event_date} onChange={event_date => updateData({ event_date })} disabled={disabled} showQuickValues={false} /></div><div><span className={labelClass}>Fin</span><OperationalDatePicker key={`end:${dateRevision}`} mode="datetime" label="Fin del evento" onDraftStateChange={dates.track('event_end')} value={data.event_end} onChange={event_end => updateData({ event_end })} disabled={disabled} showQuickValues={false} min={data.event_date.slice(0, 10)} /></div></div>
             <div><label className={labelClass} htmlFor="event-configuration-location">Ubicación</label><input id="event-configuration-location" value={data.location} disabled={disabled} onChange={event => updateData({ location: event.target.value })} className={fieldClass} placeholder="Lugar o enlace de reunión" /></div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2"><div><span className={labelClass}>Color de identificación</span><TaskColorPicker value={data.color} onChange={color => updateData({ color })} disabled={disabled} label="Color del evento" /></div><div><span className={labelClass}>Estado</span><TaskSelectPicker value={data.status} options={statusOptions} onChange={status => updateData({ status })} label="Estado del evento" disabled={disabled || !activeId} /></div></div>
             {activeId && data.status === 'draft' && <button type="button" disabled={saving} onClick={() => changeSection('stages')} className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-emerald-700">Continuar con etapas<ChevronRight className="h-4 w-4" /></button>}

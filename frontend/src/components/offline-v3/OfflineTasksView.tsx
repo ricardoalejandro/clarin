@@ -6,6 +6,9 @@ import type { TaskCompleteInput, TaskCreateInput } from '@/offline-v3/types'
 import { operationErrorMessage, operationOutcomeIsUnknown } from '@/offline-v3/operationAttempt'
 import { offlineTaskCanComplete } from '@/offline-v3/taskReadModel'
 import OfflineTaskCard from './OfflineTaskCard'
+import OperationalDatePicker from '../operational-date/OperationalDatePicker'
+import '../operational-date/operationalDate.css'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
 
 type Props = {
   gateway: OfflineDataGateway
@@ -35,6 +38,7 @@ function OfflineTasksSession({ gateway, canCreate, canComplete, onSync, refreshT
   const [title, setTitle] = useState('')
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium')
   const [dueDate, setDueDate] = useState('')
+  const dateFields = useOperationalDateFields()
   const [createAttempt, setCreateAttempt] = useState<TaskCreateInput | null>(null)
   const [completeAttempts, setCompleteAttempts] = useState<Record<string, TaskCompleteInput>>({})
   const [error, setError] = useState('')
@@ -114,12 +118,14 @@ function OfflineTasksSession({ gateway, canCreate, canComplete, onSync, refreshT
     event.preventDefault()
     const normalized = title.trim()
     if (!canCreate || currentList?.can_create !== true || !normalized || !selectionId || creating) return
+    if (!dateFields.validate()) return
     const generation = scope.current.generation
     mutationRevision.current += 1
     setCreating(true)
     setError('')
     try {
-      const dueAt = dueDate ? new Date(`${dueDate}T23:59:59`).toISOString() : null
+      const submittedDue = dateFields.value('due', dueDate)
+      const dueAt = submittedDue ? new Date(`${submittedDue}T23:59:59`).toISOString() : null
       const input = createAttempt || {
         operation_id: crypto.randomUUID(),
         selection_id: selectionId,
@@ -135,6 +141,7 @@ function OfflineTasksSession({ gateway, canCreate, canComplete, onSync, refreshT
       onSync(result.sync)
       setTitle('')
       setDueDate('')
+      dateFields.reset()
       setPriority('medium')
       setCreateAttempt(null)
     } catch (requestError) {
@@ -195,8 +202,8 @@ function OfflineTasksSession({ gateway, canCreate, canComplete, onSync, refreshT
       {canCreate && currentList?.can_create === true && selectionId && <form className="offline-task-create" onSubmit={createTask}>
         <div className="offline-task-create__title"><Plus /><input value={title} onChange={event => setTitle(event.target.value)} placeholder={`Nueva tarea en ${currentList?.name || 'la lista'}`} maxLength={300} disabled={Boolean(createAttempt)} /></div>
         <select aria-label="Prioridad" value={priority} onChange={event => setPriority(event.target.value as typeof priority)} disabled={Boolean(createAttempt)}><option value="low">Prioridad baja</option><option value="medium">Prioridad media</option><option value="high">Prioridad alta</option></select>
-        <input aria-label="Fecha límite" type="date" value={dueDate} onChange={event => setDueDate(event.target.value)} disabled={Boolean(createAttempt)} />
-        <button className="offline-button offline-button--primary" disabled={!title.trim() || creating}>{creating ? <Loader2 className="spin" /> : <Plus />}{createAttempt ? 'Reintentar sin duplicar' : 'Crear localmente'}</button>
+        <OperationalDatePicker mode="date" compact label="Fecha límite" value={dueDate} onDraftStateChange={dateFields.track('due')} onChange={setDueDate} disabled={Boolean(createAttempt)} />
+        <button className="offline-button offline-button--primary" disabled={!title.trim() || creating || !dateFields.valid}>{creating ? <Loader2 className="spin" /> : <Plus />}{createAttempt ? 'Reintentar sin duplicar' : 'Crear localmente'}</button>
       </form>}
 
       {error && <div className="offline-alert offline-alert--error" role="alert"><AlertCircle />{error}</div>}

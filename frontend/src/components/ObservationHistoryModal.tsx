@@ -8,6 +8,7 @@ import { es } from 'date-fns/locale'
 import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
 import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
 import { useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
 
 export interface HistoryObservation {
   id: string
@@ -455,11 +456,11 @@ export default function ObservationHistoryModal({
               </div>}
               <div>
                 <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5 block font-semibold">Desde</label>
-                <input type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} className="px-2.5 py-1 border border-slate-200 rounded-lg text-xs text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
+                <OperationalDatePicker mode="date" label="Desde" value={filterFrom} onChange={setFilterFrom} showQuickValues={false} compact />
               </div>
               <div>
                 <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5 block font-semibold">Hasta</label>
-                <input type="date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} className="px-2.5 py-1 border border-slate-200 rounded-lg text-xs text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
+                <OperationalDatePicker mode="date" label="Hasta" value={filterTo} onChange={setFilterTo} showQuickValues={false} compact />
               </div>
               {hasFilters && (
                 <button onClick={() => { setFilterType(''); setFilterFrom(''); setFilterTo('') }} className="px-2 py-1 text-[11px] text-slate-500 hover:text-red-600 hover:bg-red-50 flex items-center gap-1 transition rounded-lg">
