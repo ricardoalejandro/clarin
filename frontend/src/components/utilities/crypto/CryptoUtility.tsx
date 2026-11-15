@@ -1,26 +1,28 @@
 'use client'
 
 import { Children, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { ArrowDownToLine, Binary, Copy, Eye, EyeOff, Hash, KeyRound, Loader2, LockKeyhole } from 'lucide-react'
+import { ArrowDownToLine, Binary, Copy, Eye, EyeOff, Hash, Info, KeyRound, Loader2, LockKeyhole, X } from 'lucide-react'
 import { subscribeWebSocket } from '@/lib/api'
 import { useUtilityDocumentState } from '../library/UtilityDocumentContext'
 import { libraryRequest, UtilityRequestError } from '../library/libraryApi'
 import { VaultPanel, type VaultSelection } from './VaultPanel'
 import type { KeyMaterial } from './pkiOperations'
+import { CryptoHelp, CryptoHelpContext, CryptoToolbarActions, CryptoToolbarContext } from './CryptoToolbarContext'
+import '../utility-density.css'
 import {
   CryptoInputError, decodeBase64, decodeUtf8, decryptJwe, encodeBase64, encodeHex, encodeUtf8, encryptJwe,
   generateAesKey, generateRsaKeys, hashText, MAX_CRYPTO_ENCODED_CHARS, MAX_CRYPTO_PEM_CHARS,
   type Base64Format, type CipherAlgorithm, type HashAlgorithm,
 } from './cryptoOperations'
 
-const controlBase = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border px-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:opacity-40'
+const controlBase = 'utility-control inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border px-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:opacity-40'
 const control = `${controlBase} border-slate-200 bg-white text-slate-700 hover:bg-slate-50`
 const selectedControl = `${controlBase} border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100`
-const primary = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:opacity-40'
-const field = 'min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600'
-const textField = `${field} block resize-y py-3 font-mono leading-6`
-const panel = 'min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4'
-const pair = 'grid items-start gap-3'
+const primary = `${controlBase} border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800`
+const field = 'utility-field w-full rounded-lg border border-slate-300 bg-white px-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600'
+const textField = `${field} block resize-y py-2 font-mono leading-6`
+const panel = 'utility-panel flex min-h-0 flex-col gap-2'
+const pair = 'utility-pair utility-crypto-pair'
 
 function columns(width: string) {
   return { gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${width}), 1fr))` }
@@ -94,19 +96,26 @@ function LabeledField({ label, children }: { label: string; children: ReactNode 
   return <label className="block min-w-0 space-y-1 text-sm font-semibold text-slate-700"><span className="block">{label}</span>{children}</label>
 }
 
+function FormatOptions({ children }: { children: ReactNode }) {
+  return <details className="rounded-lg border border-slate-200 px-2">
+    <summary className="utility-control flex cursor-pointer items-center text-xs font-medium text-slate-600">Opciones de formato</summary>
+    <div className="grid gap-2 pb-2" style={columns('10rem')}>{children}</div>
+  </details>
+}
+
 function SourceField({ label, value, onChange, rows = 7 }: { label: string; value: string; onChange: (value: string) => void; rows?: number }) {
-  return <LabeledField label={label}>
-    <textarea rows={rows} value={value} className={`${textField} font-normal`} onChange={(event) => onChange(event.target.value)} autoComplete="off" autoCapitalize="off" spellCheck={false} />
-  </LabeledField>
+  return <label className="flex min-h-0 flex-1 flex-col gap-1 text-sm font-semibold text-slate-700"><span>{label}</span>
+    <textarea rows={rows} value={value} className={`${textField} min-h-32 flex-1 font-normal`} onChange={(event) => onChange(event.target.value)} autoComplete="off" autoCapitalize="off" spellCheck={false} />
+  </label>
 }
 
 function TaskActions({ label, busy, disabled, onRun, onClear, error }: { label: string; busy: boolean; disabled?: boolean; onRun: () => void; onClear: () => void; error: string }) {
   return <>
-    <div className="flex flex-wrap gap-2">
+    <CryptoToolbarActions>
       <button type="button" disabled={disabled || busy} className={primary} onClick={onRun}>{busy && <Loader2 aria-hidden className="h-4 w-4 motion-safe:animate-spin" />}{busy ? 'Procesando…' : label}</button>
-      <button type="button" className={control} onClick={onClear}>{busy ? 'Cancelar' : 'Limpiar'}</button>
-    </div>
-    <div className="text-sm" aria-live="polite" aria-atomic="true">{error && <p className="text-rose-700">{error}</p>}{busy && <p className="sr-only">Operación en curso</p>}</div>
+      <button type="button" className={control} aria-label={busy ? 'Cancelar' : 'Limpiar'} title={busy ? 'Cancelar' : 'Limpiar'} onClick={onClear}><X size={16} aria-hidden /></button>
+    </CryptoToolbarActions>
+    {(error || busy) && <div className="text-sm" aria-live="polite" aria-atomic="true">{error && <p className="text-rose-700">{error}</p>}{busy && <p className="sr-only">Operación en curso</p>}</div>}
   </>
 }
 
@@ -137,23 +146,25 @@ function ResultText({ title, value, fileName, secret = false }: { title: string;
     }
   }
 
-  return <div className="space-y-2">
-    {shown ? <label className="text-sm font-semibold text-slate-900" htmlFor={id}>{title}</label> : <p className="text-sm font-semibold text-slate-900">{title}</p>}
-    {shown && <textarea id={id} rows={4} readOnly ref={output} className={textField} value={value} spellCheck={false} placeholder="Resultado vacío" />}
-    {!shown && <p className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">La clave está oculta.</p>}
-    <div className="flex flex-wrap gap-2">
+  return <div className="space-y-1">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-1">
+      {shown ? <label className="text-xs font-semibold text-slate-900" htmlFor={id}>{title}</label> : <p className="text-xs font-semibold text-slate-900">{title}</p>}
+    <div className="flex items-center gap-1">
       {secret && <button type="button" className={control} onClick={() => setShown(!shown)}>{shown ? <EyeOff aria-hidden className="h-4 w-4" /> : <Eye aria-hidden className="h-4 w-4" />}{shown ? 'Ocultar clave' : 'Mostrar clave'}</button>}
-      <button type="button" className={control} onClick={() => void copy()} aria-label={`Copiar ${title.toLowerCase()}`}><Copy aria-hidden className="h-4 w-4" />Copiar</button>
-      <button type="button" className={control} onClick={() => download(new Blob([value], { type: 'text/plain;charset=utf-8' }), fileName)} aria-label={`Descargar ${title.toLowerCase()}`}><ArrowDownToLine aria-hidden className="h-4 w-4" />Descargar</button>
+      <button type="button" className={control} onClick={() => void copy()} aria-label={`Copiar ${title.toLowerCase()}`} title="Copiar resultado completo"><Copy aria-hidden className="h-4 w-4" /></button>
+      <button type="button" className={control} onClick={() => download(new Blob([value], { type: 'text/plain;charset=utf-8' }), fileName)} aria-label={`Descargar ${title.toLowerCase()}`} title="Descargar resultado completo"><ArrowDownToLine aria-hidden className="h-4 w-4" /></button>
     </div>
-    <p aria-live="polite" className="text-sm text-slate-600">{message}</p>
+    </div>
+    {shown && <textarea id={id} rows={6} readOnly ref={output} className={textField} value={value} spellCheck={false} placeholder="Resultado vacío" />}
+    {!shown && <p className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-600">La clave está oculta.</p>}
+    {message && <p aria-live="polite" className="text-xs text-slate-600">{message}</p>}
   </div>
 }
 
 function ResultPanel({ children, busy }: { children?: ReactNode; busy: boolean }) {
   const hasResult = Children.toArray(children).length > 0
   return <div className={panel} aria-busy={busy}>
-    <h3 className="text-sm font-semibold text-slate-900">Resultado</h3>
+    <h3 className="text-xs font-semibold text-slate-900">Resultado</h3>
     <p role="status" className="sr-only">{hasResult ? 'Resultado listo.' : ''}</p>
     {hasResult ? children : <p className="text-sm text-slate-500">{busy ? 'Procesando…' : 'Aquí aparecerá el resultado de la operación.'}</p>}
   </div>
@@ -187,7 +198,7 @@ function CipherPanel({ savedKey, onKeyUnavailable }: { savedKey?: VaultSelection
   const rsa = algorithm === 'rsa'
   const updateKey = (value: string) => changeBounded(value, rsa ? MAX_CRYPTO_PEM_CHARS : 256, setKey, operation)
 
-  return <div className={pair} style={columns('24rem')}>
+  return <div className={pair}>
     <div className={panel}>
       <div className="grid gap-3" style={columns('11rem')}>
         <LabeledField label="Operación">
@@ -202,11 +213,11 @@ function CipherPanel({ savedKey, onKeyUnavailable }: { savedKey?: VaultSelection
         </LabeledField>
       </div>
       <SourceField label={encrypting ? 'Texto para cifrar (UTF-8)' : 'JWE compacto'} value={source} onChange={(value) => changeBounded(value, MAX_CRYPTO_ENCODED_CHARS, setSource, operation)} />
-      {savedKey && <label className="flex min-h-11 items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={useSaved} onChange={event => { operation.reset(); setUseSaved(event.target.checked) }} />Usar la clave seleccionada de Mis claves ({savedKey.algorithm})</label>}
+      {savedKey && <label className="flex min-h-11 items-center gap-2 break-words text-sm text-slate-700"><input type="checkbox" className="shrink-0" checked={useSaved} onChange={event => { operation.reset(); setUseSaved(event.target.checked) }} /><span className="min-w-0 break-all">Usar la clave seleccionada de Mis claves ({savedKey.name ? `${savedKey.name} · ` : ''}{savedKey.algorithm})</span></label>}
       {!useSaved && (rsa
         ? <SourceField rows={4} label={encrypting ? 'Clave pública RSA (PEM SPKI)' : 'Clave privada RSA (PEM PKCS#8)'} value={key} onChange={updateKey} />
         : <LabeledField label={`Clave AES de ${algorithm === 'aes128' ? '128' : '256'} bits (Base64)`}><input type="password" autoComplete="off" value={key} className={`${field} font-mono font-normal`} onChange={(event) => updateKey(event.target.value)} /></LabeledField>)}
-      <p className="text-xs text-slate-600">Formato JWE compacto. {rsa ? 'RSA-OAEP-256 protege una clave nueva de AES-256-GCM en cada operación.' : 'La clave Base64 puede generarse en Claves.'} Límite de texto de 1 MiB.</p>
+      <CryptoHelp>Formato JWE compacto. {rsa ? 'RSA-OAEP-256 protege una clave nueva de AES-256-GCM en cada operación.' : 'La clave Base64 puede generarse en Claves.'} Límite de texto de 1 MiB.</CryptoHelp>
       <TaskActions label={encrypting ? 'Cifrar' : 'Descifrar'} busy={operation.busy} error={operation.error} disabled={(!useSaved && !key.trim()) || (!encrypting && !source.trim())}
         onRun={() => void operation.run(async isCurrent => {
           let value = key
@@ -239,7 +250,7 @@ function HashPanel() {
   const [key, setKey] = useState('')
   const operation = useOperation<Uint8Array>()
 
-  return <div className={pair} style={columns('24rem')}>
+  return <div className={pair}>
     <div className={panel}>
       <div className="grid gap-3" style={columns('10rem')}>
         <LabeledField label="Operación">
@@ -255,22 +266,22 @@ function HashPanel() {
       </div>
       <SourceField label="Texto (UTF-8)" value={source} onChange={(value) => changeBounded(value, MAX_CRYPTO_ENCODED_CHARS, setSource, operation)} />
       {mode === 'hmac' && <div className="grid gap-3" style={columns('10rem')}>
-        <LabeledField label="Formato de clave">
+        <FormatOptions><LabeledField label="Formato de clave">
           <select value={keyFormat} className={field} onChange={(event) => { operation.reset(); setKey(''); setKeyFormat(event.target.value as typeof keyFormat) }}>
             <option value="utf8">Texto UTF-8</option><option value="base64">Base64</option>
           </select>
-        </LabeledField>
+        </LabeledField></FormatOptions>
         <LabeledField label="Clave HMAC"><input type="password" autoComplete="off" value={key} className={`${field} font-mono font-normal`} onChange={(event) => changeBounded(event.target.value, 24 * 1024, setKey, operation)} /></LabeledField>
       </div>}
-      <p className="text-xs text-slate-600">{mode === 'hash' ? 'Calcula una huella del texto, incluso si está vacío.' : 'Calcula una huella de autenticación a partir de una clave secreta.'} Límite de texto de 1 MiB.</p>
+      <CryptoHelp>{mode === 'hash' ? 'Calcula una huella del texto, incluso si está vacío.' : 'Calcula una huella de autenticación a partir de una clave secreta.'} Límite de texto de 1 MiB.</CryptoHelp>
       <TaskActions label={mode === 'hash' ? 'Calcular hash' : 'Calcular HMAC'} busy={operation.busy} error={operation.error} disabled={mode === 'hmac' && !key.length}
         onRun={() => void operation.run(() => hashText(source, algorithm, mode === 'hmac' ? { value: key, format: keyFormat } : undefined))}
         onClear={() => { operation.reset(); if (!operation.busy) { setSource(''); setKey('') } }} />
     </div>
     <ResultPanel busy={operation.busy}>{operation.result && <>
-      <LabeledField label="Formato del resultado">
+      <FormatOptions><LabeledField label="Formato del resultado">
         <select className={field} value={format} onChange={(event) => setFormat(event.target.value as typeof format)}><option value="hex">Hexadecimal</option><option value="base64">Base64</option></select>
-      </LabeledField>
+      </LabeledField></FormatOptions>
       <ResultText key={format} title={mode === 'hash' ? 'Huella' : 'Código HMAC'} value={format === 'hex' ? encodeHex(operation.result) : encodeBase64(operation.result, 'base64')} fileName={mode === 'hash' ? 'hash.txt' : 'hmac.txt'} />
     </>}</ResultPanel>
   </div>
@@ -284,7 +295,7 @@ function KeyPanel() {
   const [rsaLength, setRsaLength] = useState<2048 | 3072 | 4096>(3072)
   const operation = useOperation<GeneratedKeys>()
 
-  return <div className={pair} style={columns('24rem')}>
+  return <div className={pair}>
     <div className={panel}>
       <LabeledField label="Tipo de clave">
         <select value={mode} className={field} onChange={(event) => { operation.reset(); setMode(event.target.value as typeof mode) }}><option value="aes">AES-GCM</option><option value="rsa">RSA-OAEP-256</option></select>
@@ -294,7 +305,7 @@ function KeyPanel() {
       </LabeledField> : <LabeledField label="Tamaño">
         <select value={rsaLength} className={field} onChange={(event) => { operation.reset(); setRsaLength(Number(event.target.value) as typeof rsaLength) }}><option value="2048">2048 bits</option><option value="3072">3072 bits</option><option value="4096">4096 bits</option></select>
       </LabeledField>}
-      <p className="text-xs text-slate-600">{mode === 'aes' ? 'Genera una clave secreta en Base64.' : 'Genera una clave pública SPKI y una clave privada PKCS#8 en PEM.'} Guarda la clave secreta o privada en un lugar seguro si necesitas usarla después.</p>
+      <CryptoHelp>{mode === 'aes' ? 'Genera una clave secreta en Base64.' : 'Genera una clave pública SPKI y una clave privada PKCS#8 en PEM.'} Guarda la clave secreta o privada en un lugar seguro si necesitas usarla después.</CryptoHelp>
       <TaskActions label={mode === 'aes' ? 'Generar clave AES' : 'Generar par RSA'} busy={operation.busy} error={operation.error}
         onRun={() => void operation.run(async () => mode === 'aes' ? { kind: 'aes', key: await generateAesKey(aesLength) } : { kind: 'rsa', ...await generateRsaKeys(rsaLength) })}
         onClear={operation.reset} />
@@ -325,21 +336,22 @@ function Base64Panel() {
     return output === 'text' ? { kind: 'text', value: decodeUtf8(bytes) } : { kind: 'binary', value: bytes }
   }
 
-  return <div className={pair} style={columns('24rem')}>
+  return <div className={pair}>
     <div className={panel}>
       <div className="grid gap-3" style={columns('10rem')}>
         <LabeledField label="Operación">
           <select value={mode} className={field} onChange={(event) => { operation.reset(); setMode(event.target.value as typeof mode) }}><option value="encode">Codificar</option><option value="decode">Decodificar</option></select>
         </LabeledField>
-        <LabeledField label="Formato">
+      </div>
+      <FormatOptions><LabeledField label="Formato">
           <select value={format} className={field} onChange={(event) => { operation.reset(); setFormat(event.target.value as Base64Format) }}><option value="base64">Base64</option><option value="base64url">Base64URL</option></select>
         </LabeledField>
         {mode === 'decode' && <LabeledField label="Salida">
           <select value={output} className={field} onChange={(event) => { operation.reset(); setOutput(event.target.value as typeof output) }}><option value="text">Texto UTF-8</option><option value="binary">Archivo binario</option></select>
         </LabeledField>}
-      </div>
+      </FormatOptions>
       <SourceField label={mode === 'encode' ? 'Texto (UTF-8)' : `Entrada en ${format === 'base64' ? 'Base64' : 'Base64URL'}`} value={source} onChange={(value) => changeBounded(value, MAX_CRYPTO_ENCODED_CHARS, setSource, operation)} />
-      <p className="text-xs text-slate-600">Límite de 1 MiB de texto o datos binarios.</p>
+      <CryptoHelp>Límite de 1 MiB de texto o datos binarios.</CryptoHelp>
       <TaskActions label={mode === 'encode' ? 'Codificar' : 'Decodificar'} busy={operation.busy} error={operation.error}
         onRun={() => void operation.run(convert)} onClear={() => { operation.reset(); setSource('') }} />
     </div>
@@ -361,6 +373,8 @@ const areas = [
 ] as const
 
 export default function CryptoUtility() {
+  const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null)
+  const [showHelp, setShowHelp] = useState(false)
   const [active, setActive] = useUtilityDocumentState<(typeof areas)[number]['id'] | 'vault'>('active', 'cipher')
   const [keyId, setKeyId] = useUtilityDocumentState<string>('key_id', '')
   const keyIdRef = useRef(keyId)
@@ -401,14 +415,21 @@ export default function CryptoUtility() {
     return () => { controller?.abort(); release() }
   }, [keyId])
 
-  return <section aria-label="Criptografía y codificación" className="space-y-3">
-    <div role="group" aria-label="Herramientas de criptografía" className="flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-3">
+  return <section aria-label="Criptografía y codificación" className="utility-density-scope flex min-h-0 w-full flex-1 flex-col gap-2">
+    <div className="utility-work-toolbar gap-1 border-b border-slate-200">
+    <select className={`${field} utility-crypto-select`} aria-label="Herramienta de criptografía" value={active} onChange={event => setActive(event.target.value as typeof active)}>{areas.map(area => <option key={area.id} value={area.id}>{area.label}</option>)}<option value="vault">Mis claves</option></select>
+    <div role="group" aria-label="Herramientas de criptografía" className="utility-crypto-tabs flex-1">
       {areas.map(({ id, label, icon: Icon }) => <button type="button" key={id} aria-pressed={active === id} className={active === id ? selectedControl : control} onClick={() => setActive(id)}><Icon className="h-4 w-4" aria-hidden />{label}</button>)}
       <button type="button" aria-pressed={active === 'vault'} className={active === 'vault' ? selectedControl : control} onClick={() => setActive('vault')}><KeyRound aria-hidden className="size-4" />Mis claves</button>
     </div>
+    <div ref={setActionsHost} className="flex shrink-0 items-center gap-1" data-crypto-primary-actions />
+    <button type="button" className={`${control} shrink-0`} aria-label="Información de criptografía" title="Información y límites" aria-expanded={showHelp} aria-controls="crypto-information" onClick={() => setShowHelp(value => !value)}><Info size={16} aria-hidden /></button>
+    </div>
     {keyNotice && <p role="status" className="text-sm text-slate-600">{keyNotice}</p>}
-    {areas.map(({ id, Component }) => visited.has(id) && <div key={id} hidden={active !== id}>{id === 'cipher' ? <CipherPanel savedKey={savedKey} onKeyUnavailable={forgetUnavailableKey} /> : <Component />}</div>)}
-    {active === 'vault' && <VaultPanel onDeleted={forgetUnavailableKey} onUse={item => { keyIdRef.current = item.id; setKeyNotice(''); setKeyId(item.id); setSavedKey(item); if (item.kind === 'rsa' || item.kind === 'aes') setActive('cipher') }} />}
-    <p className="text-xs leading-5 text-slate-500">Se guardan las preferencias y referencias de la hoja. Las contraseñas, entradas de texto criptográficas y resultados descifrados son temporales. Guarda las claves mediante Mis claves.</p>
+    <CryptoHelpContext.Provider value={showHelp}>
+    {areas.map(({ id, Component }) => visited.has(id) && <div key={id} hidden={active !== id} className={active === id ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}><CryptoToolbarContext.Provider value={active === id ? actionsHost : null}>{id === 'cipher' ? <CipherPanel savedKey={savedKey} onKeyUnavailable={forgetUnavailableKey} /> : <Component />}</CryptoToolbarContext.Provider></div>)}
+    {active === 'vault' && <CryptoToolbarContext.Provider value={actionsHost}><VaultPanel onDeleted={forgetUnavailableKey} onUse={item => { keyIdRef.current = item.id; setKeyNotice(''); setKeyId(item.id); setSavedKey(item); if (item.kind === 'rsa' || item.kind === 'aes') setActive('cipher') }} /></CryptoToolbarContext.Provider>}
+    </CryptoHelpContext.Provider>
+    {showHelp && <p id="crypto-information" className="text-xs leading-5 text-slate-500">Se guardan las preferencias y referencias de la hoja. Las contraseñas, entradas de texto criptográficas y resultados descifrados son temporales. Guarda las claves mediante Mis claves.</p>}
   </section>
 }

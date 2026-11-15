@@ -1,9 +1,9 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import {
   ArrowDownToLine, Braces, Brackets, Check, ChevronLeft, ChevronRight, Copy, Eraser, FileUp, GitCompare,
-  Loader2, PanelRightOpen, Quote, Redo2, Search, Settings2, Shrink, Sparkles, Undo2, WrapText, Wrench, X,
+  Loader2, MoreHorizontal, PanelRightOpen, Quote, Redo2, Search, Settings2, Shrink, Sparkles, Undo2, WrapText, Wrench, X, type LucideIcon,
 } from 'lucide-react'
 import { editor } from 'monaco-editor'
 import { DocumentCodeEditor, DocumentDiff, registerDocumentCompletions, type DiffDocument } from './JsonCodeEditor'
@@ -19,9 +19,13 @@ import { useDocumentSearch } from './useDocumentSearch'
 import type { DocumentMatch } from './documentSearch'
 import { useUtilityDocument, useUtilityDocumentState } from '../library/UtilityDocumentContext'
 import { editorViewsNeedCompaction, projectEditorViewState, safeJsonViews, validJsonPreference } from './editorPreferences'
+import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu'
+import { fineUtilityPointer, jsonToolbarLayout, type JsonToolbarAction } from './jsonToolbarLayout'
+import '../utility-density.css'
+import './jsonWorkspace.css'
 
-const button = 'inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--editor-ink)] outline-none hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-40 pointer-fine:min-h-8 pointer-fine:min-w-8'
-const select = 'min-h-11 rounded-md border border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-xs text-[var(--editor-ink)] pointer-fine:min-h-8'
+const button = 'utility-control inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--editor-ink)] outline-none hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-40'
+const select = 'utility-field rounded-md border border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-xs text-[var(--editor-ink)]'
 const menuClass = 'fixed inset-auto m-0 max-h-[calc(100dvh-1rem)] w-64 max-w-[calc(100vw-1rem)] overflow-auto rounded-lg border border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-[var(--editor-ink)] shadow-xl'
 const panels: Panel[] = ['a', 'b']
 
@@ -35,12 +39,12 @@ function Action({ label, title = label, children, ...props }: ComponentPropsWith
   return <button {...props} type="button" className={`${button} ${props.className ?? ''}`} aria-label={label} title={title}>{children}</button>
 }
 
-function positionMenu(event: MouseEvent<HTMLButtonElement>, menu: HTMLDivElement | null) {
+function positionMenu(anchor: HTMLElement, menu: HTMLDivElement | null) {
   if (!menu) return
   if (menu.matches(':popover-open')) {
     return
   }
-  const trigger = event.currentTarget.getBoundingClientRect()
+  const trigger = anchor.getBoundingClientRect()
   const viewport = window.visualViewport
   const left = viewport?.offsetLeft ?? 0
   const top = viewport?.offsetTop ?? 0
@@ -59,6 +63,8 @@ function positionMenu(event: MouseEvent<HTMLButtonElement>, menu: HTMLDivElement
 interface Notice { message: string; error?: boolean; warnings?: string[] }
 interface ProposedEdit extends DocumentSnapshot { before: string; after: string; revision: number }
 interface Work { panel: Panel; worker: Worker; timer: number }
+type EditorAction = JsonToolbarAction | 'repair' | 'escape' | 'unescape' | 'clear' | 'original' | 'preferences'
+interface EditorActionDefinition { label: string; icon: LucideIcon; title?: string; disabled?: boolean; pressed?: boolean; run: () => void }
 
 export default function JsonUtility() {
   const utility = useUtilityDocument()
@@ -67,6 +73,10 @@ export default function JsonUtility() {
   const librarySearch = useRef<{ request: number; attempted: Set<Panel>; located: boolean } | null>(null)
   const host = useRef<HTMLElement>(null)
   const preferences = useRef<HTMLDivElement>(null)
+  const moreButton = useRef<HTMLButtonElement>(null)
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
+  const menuId = `json-actions-${useId().replace(/:/g, '')}`
+  const [finePointer, setFinePointer] = useState(false)
   const compareButton = useRef<HTMLButtonElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const fileTarget = useRef<Panel>('a')
@@ -254,12 +264,19 @@ export default function JsonUtility() {
     let measuredWidth = element.clientWidth
     const closeMenu = () => {
       const menu = preferences.current
+      const restoreFocus = Boolean(menu?.contains(document.activeElement) || document.getElementById(menuId)?.contains(document.activeElement))
       if (menu?.matches(':popover-open')) menu.hidePopover()
+      setMenuAnchor(null)
+      if (restoreFocus) moreButton.current?.focus({ preventScroll: true })
     }
     const observer = new ResizeObserver(([entry]) => {
       if (Math.abs(measuredWidth - entry.contentRect.width) >= 1) closeMenu()
       measuredWidth = entry.contentRect.width
       setWidth(measuredWidth)
+      const focused = document.activeElement
+      requestAnimationFrame(() => {
+        if (focused instanceof HTMLElement && !focused.isConnected) moreButton.current?.focus({ preventScroll: true })
+      })
     })
     observer.observe(element)
     setWidth(measuredWidth)
@@ -273,6 +290,17 @@ export default function JsonUtility() {
       viewport?.removeEventListener('resize', closeMenu)
       viewport?.removeEventListener('scroll', closeMenu)
     }
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!window.matchMedia) return
+    const fine = window.matchMedia('(hover: hover) and (pointer: fine)')
+    const coarse = window.matchMedia('(any-pointer: coarse)')
+    const update = () => setFinePointer(fineUtilityPointer(fine.matches, coarse.matches))
+    update()
+    fine.addEventListener('change', update)
+    coarse.addEventListener('change', update)
+    return () => { fine.removeEventListener('change', update); coarse.removeEventListener('change', update) }
   }, [])
 
   useLayoutEffect(() => { editor.setTheme(dark ? 'vs-dark' : 'vs') }, [dark])
@@ -468,7 +496,7 @@ export default function JsonUtility() {
 
   function closeComparison() {
     setDiff(undefined)
-    requestAnimationFrame(() => compareButton.current?.focus())
+    requestAnimationFrame(() => (compareButton.current ?? moreButton.current)?.focus())
   }
 
   function reveal() {
@@ -542,58 +570,78 @@ export default function JsonUtility() {
     runtime?.view?.focus()
   }
 
+  const actions: Record<EditorAction, EditorActionDefinition> = {
+    undo: { label: 'Deshacer', icon: Undo2, disabled: !state.undo, run: () => history('undo') },
+    redo: { label: 'Rehacer', icon: Redo2, disabled: !state.redo, run: () => history('redo') },
+    open: { label: 'Abrir archivo', icon: FileUp, disabled: working, run: () => { fileTarget.current = active; fileInput.current?.click() } },
+    copy: { label: 'Copiar documento', icon: Copy, disabled: !state.length, run: () => { void copy() } },
+    download: { label: 'Descargar documento', icon: ArrowDownToLine, disabled: !state.length, run: () => download(documents.source(active), state.plainText ? 'txt' : format === 'strict' ? 'json' : format) },
+    smart: { label: 'Formato inteligente', title: 'Formato inteligente · Agrupa elementos cortos', icon: Sparkles, disabled: !canRun, run: () => run('smart') },
+    minify: { label: 'Compactar', icon: Shrink, disabled: !canTransform, run: () => run('minify') },
+    wrap: { label: 'Ajustar líneas', title: state.huge ? 'El ajuste de línea está activo en la vista por tramos' : 'Ajustar líneas (Word wrap · Alt+Z)', icon: WrapText, disabled: state.huge, pressed: state.huge || wrap[active], run: () => toggleWrap(active) },
+    panel: { label: split ? `Ocultar panel ${active.toUpperCase()}` : 'Mostrar segundo panel', icon: split ? X : PanelRightOpen, run: () => split ? hide(active) : reveal() },
+    compare: { label: 'Comparar diferencias', icon: GitCompare, disabled: working, run: startComparison },
+    repair: { label: 'Reparar', icon: Wrench, disabled: !canRun, run: () => run('repair') },
+    escape: { label: 'Escapar', icon: Quote, disabled: !canRun, run: () => run('escape') },
+    unescape: { label: 'Desescapar', icon: Brackets, disabled: !canRun, run: () => run('unescape') },
+    clear: { label: 'Limpiar documento', title: 'Limpiar documento · Se puede deshacer', icon: Eraser, disabled: !state.length, run: () => documents.replace(active, { source: '', metrics: measureDocument('') }) },
+    original: { label: 'Descargar archivo original', title: `Descargar original · ${originalNames[active] ?? ''}`, icon: ArrowDownToLine, run: () => { void downloadOriginal() } },
+    preferences: { label: 'Preferencias del editor', icon: Settings2, run: () => {
+      if (!moreButton.current || !preferences.current) return
+      positionMenu(moreButton.current, preferences.current)
+      preferences.current.showPopover?.()
+      requestAnimationFrame(() => preferences.current?.querySelector('select')?.focus({ preventScroll: true }))
+    } },
+  }
+  const toolbar = jsonToolbarLayout(width, finePointer, format, split)
+  const menuActions: EditorAction[] = diff ? ['preferences'] : [
+    ...toolbar.overflow,
+    ...(format === 'xml' ? [] : ['repair', 'escape', 'unescape'] as const),
+    ...(originalNames[active] ? ['original'] as const : []),
+    'clear', 'preferences',
+  ]
+  const toolbarAction = (id: JsonToolbarAction) => {
+    const action = actions[id]
+    return <Action key={id} ref={id === 'compare' ? compareButton : undefined} label={action.label} title={action.title} disabled={action.disabled}
+      aria-pressed={action.pressed} aria-keyshortcuts={id === 'wrap' ? 'Alt+Z' : undefined} onClick={action.run}
+      className="json-toolbar-icon aria-pressed:bg-[var(--editor-hover)]"><action.icon size={16} aria-hidden /></Action>
+  }
+
   return (
     <section ref={host} aria-label="Editor de documentos" data-editor-theme={dark ? 'dark' : 'light'}
       className="flex min-h-64 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--editor-canvas)] text-[var(--editor-ink)] [color-scheme:light] [--editor-bar:#f8fafc] [--editor-border:#cbd5e1] [--editor-canvas:#fff] [--editor-hover:#e2e8f0] [--editor-ink:#1e293b] [--editor-muted:#475569] data-[editor-theme=dark]:[color-scheme:dark] data-[editor-theme=dark]:[--editor-bar:#252526] data-[editor-theme=dark]:[--editor-border:#424248] data-[editor-theme=dark]:[--editor-canvas:#1e1e1e] data-[editor-theme=dark]:[--editor-hover:#3a3d41] data-[editor-theme=dark]:[--editor-ink:#e2e8f0] data-[editor-theme=dark]:[--editor-muted:#a9b4c3]">
-      <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-x-1 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] px-1 py-0.5">
+      <div className="utility-work-toolbar border-b border-[var(--editor-border)] bg-[var(--editor-bar)]" role="toolbar" aria-label="Herramientas del documento activo" data-json-toolbar>
         {diff ? (
           <Action label="Volver a editar" onClick={closeComparison}><ChevronLeft size={15} aria-hidden /> Volver a editar</Action>
         ) : <>
-          <div className="flex items-center gap-0.5" role="group" aria-label="Operaciones del panel activo">
-            <select aria-label="Formato del documento" className={selectClass} value={format} disabled={working} onChange={event => selectFormat(event.target.value as DocumentFormat)}>
+          <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Operaciones del panel activo">
+            <select aria-label="Formato del documento" className={`${selectClass} shrink-0`} style={{ width: toolbar.syntaxWidth }} value={format} disabled={working} onChange={event => selectFormat(event.target.value as DocumentFormat)}>
               <option value="strict">JSON</option>
               <option value="jsonc">JSONC</option>
               <option value="xml">XML</option>
             </select>
-            <Action label="Formatear" title={format === 'xml' ? 'Formatear XML' : 'Formatear · Un elemento por línea'} disabled={!canTransform} onClick={() => run('format')} className="text-emerald-700 data-[theme=dark]:text-emerald-300" data-theme={dark ? 'dark' : 'light'}><Braces size={15} aria-hidden /><span className="hidden sm:inline">Formatear</span></Action>
-            {format !== 'xml' && <Action label="Formato inteligente" title="Formato inteligente · Agrupa elementos cortos" disabled={!canRun} onClick={() => run('smart')}><Sparkles size={15} aria-hidden /></Action>}
-            <Action label="Compactar" disabled={!canTransform} onClick={() => run('minify')}><Shrink size={15} aria-hidden /></Action>
-            <Action label="Validar" disabled={!canRun} onClick={() => run('validate')}><Check size={15} aria-hidden /></Action>
-            <Action label="Ajustar líneas" title={state.huge ? 'El ajuste de línea está activo en la vista por tramos' : 'Ajustar líneas (Word wrap · Alt+Z)'}
-              aria-pressed={state.huge || wrap[active]} aria-keyshortcuts="Alt+Z" disabled={state.huge} onClick={() => toggleWrap(active)}
-              className="aria-pressed:bg-[var(--editor-hover)]"><WrapText size={15} aria-hidden /></Action>
+            <Action label="Formatear" title={format === 'xml' ? 'Formatear XML' : 'Formatear · Un elemento por línea'} disabled={!canTransform} onClick={() => run('format')} className="json-toolbar-icon text-emerald-700 data-[theme=dark]:text-emerald-300" data-theme={dark ? 'dark' : 'light'}><Braces size={16} aria-hidden /></Action>
+            <Action label="Validar" disabled={!canRun} onClick={() => run('validate')} className="json-toolbar-icon"><Check size={16} aria-hidden /></Action>
+            <Action label="Buscar en todo el documento" disabled={!state.length} onClick={find} className="json-toolbar-icon"><Search size={16} aria-hidden /></Action>
           </div>
-          <div className="flex items-center gap-0.5 border-l border-[var(--editor-border)] pl-1" role="group" aria-label="Acciones del documento activo">
-            {format !== 'xml' && <>
-              <Action label="Reparar" disabled={!canRun} onClick={() => run('repair')}><Wrench size={15} aria-hidden /></Action>
-              <Action label="Escapar" disabled={!canRun} onClick={() => run('escape')}><Quote size={15} aria-hidden /></Action>
-              <Action label="Desescapar" disabled={!canRun} onClick={() => run('unescape')}><Brackets size={15} aria-hidden /></Action>
-            </>}
-            <Action label="Copiar documento" disabled={!state.length} onClick={() => void copy()}><Copy size={15} aria-hidden /></Action>
-            <Action label="Buscar en todo el documento" disabled={!state.length} onClick={find}><Search size={15} aria-hidden /></Action>
-            <Action label="Descargar documento" disabled={!state.length} onClick={() => download(documents.source(active), state.plainText ? 'txt' : format === 'strict' ? 'json' : format)}><ArrowDownToLine size={15} aria-hidden /></Action>
-            <Action label="Limpiar documento" title="Limpiar documento · Se puede deshacer" disabled={!state.length} onClick={() => documents.replace(active, { source: '', metrics: measureDocument('') })}><Eraser size={15} aria-hidden /></Action>
-          </div>
-          <div className="flex items-center gap-0.5 border-l border-[var(--editor-border)] pl-1">
-            <Action label="Deshacer" disabled={!state.undo} onClick={() => history('undo')}><Undo2 size={15} aria-hidden /></Action>
-            <Action label="Rehacer" disabled={!state.redo} onClick={() => history('redo')}><Redo2 size={15} aria-hidden /></Action>
-            <Action label="Abrir archivo" disabled={working} onClick={() => { fileTarget.current = active; fileInput.current?.click() }}><FileUp size={15} aria-hidden /></Action>
-            {originalNames[active] && <Action label="Descargar archivo original" title={`Descargar original · ${originalNames[active]}`} onClick={() => void downloadOriginal()}><ArrowDownToLine size={15} aria-hidden /><span className="hidden xl:inline">Original</span></Action>}
-            <input ref={fileInput} aria-label="Abrir archivo local" type="file" accept=".json,.jsonc,.xml,.txt,application/json,application/xml,text/xml,text/plain" hidden
-              onChange={event => { openFile(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
-          </div>
-          <div className="flex items-center gap-0.5 border-l border-[var(--editor-border)] pl-1">
-            {split ? <>
-              <Action ref={compareButton} label="Comparar diferencias" disabled={working} onClick={startComparison}><GitCompare size={15} aria-hidden /><span className="hidden lg:inline">Comparar</span></Action>
-              {!wide && <Action label={`Ocultar panel ${active.toUpperCase()}`} onClick={() => hide(active)}><X size={15} aria-hidden /></Action>}
-            </> : <Action label="Mostrar segundo panel" onClick={reveal}><PanelRightOpen size={15} aria-hidden /><span className="hidden lg:inline">Dos paneles</span></Action>}
-          </div>
+          {toolbar.visible.map(group => <div key={group[0]} className="json-toolbar-group" data-json-promoted role="group" aria-label="Acciones del documento activo">{group.map(toolbarAction)}</div>)}
         </>}
-        <div className="ml-auto flex items-center">
-          <Action label="Restablecer zoom del editor" title={`Zoom del editor ${zoomPercent}% · Restablecer a 100%`}
-            aria-description={`Zoom actual ${zoomPercent}%`} className="min-w-[3.25rem] tabular-nums" onClick={() => setFont(DEFAULT_FONT)}>{zoomPercent}%</Action>
-          <Action label="Preferencias del editor" popoverTarget="document-preferences" onClick={event => positionMenu(event, preferences.current)}><Settings2 size={16} aria-hidden /></Action>
-          <div id="document-preferences" ref={preferences} popover="auto" className={menuClass}>
+        <Action ref={moreButton} label="Más acciones del editor" className="json-toolbar-icon ml-auto" aria-haspopup="menu" aria-expanded={Boolean(menuAnchor)} aria-controls={menuAnchor ? menuId : undefined}
+          onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setMenuAnchor(event.currentTarget) } }}
+          onClick={event => { const anchor = event.currentTarget; setMenuAnchor(current => current ? null : anchor) }}><MoreHorizontal size={16} aria-hidden /></Action>
+      </div>
+      {menuAnchor && <WorkspaceActionsMenu anchor={menuAnchor} id={menuId} label="Más acciones del editor" onClose={() => setMenuAnchor(null)}>
+        {menuActions.map(id => {
+          const action = actions[id]
+          return <button key={id} type="button" role="menuitem" aria-label={action.label} title={action.title} disabled={action.disabled}
+            aria-description={action.pressed === undefined ? undefined : action.pressed ? 'Activado' : 'Desactivado'} aria-keyshortcuts={id === 'wrap' ? 'Alt+Z' : undefined}
+            className="utility-control flex w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-medium text-slate-700 outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-emerald-600 disabled:opacity-40"
+            onClick={() => { setMenuAnchor(null); moreButton.current?.focus({ preventScroll: true }); action.run() }}><action.icon size={16} aria-hidden /><span>{action.label}</span>{action.pressed && <Check size={14} aria-label="Activado" className="ml-auto" />}</button>
+        })}
+      </WorkspaceActionsMenu>}
+      <input ref={fileInput} aria-label="Abrir archivo local" type="file" accept=".json,.jsonc,.xml,.txt,application/json,application/xml,text/xml,text/plain" hidden
+        onChange={event => { openFile(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
+          <div id="document-preferences" ref={preferences} popover="auto" className={menuClass} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); preferences.current?.hidePopover(); moreButton.current?.focus({ preventScroll: true }) } }}>
             <div className="grid gap-2 p-1">
               <label className="grid gap-1 text-xs">Tema<select aria-label="Tema" className={selectClass} value={dark ? 'dark' : 'light'} onChange={event => setDark(event.target.value === 'dark')}><option value="dark">Oscuro</option><option value="light">Claro</option></select></label>
               <label className="grid gap-1 text-xs">Sangría<select aria-label="Sangría" className={selectClass} value={indent} disabled={working} onChange={event => setIndent(event.target.value as JsonRequest['indent'])}><option value="2">2 espacios</option><option value="4">4 espacios</option><option value="tab">Tabulador</option></select></label>
@@ -606,10 +654,8 @@ export default function JsonUtility() {
               </div>
             </div>
           </div>
-        </div>
-      </div>
       {pendingEncoding && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-2 text-xs" role="group" aria-label="Elegir codificación del archivo">
-        <span>Se conservó el documento. Abrir {pendingEncoding.file.name} como:</span>
+        <span className="min-w-0 break-all">Se conservó el documento. Abrir {pendingEncoding.file.name} como:</span>
         <select aria-label="Codificación del archivo" className={selectClass} value={encodingChoice} onChange={event => setEncodingChoice(event.target.value)}>{DOCUMENT_ENCODINGS.map(encoding => <option key={encoding} value={encoding}>{encoding.toUpperCase()}</option>)}</select>
         <Action label="Abrir con esta codificación" disabled={working} onClick={() => openFile(pendingEncoding.file, encodingChoice, pendingEncoding.panel)}>Abrir</Action>
         <Action label="Cancelar apertura" onClick={() => setPendingEncoding(undefined)}><X size={15} aria-hidden /></Action>
@@ -617,7 +663,7 @@ export default function JsonUtility() {
       {searchOpen && !diff && <div className="shrink-0 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] p-1 text-xs">
         <div className="flex min-w-0 flex-wrap items-center gap-1" role="search" aria-label="Buscar en todo el documento">
           <Search size={15} aria-hidden />
-          <input ref={searchInput} aria-label="Texto para buscar en todo el documento" maxLength={1024} value={search.query} onChange={event => search.setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false); if (event.key === 'Enter' && search.matches[0]) showMatch(search.matches[0]) }} className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--editor-border)] bg-[var(--editor-canvas)] px-2 text-[var(--editor-ink)] outline-none focus:ring-2 focus:ring-emerald-500 pointer-fine:min-h-8" placeholder="Busca en el documento completo…" />
+          <input ref={searchInput} aria-label="Texto para buscar en todo el documento" maxLength={1024} value={search.query} onChange={event => search.setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setSearchOpen(false); if (event.key === 'Enter' && search.matches[0]) showMatch(search.matches[0]) }} className="utility-field min-w-0 flex-1 rounded-md border border-[var(--editor-border)] bg-[var(--editor-canvas)] px-2 text-[var(--editor-ink)] outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Busca en el documento completo…" />
           <Action label="Distinguir mayúsculas" aria-pressed={search.caseSensitive} onClick={() => search.setCaseSensitive(value => !value)}>Aa</Action>
           <span role="status">{search.working || search.pending ? 'Buscando…' : search.error || (search.query ? `${search.matches.length}${search.nextOffset !== null ? '+' : ''} coincidencias` : 'Texto literal · Todo el documento')}</span>
           <Action label="Cerrar búsqueda" onClick={() => { setSearchOpen(false); runtimes.current[active]?.view?.focus() }}><X size={15} aria-hidden /></Action>
@@ -626,9 +672,6 @@ export default function JsonUtility() {
           {search.matches.map(match => <button type="button" key={match.offset} disabled={search.pending || search.working} onClick={() => showMatch(match)} className="block min-h-8 w-full truncate rounded px-2 text-left font-mono hover:bg-[var(--editor-hover)] focus-visible:ring-2 focus-visible:ring-emerald-500">{match.preview}</button>)}
           {search.nextOffset !== null && <Action label="Más coincidencias" disabled={search.working || search.pending} onClick={search.more}>Más coincidencias</Action>}
         </div>}
-      </div>}
-      {split && !wide && !diff && <div className="flex shrink-0 gap-1 border-b border-[var(--editor-border)] bg-[var(--editor-bar)] px-1" role="group" aria-label="Documento visible">
-        {panels.map(panel => <Action key={panel} label={`Ver documento ${panel.toUpperCase()}`} aria-pressed={active === panel} onClick={() => setActive(panel)} className="aria-pressed:bg-[var(--editor-hover)]">{`Documento ${panel.toUpperCase()}`}</Action>)}
       </div>}
       <div className={`${diff ? 'hidden' : 'flex'} min-h-0 min-w-0 flex-1 gap-px bg-[var(--editor-border)]`}>
         {panels.map(panel => {
@@ -663,7 +706,7 @@ export default function JsonUtility() {
       {diff && <DocumentDiff documents={diff} wide={wide} font={font} onZoom={zoom} onStatus={setDiffStatus} />}
       {pendingRepair && !diff && <div className="shrink-0 border-t border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 py-1">
         <p className="text-xs font-medium">Propuesta de reparación · Documento {active.toUpperCase()}</p>
-        <div className="grid max-h-24 gap-2 overflow-auto py-1 text-xs sm:grid-cols-2">
+        <div className="grid max-h-24 gap-2 overflow-auto py-1 text-xs" style={{ gridTemplateColumns: width >= 640 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)' }}>
           <div><span>Original</span><pre className="whitespace-pre-wrap break-all">{pendingRepair.before || '(vacío)'}</pre></div>
           <div><span>Propuesta</span><pre className="whitespace-pre-wrap break-all">{pendingRepair.after || '(vacío)'}</pre></div>
         </div>
@@ -681,15 +724,22 @@ export default function JsonUtility() {
           }}>Descartar</Action>
         </div>
       </div>}
-      <footer className="flex min-h-6 shrink-0 flex-wrap items-center gap-x-2 border-t border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 text-[11px] leading-5 text-[var(--editor-muted)]">
-        <span role="status" aria-live="polite" className={activeNotice?.error && !diff ? 'text-rose-700 data-[theme=dark]:text-rose-300' : ''} data-theme={dark ? 'dark' : 'light'}>
-          {diff ? diffStatus : busy ? <span className="inline-flex items-center gap-1"><Loader2 size={12} className="motion-safe:animate-spin" aria-hidden /> Procesando documento {busy.toUpperCase()}…</span>
-            : activeNotice?.message || (state.huge ? 'Línea extensa · Tramos editables. Buscar y formatear recorren el documento completo.' : state.reduced ? 'Documento grande · Resaltado simplificado. Recomendado hasta 30 MiB; máximo 60 MiB.' : 'Procesamiento local · Recomendado hasta 30 MiB; máximo 60 MiB por documento.')}
+      {!diff && (activeNotice?.error || activeNotice?.warnings?.length) ? <div role={activeNotice.error ? 'alert' : 'status'} className="max-h-24 shrink-0 overflow-auto border-t border-[var(--editor-border)] bg-[var(--editor-bar)] px-2 py-1 text-xs text-[var(--editor-ink)]">
+        {activeNotice.error && <p>{activeNotice.message}</p>}{activeNotice.warnings?.map(warning => <p key={warning}>{warning}</p>)}
+      </div> : null}
+      <footer className="json-editor-footer border-t border-[var(--editor-border)] bg-[var(--editor-bar)] text-[11px] leading-5 text-[var(--editor-muted)]">
+        {split && !wide && !diff ? <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Documento visible">
+          {panels.map(panel => <Action key={panel} label={`Ver documento ${panel.toUpperCase()}`} aria-pressed={active === panel} onClick={() => setActive(panel)} className="px-0 aria-pressed:bg-[var(--editor-hover)]">{panel.toUpperCase()}</Action>)}
+          <Action label={`Ocultar panel ${active.toUpperCase()}`} onClick={() => hide(active)} className="px-0"><X size={14} aria-hidden /></Action>
+        </div> : !diff && <span className="shrink-0 px-1" title={`Panel ${active.toUpperCase()}`}>{active.toUpperCase()}</span>}
+        <span role="status" aria-live="polite" className="min-w-0 flex-1 truncate px-1" title={activeNotice?.message || 'Procesamiento local · Recomendado hasta 30 MiB; máximo 60 MiB por documento.'}>
+          {diff ? diffStatus : busy ? <span className="inline-flex items-center gap-1"><Loader2 size={12} className="motion-safe:animate-spin" aria-hidden /> Procesando {busy.toUpperCase()}…</span>
+            : activeNotice?.error ? 'Revisa el aviso' : activeNotice?.message || (state.huge ? 'Tramos editables · Buscar recorre todo el documento' : state.reduced ? 'Documento grande · 60 MiB máx.' : 'Local · 30 MiB recomendado · 60 MiB máx.')}
         </span>
-        {!diff && !busy && activeNotice?.warnings?.map(warning => <span key={warning}>{warning}</span>)}
-        {busy && <Action label="Cancelar operación" onClick={() => { const panel = busy; stop(); setBusy(null); announce(panel, 'Operación cancelada.') }}>Cancelar</Action>}
-        {pendingDownload && !diff && <Action label="Descargar resultado" onClick={() => download(pendingDownload.source, pendingDownload.extension)}>Descargar resultado</Action>}
-        {!diff && <span className="ml-auto shrink-0">Panel {active.toUpperCase()}</span>}
+        {busy && <Action label="Cancelar operación" className="px-0" onClick={() => { const panel = busy; stop(); setBusy(null); announce(panel, 'Operación cancelada.') }}><X size={14} aria-hidden /></Action>}
+        {pendingDownload && !diff && <Action label="Descargar resultado" className="px-0" onClick={() => download(pendingDownload.source, pendingDownload.extension)}><ArrowDownToLine size={14} aria-hidden /></Action>}
+        <Action label="Restablecer zoom del editor" title={`Zoom del editor ${zoomPercent}% · Restablecer a 100%`}
+          aria-description={`Zoom actual ${zoomPercent}%`} className="w-[3.25rem] px-0 tabular-nums" onClick={() => setFont(DEFAULT_FONT)}>{zoomPercent}%</Action>
       </footer>
     </section>
   )

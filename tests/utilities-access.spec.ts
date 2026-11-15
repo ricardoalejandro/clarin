@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, truncate, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { expect, test, type FileChooser, type Locator, type Page } from '@playwright/test'
 import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
+import { clickEditorAction, editorAction } from './helpers/jsonToolbar'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
 test.use({ channel: process.env.PLAYWRIGHT_CHANNEL })
@@ -48,18 +49,42 @@ async function expectNoHorizontalOverflow(page: Page) {
   await expect.poll(() => page.locator('main').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
 }
 
+async function expectSingleEditorToolbar(page: Page) {
+  const toolbar = page.getByRole('toolbar', { name: 'Herramientas del documento activo' })
+  const geometry = await toolbar.evaluate(element => {
+    const bounds = element.getBoundingClientRect()
+    const fine = matchMedia('(hover: hover) and (pointer: fine)').matches && !matchMedia('(any-pointer: coarse)').matches
+    return {
+      height: bounds.height,
+      expectedHeight: fine ? 36 : 48,
+      expectedControl: fine ? 32 : 44,
+      wrap: getComputedStyle(element).flexWrap,
+      controls: Array.from(element.querySelectorAll('button,select')).map(control => {
+        const box = control.getBoundingClientRect()
+        return { height: box.height, inside: box.left >= bounds.left - 1 && box.right <= bounds.right + 1, center: box.top + box.height / 2 }
+      }),
+    }
+  })
+  expect(geometry.height).toBe(geometry.expectedHeight)
+  expect(geometry.wrap).toBe('nowrap')
+  expect(geometry.controls.every(control => control.inside && control.height >= geometry.expectedControl)).toBe(true)
+  expect(Math.max(...geometry.controls.map(control => control.center)) - Math.min(...geometry.controls.map(control => control.center))).toBeLessThanOrEqual(1)
+}
+
 async function openDocument(page: Page, file: Parameters<FileChooser['setFiles']>[0]) {
+  const open = await editorAction(page, 'Abrir archivo')
   const [chooser] = await Promise.all([
     page.waitForEvent('filechooser'),
-    page.getByRole('button', { name: 'Abrir archivo', exact: true }).click(),
+    open.click(),
   ])
   await chooser.setFiles(file)
 }
 
 async function downloadDocument(page: Page) {
+  const button = await editorAction(page, 'Descargar documento')
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: 'Descargar documento' }).click(),
+    button.click(),
   ])
   const path = await download.path()
   if (!path) throw new Error('The editor did not download a local file')
@@ -106,6 +131,7 @@ test('library and document workspace adapt to measured width and preserve saved 
     await page.setViewportSize({ width, height: 900 })
     await expect(linesA).toContainText(marker)
     await expectNoHorizontalOverflow(page)
+    await expectSingleEditorToolbar(page)
   }
   expect((await editorA.boundingBox())!.height).toBeGreaterThan(540)
   await page.getByRole('button', { name: 'Mostrar segundo panel' }).click()
@@ -188,8 +214,7 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   await expect(editor.locator('.monaco-editor.vs-dark')).toBeVisible({ timeout: 20_000 })
   await expect(zoom).toHaveText('100%')
   await expect.poll(formatContrast).toBeGreaterThanOrEqual(4.5)
-  const preferences = page.getByRole('button', { name: 'Preferencias del editor' })
-  await preferences.click()
+  await clickEditorAction(page, 'Preferencias del editor')
   const theme = page.getByRole('combobox', { name: 'Tema' })
   await theme.selectOption('light')
   await expect(editor.locator('.monaco-editor.vs')).toBeVisible()
@@ -209,7 +234,7 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   const initialFont = await fontSize()
   const initialViewport = await viewport()
 
-  const back = page.getByRole('button', { name: 'JSON/XML', exact: true })
+  const back = page.getByRole('button', { name: 'Más acciones del editor', exact: true })
   await back.focus()
   expect(await wheel(lines, true)).toBe(false)
   expect(await fontSize()).toBe(initialFont)
@@ -224,7 +249,7 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   await expect(zoom).toHaveText('107%')
   expect(await viewport()).toEqual(initialViewport)
 
-  await preferences.click()
+  await clickEditorAction(page, 'Preferencias del editor')
   const increase = page.getByRole('button', { name: 'Aumentar letra' })
   for (let size = 15; size < 70; size++) await increase.press('Enter')
   await expect(zoom).toHaveText('500%')
@@ -267,52 +292,85 @@ test('smart formatting groups short properties without flattening the JSON docum
   expect((await downloadDocument(page)).source).toBe(source)
 })
 
-test('document actions stay directly usable in the compact toolbar', async ({ page, browserName }) => {
+test('document actions remain usable through the compact toolbar and More', async ({ page, browserName }, testInfo) => {
   await mockAccount(page, { permission: true })
   if (browserName === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.setViewportSize({ width: 320, height: 740 })
   await page.goto(`${baseURL}/dashboard/utilities/json`)
   const editor = page.getByTestId('document-editor-a')
-  const action = (name: string) => page.getByRole('button', { name, exact: true })
   await expect(editor).toBeVisible({ timeout: 20_000 })
+  await expectSingleEditorToolbar(page)
   for (const name of ['Copiar documento', 'Descargar documento', 'Reparar', 'Escapar', 'Desescapar', 'Limpiar documento']) {
-    const button = action(name)
+    const button = await editorAction(page, name)
     await expect(button).toBeVisible()
     await expect(button.locator('svg')).toBeVisible()
     await expect(button).toBeDisabled()
   }
+  await page.keyboard.press('Escape')
   await expectNoHorizontalOverflow(page)
   const source = '{"texto":"Ñ"}'
   await typeDocument(page, editor, source)
   expect(await downloadDocument(page)).toEqual({ filename: 'documento-a.json', source })
   if (browserName === 'chromium') {
-    await action('Copiar documento').click()
+    await clickEditorAction(page, 'Copiar documento')
     await expect(page.getByRole('status').filter({ hasText: 'Documento copiado.' })).toBeVisible()
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source)
   }
-  await action('Escapar').click()
-  await expect(action('Desescapar')).toBeEnabled()
+  await clickEditorAction(page, 'Escapar')
+  await expect(await editorAction(page, 'Desescapar')).toBeEnabled()
+  await page.keyboard.press('Escape')
   await expect(editor.locator('.view-lines')).toContainText('\\"texto\\"')
   expect((await downloadDocument(page)).source).toBe(JSON.stringify(source))
-  await action('Desescapar').click()
+  await clickEditorAction(page, 'Desescapar')
   await expect(editor.locator('.view-lines')).toContainText(source)
   expect(await downloadDocument(page)).toEqual({ filename: 'documento-a.txt', source })
 
   const invalid = '{foo: 42}'
   await openDocument(page, { name: 'invalido.json', mimeType: 'application/json', buffer: Buffer.from(invalid) })
   await expect(editor.locator('.view-lines')).toContainText(invalid)
-  await action('Reparar').click()
+  await clickEditorAction(page, 'Reparar')
   await expect(page.getByText('Propuesta de reparación · Documento A')).toBeVisible()
   expect((await downloadDocument(page)).source).toBe(invalid)
-  await action('Aplicar reparación').click()
+  const proposalScreenshot = testInfo.outputPath('json-repair-proposal.png')
+  await page.screenshot({ path: proposalScreenshot })
+  await testInfo.attach('json-repair-proposal.png', { path: proposalScreenshot, contentType: 'image/png' })
+  await page.getByRole('button', { name: 'Aplicar reparación', exact: true }).click()
   await expect(editor.locator('.view-lines')).toContainText('"foo"')
   expect(JSON.parse((await downloadDocument(page)).source)).toEqual({ foo: 42 })
 
-  await action('Limpiar documento').click()
+  await clickEditorAction(page, 'Limpiar documento')
   await expect(editor.locator('.view-lines')).not.toContainText('foo')
-  await expect(action('Descargar documento')).toBeDisabled()
-  await action('Deshacer').click()
+  await expect(await editorAction(page, 'Descargar documento')).toBeDisabled()
+  await clickEditorAction(page, 'Deshacer')
   await expect(editor.locator('.view-lines')).toContainText('"foo"')
+})
+
+test.describe('touch document controls', () => {
+  test.use({ hasTouch: true })
+  test('keeps one toolbar row and 44-pixel targets with a keyboard accessible overflow menu', async ({ page }, testInfo) => {
+    await mockAccount(page, { permission: true })
+    await page.setViewportSize({ width: 320, height: 740 })
+    await page.goto(`${baseURL}/dashboard/utilities/json`)
+    await expect(page.getByTestId('document-editor-a')).toBeVisible({ timeout: 20_000 })
+    await expectSingleEditorToolbar(page)
+    const more = page.getByRole('button', { name: 'Más acciones del editor', exact: true })
+    await more.focus()
+    await page.keyboard.press('ArrowDown')
+    const menu = page.getByRole('menu', { name: 'Más acciones del editor', exact: true })
+    await expect(menu).toBeVisible()
+    const bounds = (await menu.boundingBox())!
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(320)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(740)
+    await expect(page.getByRole('menuitem', { name: 'Abrir archivo', exact: true })).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(menu).toBeHidden()
+    await expect(more).toBeFocused()
+    await expectNoHorizontalOverflow(page)
+    const screenshot = testInfo.outputPath('json-toolbar-touch.png')
+    await page.screenshot({ path: screenshot })
+    await testInfo.attach('json-toolbar-touch.png', { path: screenshot, contentType: 'image/png' })
+  })
 })
 
 test('word wrap changes only visual lines and is independent for each document', async ({ page }) => {
@@ -421,7 +479,7 @@ test('Monaco compares JSON and XML without overwriting either document', async (
   await openDocument(page, { name: 'modificado.xml', mimeType: 'application/xml', buffer: Buffer.from('<raiz><estado>modificado-xml</estado></raiz>') })
   await expect(editorB.locator('.view-lines')).toContainText('modificado-xml')
   await expect(page.getByRole('combobox', { name: 'Formato del documento' })).toHaveValue('xml')
-  await page.getByRole('button', { name: 'Preferencias del editor' }).click()
+  await clickEditorAction(page, 'Preferencias del editor')
   await page.getByRole('checkbox', { name: 'Ajustar espacios entre etiquetas' }).check()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Formatear', exact: true }).click()
@@ -469,13 +527,12 @@ test('a 30 MiB document with a long line remains navigable in bounded editable c
     const validateStarted = performance.now()
     await page.getByRole('button', { name: 'Validar', exact: true }).click()
     await expect(page.getByRole('status').filter({ hasText: 'JSON válido.' })).toBeVisible({ timeout: 30_000 })
-    await testInfo.attach('large-document-timing.json', {
-      contentType: 'application/json',
-      body: Buffer.from(JSON.stringify({ bytes: size, openMs, validateMs: Math.round(performance.now() - validateStarted) })),
-    })
+    const timingPath = testInfo.outputPath('large-document-timing.json')
+    await writeFile(timingPath, JSON.stringify({ bytes: size, openMs, validateMs: Math.round(performance.now() - validateStarted) }))
+    await testInfo.attach('large-document-timing.json', { contentType: 'application/json', path: timingPath })
     await truncate(file, 60 * 1024 * 1024 + 1)
     await openDocument(page, file)
-    await expect(page.getByRole('status').filter({ hasText: 'El archivo supera 60 MiB.' })).toBeVisible()
+    await expect(page.getByRole('alert').filter({ hasText: 'El archivo supera 60 MiB.' })).toBeVisible()
     await expect(page.getByText(firstMarker, { exact: false })).toBeVisible()
     await expectNoHorizontalOverflow(page)
     expect(outgoing.filter(value => !value.includes('/api/utilities/')).join('\n')).not.toContain(firstMarker)

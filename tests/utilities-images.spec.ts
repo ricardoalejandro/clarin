@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
@@ -54,9 +55,23 @@ test.describe('Utilitarios de imagen', () => {
     await expect(preview).toBeVisible()
     const dataUrl = await preview.getAttribute('src')
     expect(dataUrl).toMatch(/^data:image\/png;base64,/)
-    await expect(page.getByRole('button', { name: 'Descargar SVG' })).toBeEnabled()
+    const qrDownloads = page.getByRole('button', { name: 'Descargar QR' })
+    await qrDownloads.click()
+    await expect(page.getByRole('menuitem', { name: 'Descargar SVG' })).toBeEnabled()
+    const pngDownload = page.waitForEvent('download')
+    await page.getByRole('menuitem', { name: 'Descargar PNG' }).click()
+    const png = await pngDownload
+    expect(png.suggestedFilename()).toBe('codigo-qr.png')
+    expect(await readFile((await png.path())!)).toEqual(Buffer.from(dataUrl!.split(',')[1], 'base64'))
+    await qrDownloads.click()
+    const svgDownload = page.waitForEvent('download')
+    await page.getByRole('menuitem', { name: 'Descargar SVG' }).click()
+    const svg = await svgDownload
+    expect(svg.suggestedFilename()).toBe('codigo-qr.svg')
+    expect(await readFile((await svg.path())!, 'utf8')).toContain('<svg')
+    await expect(qrDownloads).toBeFocused()
 
-    await page.getByRole('radio', { name: 'Leer QR' }).press('Space')
+    await page.getByRole('combobox', { name: 'Operación de QR' }).selectOption('read')
     await pasteImage(page.getByRole('group', { name: 'Área para pegar o soltar una imagen' }), Buffer.from(dataUrl!.split(',')[1], 'base64'))
     await page.getByRole('button', { name: 'Leer QR' }).click()
     await expect(page.getByRole('textbox', { name: 'Contenido del QR' })).toHaveValue(privateContent)
@@ -74,20 +89,47 @@ test.describe('Utilitarios de imagen', () => {
     await page.locator('input[type="file"]').setInputFiles({ name: 'original.png', mimeType: 'image/png', buffer: Buffer.from(samplePng, 'base64') })
     await page.getByRole('button', { name: 'Convertir a Base64' }).click()
     await expect(page.getByRole('textbox', { name: 'Texto Base64 resultante' })).toHaveValue(samplePng)
-    await page.getByRole('radio', { name: 'Data URL' }).press('Space')
+    await page.getByRole('combobox', { name: 'Formato de salida' }).selectOption('url')
     const dataUrl = `data:image/png;base64,${samplePng}`
     await expect(page.getByRole('textbox', { name: 'Texto Base64 resultante' })).toHaveValue(dataUrl)
 
-    await page.getByRole('radio', { name: 'Base64 a imagen' }).press('Space')
+    await page.getByRole('combobox', { name: 'Conversión de imagen' }).selectOption('decode')
     const input = page.getByRole('textbox', { name: 'Texto Base64 o Data URL' })
     await input.fill(dataUrl)
     await page.getByRole('button', { name: 'Convertir a imagen' }).click()
     await expect(page.getByRole('img', { name: 'Vista previa de la imagen' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Descargar imagen' })).toBeEnabled()
+    const imageDownload = page.waitForEvent('download')
+    await page.getByRole('button', { name: 'Descargar imagen' }).click()
+    expect(await readFile((await (await imageDownload).path())!)).toEqual(Buffer.from(samplePng, 'base64'))
 
     await input.fill('data:image/svg+xml;base64,PHN2Zz4=')
     await page.getByRole('button', { name: 'Convertir a imagen' }).click()
     await expect(page.getByRole('alert').filter({ hasText: 'Data URL Base64' })).toBeVisible()
     await expect(page.getByRole('img', { name: 'Vista previa de la imagen' })).toHaveCount(0)
+  })
+
+  test('adapta ambos paneles al espacio medido sin desbordar las acciones', async ({ page }, testInfo) => {
+    await mockDashboard(page)
+    for (const tool of ['qr', 'imagen-base64']) {
+      await page.goto(`${baseURL}/dashboard/utilities/${tool}`)
+      const toolbar = page.getByRole('group', { name: tool === 'qr' ? 'Acciones de QR' : 'Acciones de imagen' })
+      await expect(toolbar).toBeVisible()
+      for (const width of [1280, 1024, 375, 320]) {
+        await page.setViewportSize({ width, height: 800 })
+        await expect.poll(async () => toolbar.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+        const pair = page.locator('.utility-pair').filter({ has: tool === 'qr' ? page.getByRole('textbox', { name: 'Texto o enlace' }) : page.getByRole('group', { name: 'Área para pegar o soltar una imagen' }) })
+        await expect.poll(async () => pair.evaluate(element => {
+          const host = element.closest('.utility-density-scope')!
+          const panels = Array.from(element.children).map(child => child.getBoundingClientRect())
+          const wide = host.getBoundingClientRect().width >= 672
+          return wide ? Math.abs(panels[0].top - panels[1].top) <= 1 : panels[1].top >= panels[0].bottom
+        })).toBe(true)
+        await expect.poll(async () => pair.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+        const screenshot = testInfo.outputPath(`${tool}-${width}.png`)
+        await page.screenshot({ path: screenshot })
+        await testInfo.attach(`${tool}-${width}`, { path: screenshot, contentType: 'image/png' })
+      }
+    }
   })
 })

@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
+import { editorAction } from './helpers/jsonToolbar'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
 test.use({ channel: process.env.PLAYWRIGHT_CHANNEL })
@@ -39,7 +40,8 @@ test('XML 30 MiB searches the entire source, edits a distant chunk, and preserve
     })
     const editor = page.getByTestId('document-editor-a')
     await expect(editor).toBeVisible({ timeout: 30_000 })
-    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.getByRole('button', { name: 'Abrir archivo', exact: true }).click()])
+    const open = await editorAction(page, 'Abrir archivo')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), open.click()])
     const openStarted = performance.now()
     await chooser.setFiles(file)
     await expect(page.getByRole('status').filter({ hasText: 'Archivo local abierto.' })).toBeVisible({ timeout: 60_000 })
@@ -56,7 +58,8 @@ test('XML 30 MiB searches the entire source, edits a distant chunk, and preserve
     await expect(editor.locator('.view-lines')).toContainText('edited-distant-xml-value')
     await page.keyboard.insertText('-continued')
     await expect(editor.locator('.view-lines')).toContainText('edited-distant-xml-value-continued')
-    const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Descargar documento', exact: true }).click()])
+    const downloadButton = await editorAction(page, 'Descargar documento')
+    const [download] = await Promise.all([page.waitForEvent('download'), downloadButton.click()])
     const content = await readFile((await download.path())!, 'utf8')
     expect(content).toContain('edited-distant-xml-value-continued')
     expect(content).not.toContain(marker)

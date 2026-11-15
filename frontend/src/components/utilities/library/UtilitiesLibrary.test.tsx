@@ -46,7 +46,7 @@ beforeEach(() => {
     throw new Error(`Unexpected ${path}`)
   })
 })
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('utility library orchestration', () => {
   it('saves changes at two seconds, never marks them saved before the response', async () => {
@@ -68,6 +68,7 @@ describe('utility library orchestration', () => {
   it('starts exactly one library search after 500ms and cancels the preceding query', async () => {
     render(<UtilitiesLibrary />)
     await screen.findByRole('textbox', { name: 'Test document source' })
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
     vi.useFakeTimers()
     const search = screen.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' })
     fireEvent.change(search, { target: { value: 'first' } })
@@ -105,6 +106,7 @@ describe('utility library orchestration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cerrar pestaña Saved QR' }))
     await waitFor(() => expect(screen.queryByRole('tab', { name: 'Saved QR' })).not.toBeInTheDocument())
     expect(request.mock.calls.some(([, options]) => options?.method === 'DELETE')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
     expect(screen.getByRole('button', { name: /Saved QR.*Códigos QR/ })).toBeInTheDocument()
   })
 
@@ -237,6 +239,68 @@ describe('utility library orchestration', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: 'New QR' })).toBeInTheDocument())
     const created = request.mock.calls.find(([path, options]) => path === '/documents' && options?.method === 'POST')!
     expect(JSON.parse(created[1]!.body as string)).toMatchObject({ type: 'qr', folder_id: null })
+  })
+
+  it('keeps one editor mounted while docking, overlaying and closing the library', async () => {
+    let width = 1200
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, right: width, bottom: 650, width, height: 650, x: 0, y: 0, toJSON: () => ({}) }))
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    fireEvent.change(source, { target: { value: 'unchanged while resizing the shelves' } })
+    expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
+    expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toHaveStyle({ width: '224px' })
+    expect(screen.getByLabelText('Biblioteca personal de Utilitarios')).toHaveAttribute('data-library-layout', 'wide')
+    expect(screen.getByRole('textbox', { name: 'Test document source' })).toBe(source)
+    fireEvent.click(screen.getByRole('button', { name: /Saved QR.*Códigos QR/ }))
+    expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBeInTheDocument()
+    const dockedSearch = screen.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }) as HTMLInputElement
+    fireEvent.change(dockedSearch, { target: { value: 'Saved' } })
+    dockedSearch.focus(); dockedSearch.setSelectionRange(1, 3)
+    width = 900
+    act(() => window.dispatchEvent(new Event('resize')))
+    expect(window.document.querySelector('[data-utility-library-overlay]')?.parentElement).toBe(window.document.body)
+    expect(source.closest('[inert]')).not.toBeNull()
+    const overlaySearch = screen.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }) as HTMLInputElement
+    expect(overlaySearch).toHaveFocus()
+    expect(overlaySearch.selectionStart).toBe(1); expect(overlaySearch.selectionEnd).toBe(3)
+    width = 1200
+    act(() => window.dispatchEvent(new Event('resize')))
+    const restoredSearch = screen.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }) as HTMLInputElement
+    expect(restoredSearch).toHaveFocus()
+    expect(restoredSearch.selectionStart).toBe(1); expect(restoredSearch.selectionEnd).toBe(3)
+    width = 900
+    act(() => window.dispatchEvent(new Event('resize')))
+    fireEvent.keyDown(window.document, { key: 'Escape' })
+    expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Test document source' })).toBe(source)
+    expect(source).toHaveValue('unchanged while resizing the shelves')
+    expect(source.closest('[inert]')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Abrir biblioteca' })).toHaveFocus()
+    expect(window.document.querySelectorAll('[data-utility-workspace-header]')).toHaveLength(1)
+  })
+
+  it('opens complete save details and filters through portals while Escape keeps the underlying library available', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+    render(<UtilitiesLibrary />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Test document source' })).toHaveValue('saved'))
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    status.focus(); fireEvent.click(status)
+    expect(screen.getByRole('dialog', { name: 'Estado del documento y las pestañas' }).parentElement).toBe(window.document.body)
+    expect(screen.getByText('Pestañas confirmadas en el servidor.')).toBeInTheDocument()
+    fireEvent.keyDown(window.document, { key: 'Escape' })
+    expect(status).toHaveFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Filtrar documentos' }))
+    expect(screen.getByRole('dialog', { name: 'Filtros de documentos' }).parentElement).toBe(window.document.body)
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filtrar por tipo' }), { target: { value: 'json' } })
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path.includes('type=json'))).toBe(true))
+    fireEvent.keyDown(window.document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Filtros de documentos' })).not.toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBeInTheDocument()
+    fireEvent.keyDown(window.document, { key: 'Escape' })
+    expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
   })
 
   it('adopts the authoritative deletion workspace version without trying to save a deleted draft again', async () => {

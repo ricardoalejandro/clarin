@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import JsonUtility from './JsonUtility'
 import { processJson, type DocumentWorkerRequest, type DocumentWorkerResponse } from './jsonOperations'
@@ -58,10 +58,28 @@ class JsonWorker {
   terminate() { this.active = false }
 }
 
-beforeEach(() => vi.stubGlobal('ResizeObserver', class {
-  observe() {}
-  disconnect() {}
-}))
+let resizeEditor: (width: number) => void
+beforeEach(() => {
+  const matches = Element.prototype.matches
+  vi.spyOn(Element.prototype, 'matches').mockImplementation(function (this: Element, selector) { return selector === ':popover-open' ? false : matches.call(this, selector) })
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('pointer: fine'), addEventListener() {}, removeEventListener() {} }))
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: (entries: { contentRect: { width: number } }[]) => void) {}
+    observe(target: HTMLElement) {
+      if (target.getAttribute('aria-label') !== 'Editor de documentos') return
+      resizeEditor = width => this.callback([{ contentRect: { width } }])
+      resizeEditor(727)
+    }
+    disconnect() {}
+  })
+})
+
+function editorAction(name: string) {
+  const button = screen.queryByRole('button', { name })
+  if (button) return button
+  if (!screen.queryByRole('menu', { name: 'Más acciones del editor' })) fireEvent.click(screen.getByRole('button', { name: 'Más acciones del editor' }))
+  return screen.getByRole('menuitem', { name })
+}
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -86,15 +104,43 @@ it('restores a selected empty second panel and tolerates invalid saved editor pr
   expect(screen.getByRole('button', { name: 'Restablecer zoom del editor' })).toHaveTextContent('100%')
 })
 
-it('keeps the document actions directly accessible and limits JSON actions to JSON modes', () => {
+it('keeps secondary actions in More and limits JSON actions to JSON modes', () => {
   render(<JsonUtility />)
-  const actions = within(screen.getByRole('group', { name: 'Acciones del documento activo' }))
-  for (const name of ['Reparar', 'Escapar', 'Desescapar', 'Copiar documento', 'Descargar documento', 'Limpiar documento']) {
-    expect(actions.getByRole('button', { name })).toBeVisible()
+  for (const name of ['Reparar', 'Escapar', 'Desescapar', 'Limpiar documento']) {
+    expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    expect(editorAction(name)).toBeVisible()
+    expect(editorAction(name)).toBeDisabled()
   }
   fireEvent.change(screen.getByRole('combobox', { name: 'Formato del documento' }), { target: { value: 'xml' } })
-  expect(actions.queryByRole('button', { name: 'Reparar' })).not.toBeInTheDocument()
-  expect(actions.getByRole('button', { name: 'Descargar documento' })).toBeVisible()
+  expect(screen.queryByRole('menuitem', { name: 'Reparar' })).not.toBeInTheDocument()
+  expect(editorAction('Descargar documento')).toBeVisible()
+})
+
+it('moves complete groups to More using the editor width without remounting either draft', async () => {
+  render(<JsonUtility />)
+  const a = screen.getByRole('textbox', { name: 'Documento A' })
+  fireEvent.change(a, { target: { value: '{"a":1}' } })
+  fireEvent.click(editorAction('Mostrar segundo panel'))
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento B' }))
+  const b = screen.getByRole('textbox', { name: 'Documento B' })
+  fireEvent.change(b, { target: { value: '{"b":2}' } })
+  editorAction('Ajustar líneas').focus()
+  act(() => resizeEditor(320))
+  const toolbar = within(screen.getByRole('toolbar', { name: 'Herramientas del documento activo' }))
+  for (const name of ['Formatear', 'Validar', 'Buscar en todo el documento', 'Más acciones del editor']) expect(toolbar.getByRole('button', { name })).toBeVisible()
+  expect(toolbar.queryByRole('button', { name: 'Ajustar líneas' })).not.toBeInTheDocument()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Más acciones del editor' })).toHaveFocus())
+  expect(editorAction('Ajustar líneas')).toHaveAccessibleDescription('Desactivado')
+  expect(editorAction('Ajustar líneas')).toHaveAttribute('aria-keyshortcuts', 'Alt+Z')
+  fireEvent.click(editorAction('Ajustar líneas'))
+  expect(b).toHaveAttribute('wrap', 'soft')
+  act(() => resizeEditor(727))
+  expect(screen.getByRole('textbox', { name: 'Documento B' })).toBe(b)
+  expect(b).toHaveValue('{"b":2}')
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento A' }))
+  expect(screen.getByRole('textbox', { name: 'Documento A' })).toBe(a)
+  expect(a).toHaveValue('{"a":1}')
+  expect(a).toHaveAttribute('wrap', 'off')
 })
 
 it('reports and resets the zoom and keeps visual wrapping independent for each panel', () => {
@@ -145,7 +191,7 @@ it('stages a repair and applies it only after explicit confirmation', async () =
   render(<JsonUtility />)
   const a = screen.getByRole('textbox', { name: 'Documento A' })
   fireEvent.change(a, { target: { value: '{//id://dfdf}' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Reparar' }))
+  fireEvent.click(editorAction('Reparar'))
   expect(await screen.findByText('Propuesta de reparación · Documento A')).toBeInTheDocument()
   expect(a).toHaveValue('{//id://dfdf}')
   fireEvent.click(screen.getByRole('button', { name: 'Aplicar reparación' }))

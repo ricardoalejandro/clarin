@@ -22,9 +22,10 @@ description: Analyze, implement, or review Clarin Utilitarios, including the JSO
 
 ## Compact Document Workspace
 
-- Keep the JSON/XML editor full-height within the measured dashboard surface, with a compact header and one active-document toolbar. Reflow complete control groups when sidebar, Eros or mobile space changes.
-- Keep Formatear, Formato inteligente, Compactar, Validar, Ajustar líneas, history, local-file actions, Reparar, Escapar, Desescapar and Limpiar directly discoverable through grouped icons. Preferences may remain in their own popover.
-- Use distinct Lucide icons, accessible names, meaningful hover/focus labels and visible pressed/disabled states. Touch targets remain at least 44 by 44 px. Explain format-specific unavailability.
+- Keep every utility within the measured dashboard surface without outer padding. Utilities own account/user-scoped presentation preferences: 68px icon navigation and a closed library by default; never overwrite the ordinary dashboard navigation preference. An opened 224px library docks only when at least 840px remain for work, otherwise it overlays without remounting the editor.
+- Use one 44px document header for library, scrollable tabs, New, save/index status and document actions. Show the name once in its tab; keep errors and conflict recovery visible. Put session timing in an on-demand detail.
+- Keep a single active-document toolbar without horizontal scrolling. Format, Formatear, Validar, Buscar and Más remain visible; promote complete undo/redo, file, smart/compact and view groups only when measured space permits. Secondary commands and displaced groups appear exactly once in the keyboard-accessible portaled Más menu. Put zoom and panel selection in the compact footer.
+- Use distinct Lucide icons, accessible names, meaningful hover/focus labels and visible pressed/disabled states. Controls use real compiled CSS for 32px mouse targets and at least 44px touch targets, with coarse input taking precedence on hybrid devices. Explain format-specific unavailability.
 - Panels A and B own independent editable Monaco models, syntax, history, selection, folding and scroll. Hiding/restoring, narrow-mode tabs and comparison must preserve both drafts and reading positions, including the current long-line chunk.
 - Apply operations to the active document as one undoable edit. Keep representation, inferred syntax and raw line-ending fidelity coherent through Undo/Redo, copy and download. Plaintext produced by Desescapar exports as `.txt`.
 - Store word wrap independently per panel. `Ajustar líneas` and focused-editor `Alt+Z` share the same state. Wrapping changes visual lines only and preserves bytes, undo and selection. Long-line chunk previews keep bounded wrapping with an explained disabled toggle, then restore the panel preference in the full editor.
@@ -45,6 +46,8 @@ description: Analyze, implement, or review Clarin Utilitarios, including the JSO
 
 ## QR, Image And Cryptography
 
+- QR/image mode and primary action share a compact toolbar. Intake and result headings own their local actions; use 8–12px padding, a roughly 112px empty intake and two columns only from 672px of measured usable width.
+- Keep cryptographic operation, algorithm and selected key visible. Reveal secondary formats and help on demand. Vault creation/import and rename/export/CSR/certificate/JWT sections open on demand without losing temporary fields when closed. Preserve the existing boundary that keeps passwords and plaintext out of autosave.
 - QR generates local PNG/SVG and decodes selected, dropped or pasted images through a local worker. Render decoded content as text and require an explicit action before following any link.
 - Share validated image intake and clipboard fallback. Current PNG/JPEG/WebP limits are 10 MiB and 16 megapixels. Validate bytes and dimensions before decoding, and preserve source bytes through Base64/Data URL round trips.
 - Keep image conversion distinct from OCR. Copy/download must contain the complete result even when the displayed text preview is bounded.
