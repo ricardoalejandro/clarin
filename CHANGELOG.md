@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-11-15
+
+### Build 1 — Más espacio en Utilitarios
+
+- Navegación de iconos y biblioteca recogida por defecto, con preferencias visuales independientes por cuenta y usuario.
+- Una cabecera para documentos y pestañas; herramientas en una fila con opciones secundarias en «Más».
+- JSON/XML aprovecha el espacio sin reiniciar documentos ni historial y mantiene el zoom y los paneles en un pie compacto.
+- QR, Imagen/Base64 y Criptografía integran sus acciones en barras y encabezados; Mis claves abre creación, importación y opciones avanzadas a demanda.
+- Controles adaptados a ratón y pantalla táctil, biblioteca superpuesta cuando falta ancho y pestaña activa siempre visible.
+
 ## 2026-11-14
 
 ### Build 1 — Biblioteca personal de Utilitarios

@@ -1,11 +1,12 @@
 'use client'
 
-import { Download, QrCode, ScanLine, X } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { Download, FileCode, FileImage, QrCode, ScanLine, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { useUtilityDocumentState, useUtilityDocumentText } from '../library/UtilityDocumentContext'
+import { UtilityActionMenu } from '../library/UtilityActionMenu'
 import { useSavedImage } from './useSavedImage'
-import { CopyImageResult, ImageInput, ImageModePicker, InlineStatus, downloadLocalFile, imageGrid, imagePanel, primaryButton, secondaryButton, textField } from './ImageControls'
-import { validateLocalImage, type LocalImage } from './localImages'
+import { CopyImageResult, ImageInput, ImageModePicker, ImagePanelHeader, InlineStatus, downloadLocalFile, downloadLocalUrl, iconButton, imageGrid, imagePanel, primaryButton, textField } from './ImageControls'
+import type { LocalImage } from './localImages'
 import { readLocalQr } from './qrReader'
 import { useLocalJob } from './useLocalJob'
 
@@ -32,7 +33,7 @@ async function generateQr(text: string, signal: AbortSignal): Promise<GeneratedQ
   }
 }
 
-function GenerateQr() {
+function GenerateQr({ modeControl }: { modeControl: ReactNode }) {
   const [text, setText] = useUtilityDocumentText('qr-text')
   const [generated, setGenerated] = useUtilityDocumentState('qr_generated', false)
   const result = useLocalJob<GeneratedQr>()
@@ -44,45 +45,41 @@ function GenerateQr() {
   }, [text, generated])
 
   return (
-    <div className={imageGrid}>
-      <section className={`${imagePanel} space-y-3`}>
-        <label htmlFor="qr-text" className="block text-sm font-semibold text-slate-800">Texto o enlace</label>
+    <>
+      <div className="utility-work-toolbar" role="group" aria-label="Acciones de QR">
+        {modeControl}
+        <button type="button" className={`${primaryButton} ml-auto`} aria-label="Generar QR" disabled={!text || result.state.status === 'pending'} onClick={() => { restored.current = true; setGenerated(true); void result.run(signal => generateQr(text, signal)) }}>
+          <QrCode aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Generando…' : 'Generar'}
+        </button>
+      </div>
+      <div className={imageGrid}>
+      <section className={imagePanel}>
+        <ImagePanelHeader title="Texto o enlace" htmlFor="qr-text">
+          {text && <button type="button" className={iconButton} aria-label="Limpiar" title="Limpiar texto" onClick={() => { result.clear(); setGenerated(false); setText('') }}><X aria-hidden="true" className="h-4 w-4" /></button>}
+        </ImagePanelHeader>
         <textarea id="qr-text" className={`${textField} min-h-36`} placeholder="Escribe o pega el contenido del QR" value={text} autoComplete="off" spellCheck={false} onChange={event => {
           result.clear()
           setGenerated(false)
           setText(event.target.value)
         }} />
-        <div className="flex flex-wrap gap-2">
-          <button type="button" className={primaryButton} disabled={!text || result.state.status === 'pending'} onClick={() => { restored.current = true; setGenerated(true); void result.run(signal => generateQr(text, signal)) }}>
-            <QrCode aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Generando…' : 'Generar QR'}
-          </button>
-          {text && <button type="button" className={secondaryButton} onClick={() => { result.clear(); setGenerated(false); setText('') }}><X aria-hidden="true" className="h-4 w-4" />Limpiar</button>}
-        </div>
       </section>
-      <section className={`${imagePanel} space-y-3`}>
-        <h2 className="text-sm font-semibold text-slate-800">Código generado</h2>
+      <section className={imagePanel}>
+        <ImagePanelHeader title="Código QR">
+          {result.state.status === 'ready' && <UtilityActionMenu label="Descargar QR" className={iconButton} icon={Download} actions={[
+            { id: 'png', label: 'Descargar PNG', icon: FileImage, onSelect: () => { if (result.state.status === 'ready') downloadLocalUrl(result.state.value.png, 'codigo-qr.png') } },
+            { id: 'svg', label: 'Descargar SVG', icon: FileCode, onSelect: () => { if (result.state.status === 'ready') downloadLocalFile(new Blob([result.state.value.svg], { type: 'image/svg+xml' }), 'codigo-qr.svg') } },
+          ]} />}
+        </ImagePanelHeader>
         {result.state.status === 'idle' && <InlineStatus>El código aparecerá aquí cuando lo generes.</InlineStatus>}
         {result.state.status === 'pending' && <InlineStatus>Preparando vista previa y descargas…</InlineStatus>}
         {result.state.status === 'error' && <InlineStatus error>{result.state.error}</InlineStatus>}
-        {result.state.status === 'ready' && <GeneratedQrOutput value={result.state.value} />}
+        {result.state.status === 'ready' && <img src={result.state.value.png} alt="Código QR generado" className="mx-auto h-auto w-full max-w-52 rounded-lg border border-slate-200 bg-white [image-rendering:pixelated]" />}
       </section>
     </div>
-  )
-}
-
-function GeneratedQrOutput({ value }: { value: GeneratedQr }) {
-  return (
-    <>
-      <img src={value.png} alt="Código QR generado" className="mx-auto h-auto w-full max-w-52 rounded-lg border border-slate-200 bg-white [image-rendering:pixelated]" />
-      <div className="flex flex-wrap gap-2">
-        <a href={value.png} download="codigo-qr.png" className={secondaryButton}><Download aria-hidden="true" className="h-4 w-4" />Descargar PNG</a>
-        <button type="button" className={secondaryButton} onClick={() => downloadLocalFile(new Blob([value.svg], { type: 'image/svg+xml' }), 'codigo-qr.svg')}><Download aria-hidden="true" className="h-4 w-4" />Descargar SVG</button>
-      </div>
     </>
   )
 }
-
-function DecodeQr() {
+function DecodeQr({ modeControl }: { modeControl: ReactNode }) {
   const source = useLocalJob<LocalImage>()
   const savedImage = useSavedImage('source', source)
   const result = useLocalJob<string>()
@@ -103,43 +100,47 @@ function DecodeQr() {
   }, [image, decoded])
 
   return (
-    <div className={imageGrid}>
-      <section className={`${imagePanel} space-y-3`}>
-        <h2 className="text-sm font-semibold text-slate-800">Imagen del QR</h2>
-        <ImageInput source={source.state} onSelect={file => {
+    <>
+      <div className="utility-work-toolbar" role="group" aria-label="Acciones de QR">
+        {modeControl}
+        <button type="button" className={`${primaryButton} ml-auto`} aria-label="Leer QR" disabled={!image || result.state.status === 'pending'} onClick={() => { restored.current = true; setDecoded(true); if (image) void result.run(decode) }}>
+          <ScanLine aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Leyendo…' : 'Leer'}
+        </button>
+        {result.state.status === 'pending' && <button type="button" className={iconButton} aria-label="Cancelar lectura" title="Cancelar lectura" onClick={result.clear}><X aria-hidden="true" className="h-4 w-4" /></button>}
+      </div>
+      <div className={imageGrid}>
+      <section className={imagePanel}>
+        <ImageInput label="Imagen del QR" source={source.state} onSelect={file => {
           result.clear()
           setDecoded(false)
           savedImage.select(file)
         }} onClear={() => { result.clear(); setDecoded(false); savedImage.clear() }} />
-        <div className="flex flex-wrap gap-2">
-          <button type="button" className={primaryButton} disabled={!image || result.state.status === 'pending'} onClick={() => { restored.current = true; setDecoded(true); if (image) void result.run(decode) }}>
-            <ScanLine aria-hidden="true" className="h-4 w-4" />{result.state.status === 'pending' ? 'Leyendo…' : 'Leer QR'}
-          </button>
-          {result.state.status === 'pending' && <button type="button" className={secondaryButton} onClick={result.clear}>Cancelar lectura</button>}
-        </div>
       </section>
-      <section className={`${imagePanel} space-y-3`}>
-        <h2 className="text-sm font-semibold text-slate-800">Contenido del QR</h2>
+      <section className={imagePanel}>
+        <ImagePanelHeader title="Contenido del QR">
+          {result.state.status === 'ready' && <CopyImageResult value={result.state.value} fallback="No pudimos copiar el contenido. Selecciónalo y cópialo manualmente." />}
+        </ImagePanelHeader>
         {result.state.status === 'idle' && <InlineStatus>El contenido aparecerá aquí después de leer el código.</InlineStatus>}
         {result.state.status === 'pending' && <InlineStatus>Buscando el código en la imagen…</InlineStatus>}
         {result.state.status === 'error' && <InlineStatus error>{result.state.error}</InlineStatus>}
-        {result.state.status === 'ready' && (
-          <>
-            <textarea readOnly aria-label="Contenido del QR" className={`${textField} min-h-32`} value={result.state.value} />
-            <div className="flex flex-wrap items-center gap-2"><CopyImageResult value={result.state.value} fallback="No pudimos copiar el contenido. Selecciónalo y cópialo manualmente." /></div>
-          </>
-        )}
+        {result.state.status === 'ready' && <textarea readOnly aria-label="Contenido del QR" className={`${textField} min-h-32`} value={result.state.value} />}
       </section>
     </div>
+    </>
   )
 }
 
 export default function QrUtility() {
   const [mode, setMode] = useUtilityDocumentState<QrMode>('qr_mode', 'create')
+  const modeInput = useRef<HTMLSelectElement>(null)
+  const restoreModeFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (restoreModeFocus.current) { restoreModeFocus.current = false; modeInput.current?.focus({ preventScroll: true }) }
+  }, [mode])
+  const modeControl = <ImageModePicker inputRef={modeInput} label="Operación de QR" mode={mode} onChange={next => { restoreModeFocus.current = true; setMode(next) }} options={modes} />
   return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <ImageModePicker label="Operación de QR" mode={mode} onChange={setMode} options={modes} />
-      {mode === 'create' ? <GenerateQr /> : <DecodeQr />}
+    <div className="utility-density-scope flex min-w-0 flex-col gap-2">
+      {mode === 'create' ? <GenerateQr modeControl={modeControl} /> : <DecodeQr modeControl={modeControl} />}
     </div>
   )
 }

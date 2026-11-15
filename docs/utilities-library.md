@@ -10,6 +10,16 @@ El autoguardado espera dos segundos desde la última edición, con un máximo de
 
 Las búsquedas esperan exactamente 500 ms, cancelan consultas anteriores y rechazan respuestas obsoletas. La búsqueda de biblioteca examina nombres y contenido ordinario indexado, con texto literal de 3 a 128 caracteres para contenido. La indexación es por versión y puede ir detrás del guardado; la interfaz muestra ese estado. La búsqueda dentro del editor recorre todo el documento, incluso fuera del fragmento visible.
 
+## Disposición del espacio de trabajo
+
+Utilitarios inicia con el menú principal de iconos de 68 px y la biblioteca cerrada. Estas dos preferencias visuales se recuerdan exclusivamente por cuenta y usuario en el navegador. Las otras secciones recuperan su configuración habitual. La biblioteca abierta ocupa 224 px cuando quedan al menos 840 px para trabajar; en un espacio menor se superpone al documento y permite volver a él sin reiniciar su editor.
+
+La cabecera de 44 px reúne biblioteca, pestañas, nuevo documento, guardado e índice y acciones del documento. El nombre aparece en su pestaña; renombrar, favoritos, carpeta, duplicación, orden y eliminación están en su menú. Los detalles del guardado y de la sesión se consultan a demanda; errores y conflictos conservan sus acciones visibles.
+
+JSON/XML mantiene una fila de herramientas con Formato, Formatear, Validar, Buscar y Más. El ancho real disponible determina qué grupos adicionales aparecen directamente. El menú Más conserva los comandos secundarios y los que no caben, sin duplicarlos. El pie contiene el zoom hasta 500 % y los paneles A/B. Cambiar el ancho o abrir Eros conserva modelos, historial, selección y desplazamiento.
+
+QR e Imagen/Base64 integran las acciones en la barra y los encabezados de entrada y resultado. Utilizan dos columnas desde 672 px útiles. Criptografía ofrece formatos y ayuda desplegables; Mis claves abre creación e importación bajo demanda y conserva los borradores al recoger sus opciones. Esta disposición no cambia APIs, almacenamiento, cifrado, política de sesión ni el tratamiento de contraseñas.
+
 ## Contenido y almacenamiento
 
 Las rutas viven bajo `/api/utilities`, separadas en `documents`, `folders`, `workspace` y `vault`. Cada consulta utiliza cuenta y propietario del contexto autenticado. Ninguna ruta acepta al propietario desde el cliente como autoridad.

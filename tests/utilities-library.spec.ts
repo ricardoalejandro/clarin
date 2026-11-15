@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { writeFile } from 'node:fs/promises'
 import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
@@ -19,22 +20,28 @@ async function setup(page: Page) {
 }
 
 async function rename(page: Page, title: string) {
-  await page.getByRole('button', { name: 'Renombrar documento', exact: true }).click()
+  await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Renombrar documento', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Renombrar documento' })
   await dialog.getByRole('textbox', { name: 'Nombre' }).fill(title)
   await dialog.getByRole('button', { name: 'Guardar', exact: true }).click()
   await expect(dialog).toBeHidden()
 }
 
+async function createQr(page: Page) {
+  await page.getByRole('button', { name: 'Nuevo documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Códigos QR', exact: true }).click()
+}
+
 test('keeps independent same-tool tabs, saves, renames, searches, reopens and deletes documents', async ({ page }, testInfo) => {
   const library = await setup(page)
   await page.goto(`${baseURL}/dashboard/utilities`)
-  await page.getByRole('button', { name: 'Códigos QR', exact: true }).click()
+  await createQr(page)
   await rename(page, 'QR sucursal')
   await page.getByRole('textbox', { name: 'Texto o enlace' }).fill('contenido-buscable-iquitos')
   await expect.poll(() => [...library.contents.values()].some(value => value.toString().includes('contenido-buscable-iquitos'))).toBe(true)
 
-  await page.getByRole('button', { name: 'Códigos QR', exact: true }).click()
+  await createQr(page)
   await rename(page, 'QR pruebas')
   await expect(page.getByRole('textbox', { name: 'Texto o enlace' })).toHaveValue('')
   await page.getByRole('textbox', { name: 'Texto o enlace' }).fill('otro documento independiente')
@@ -45,6 +52,7 @@ test('keeps independent same-tool tabs, saves, renames, searches, reopens and de
   expect(library.documents.size).toBe(2)
   expect(library.writes.some(write => write.startsWith('delete:'))).toBe(false)
 
+  await page.getByRole('button', { name: 'Abrir biblioteca', exact: true }).click()
   await page.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }).fill('contenido-buscable-iquitos')
   const sidebar = page.getByRole('complementary', { name: 'Mis documentos' })
   await expect(sidebar.getByRole('button', { name: /QR pruebas/ })).toHaveCount(0)
@@ -57,7 +65,8 @@ test('keeps independent same-tool tabs, saves, renames, searches, reopens and de
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('contenido-buscable-iquitos')
   await testInfo.attach('biblioteca-documentos.png', { body: await page.screenshot({ path: testInfo.outputPath('biblioteca-documentos.png') }), contentType: 'image/png' })
 
-  await page.getByRole('button', { name: 'Eliminar documento', exact: true }).click()
+  await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Eliminar documento', exact: true }).click()
   await page.getByRole('dialog', { name: 'Eliminar documento' }).getByRole('button', { name: 'Eliminar definitivamente' }).click()
   await expect(page.getByRole('tab', { name: 'QR sucursal' })).toHaveCount(0)
   expect(library.documents.size).toBe(1)
@@ -98,8 +107,8 @@ test('keeps at least 200px for editing at 320px and exposes complete keyboard me
   const editor = page.getByTestId('document-editor-a')
   await expect(editor).toBeVisible({ timeout: 30_000 })
   await expect.poll(async () => (await editor.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(200)
-  expect((await page.locator('[data-utility-create-toolbar]').boundingBox())!.height).toBeLessThanOrEqual(56)
-  expect((await page.locator('[data-utility-document-toolbar]').boundingBox())!.height).toBeLessThanOrEqual(48)
+  expect((await page.locator('[data-utility-workspace-header]').boundingBox())!.height).toBe(44)
+  await expect(page.locator('[data-utility-create-toolbar], [data-utility-document-toolbar]')).toHaveCount(0)
   const actions = page.getByRole('button', { name: 'Acciones del documento', exact: true })
   await actions.focus(); await actions.press('ArrowDown')
   const actionMenu = page.getByRole('menu', { name: 'Acciones del documento' })
@@ -117,4 +126,95 @@ test('keeps at least 200px for editing at 320px and exposes complete keyboard me
   await page.getByRole('menuitem', { name: 'Códigos QR', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Texto o enlace' })).toBeVisible()
   await expect(page.getByRole('tab')).toHaveCount(2)
+  const activeTab = page.getByRole('tab', { selected: true })
+  const strip = (await page.getByRole('tablist', { name: 'Documentos abiertos' }).boundingBox())!
+  const active = (await activeTab.boundingBox())!
+  expect(active.x).toBeGreaterThanOrEqual(strip.x - 1)
+  expect(active.x + active.width).toBeLessThanOrEqual(strip.x + strip.width + 1)
+})
+
+test('gives the reference viewport one header and keeps navigation preferences scoped to Utilities', async ({ page }, testInfo) => {
+  await setup(page)
+  await page.addInitScript(() => localStorage.setItem('sidebar_collapsed', 'false'))
+  await page.setViewportSize({ width: 1263, height: 650 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editor = page.getByTestId('document-editor-a')
+  await expect(editor).toBeVisible({ timeout: 30_000 })
+  const sidebar = page.locator('[data-dashboard-sidebar]')
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())!.width)).toBe(68)
+  expect(await page.evaluate(() => localStorage.getItem('sidebar_collapsed'))).toBe('false')
+  await expect(page.getByRole('complementary', { name: 'Mis documentos' })).toHaveCount(0)
+  expect((await page.locator('[data-utility-workspace-header]').boundingBox())!.height).toBe(44)
+  await expect.poll(async () => (await editor.boundingBox())!.height).toBeGreaterThanOrEqual(500)
+  await expect.poll(async () => (await editor.boundingBox())!.width).toBeGreaterThanOrEqual(1150)
+  const geometryPath = testInfo.outputPath('workspace-geometry.json')
+  await writeFile(geometryPath, JSON.stringify({ viewport: page.viewportSize(), devicePixelRatio: await page.evaluate(() => devicePixelRatio), editor: await editor.boundingBox(), header: await page.locator('[data-utility-workspace-header]').boundingBox() }, null, 2))
+  await testInfo.attach('workspace-geometry.json', { path: geometryPath, contentType: 'application/json' })
+  await page.getByRole('button', { name: 'Abrir biblioteca', exact: true }).click()
+  const library = page.getByRole('complementary', { name: 'Mis documentos' })
+  await expect(library).toBeVisible()
+  expect((await library.boundingBox())!.width).toBe(224)
+  await page.getByRole('button', { name: 'Cerrar biblioteca', exact: true }).click()
+  await expect(editor).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Estado del guardado', exact: true })).toHaveAttribute('title', 'Guardado')
+  await page.screenshot({ path: testInfo.outputPath('utilities-1263-compact.png') })
+  await page.getByRole('button', { name: 'Expandir menú', exact: true }).click()
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())!.width)).toBe(240)
+  expect(await page.evaluate(() => localStorage.getItem('sidebar_collapsed'))).toBe('false')
+  await page.getByRole('link', { name: 'Dashboard', exact: true }).click()
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())!.width)).toBe(240)
+  await page.getByRole('link', { name: 'Utilitarios', exact: true }).click()
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())!.width)).toBe(240)
+})
+
+test('Escape closes the library overlay while keeping the docked Eros panel open', async ({ page }, testInfo) => {
+  await setup(page)
+  await page.addInitScript(() => localStorage.setItem('clarin:eros:window:v2', JSON.stringify({ version: 2, mode: 'docked', geometry: { x: 720, y: 12, width: 440, height: 620 }, dockWidth: 440 })))
+  await page.route('**/api/eros/**', route => route.fulfill({ json: { success: true, available: false, conversations: [], runs: [], tasks: [] } }))
+  await page.setViewportSize({ width: 1263, height: 650 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  await expect(page.getByTestId('document-editor-a')).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Estado del guardado', exact: true }).focus()
+  await page.keyboard.press('Control+i')
+  const eros = page.getByLabel('Asistente Eros', { exact: true })
+  await expect(eros).toBeVisible()
+  // The assistant installs its keyboard owner after opening and checking availability.
+  await page.waitForTimeout(200)
+  for (const focused of ['search', 'header']) {
+    await page.getByRole('button', { name: 'Abrir biblioteca', exact: true }).click()
+    const library = page.getByRole('complementary', { name: 'Mis documentos' })
+    await expect(library).toBeVisible()
+    await page.waitForTimeout(100)
+    if (focused === 'search') await page.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }).focus()
+    else await page.getByRole('button', { name: 'Cerrar biblioteca', exact: true }).focus()
+    await page.keyboard.press('Escape')
+    await expect(library).toBeHidden()
+    // Check the committed result, including the assistant's prop-to-state effect.
+    await page.waitForTimeout(200)
+    const result = { focused, libraryOpen: await library.isVisible(), erosOpen: await eros.isVisible() }
+    const resultPath = testInfo.outputPath(`escape-result-${focused}.json`)
+    await writeFile(resultPath, JSON.stringify(result, null, 2))
+    await testInfo.attach(`escape-result-${focused}.json`, { path: resultPath, contentType: 'application/json' })
+    expect(result).toEqual({ focused, libraryOpen: false, erosOpen: true })
+    await expect(page.getByRole('button', { name: 'Abrir biblioteca', exact: true })).toBeFocused()
+  }
+})
+
+for (const hasTouch of [false, true]) test.describe(hasTouch ? 'touch document menu' : 'mouse document menu', () => {
+  test.use({ hasTouch })
+  test('uses the shared density for every document action', async ({ page }) => {
+    await setup(page)
+    await page.goto(`${baseURL}/dashboard/utilities/qr`)
+    await expect(page.getByRole('textbox', { name: 'Texto o enlace' })).toBeVisible()
+    await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
+    const menu = page.getByRole('menu', { name: 'Acciones del documento' })
+    await expect(menu).toBeVisible()
+    const heights = await menu.getByRole('menuitem').evaluateAll(items => items.map(item => item.getBoundingClientRect().height))
+    expect(heights.length).toBeGreaterThan(0)
+    expect(heights.every(height => height === (hasTouch ? 44 : 32))).toBe(true)
+    await page.keyboard.press('End')
+    await expect(menu.getByRole('menuitem', { name: 'Eliminar documento', exact: true })).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Acciones del documento', exact: true })).toBeFocused()
+  })
 })

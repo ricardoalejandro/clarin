@@ -7,6 +7,7 @@ import dynamic from 'next/dynamic'
 import { ArrowLeft } from 'lucide-react'
 import { UTILITIES_HREF, type Utility } from './catalog'
 import { UtilityPrivacyNote } from './UtilitiesCatalog'
+import './utility-density.css'
 
 const workspaces = {
   json: dynamic(() => import('./json/JsonUtility'), {
@@ -31,12 +32,12 @@ export function UtilityWorkspace({ utility, embedded = false }: { utility: Utili
     return () => window.removeEventListener('pagehide', discardBeforeCaching)
   }, [])
 
-  if (embedded) return <section aria-label={utility.title} className={`@container flex min-h-0 min-w-0 flex-1 flex-col ${utility.id === 'json' ? 'overflow-hidden' : 'overflow-y-auto p-3'}`}>
+  if (embedded) return <section aria-label={utility.title} className={`utility-density-scope flex min-h-0 min-w-0 flex-1 flex-col ${utility.id === 'json' ? 'overflow-hidden' : 'overflow-y-auto p-2'}`}>
     <Suspense fallback={<p role="status" className="p-4 text-sm text-slate-600">Abriendo herramienta…</p>}><Workspace /></Suspense>
   </section>
 
   if (utility.id === 'json') {
-    return <section aria-labelledby="utility-title" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
+    return <section aria-labelledby="utility-title" className="utility-density-scope flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
       <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-2 sm:px-3">
         <Link prefetch={false} href={`${UTILITIES_HREF}#utilitario-json`} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2 text-sm font-medium text-slate-600 outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-emerald-600">
           <ArrowLeft aria-hidden="true" size={16} /> Utilitarios
@@ -48,7 +49,7 @@ export function UtilityWorkspace({ utility, embedded = false }: { utility: Utili
   }
 
   return (
-    <section aria-labelledby="utility-title" className="@container min-h-0 min-w-0 flex-1 overflow-y-auto">
+    <section aria-labelledby="utility-title" className="utility-density-scope min-h-0 min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-7xl px-1 pb-3 sm:px-2">
         <header className="mb-4 space-y-1">
           <Link prefetch={false} href={`${UTILITIES_HREF}#utilitario-${utility.id}`} className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-600 outline-none hover:bg-slate-100 hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-emerald-600">

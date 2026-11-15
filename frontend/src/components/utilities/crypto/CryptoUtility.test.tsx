@@ -79,6 +79,27 @@ it('persists public preferences while keeping typed keys and plaintext out of or
   view.unmount()
 })
 
+it('keeps one primary action in the shared toolbar and preserves drafts through navigation and help', async () => {
+  const view = render(<CryptoUtility />)
+  const toolbar = view.container.querySelector('[data-crypto-primary-actions]')!
+  expect(toolbar.querySelectorAll('button')).toHaveLength(2)
+  expect(screen.getAllByRole('button', { name: 'Cifrar' })).toHaveLength(1)
+  fireEvent.change(screen.getByRole('combobox', { name: 'Herramienta de criptografía' }), { target: { value: 'base64' } })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Texto (UTF-8)' }), { target: { value: 'Conservar ñ' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Codificar' }))
+  expect(await screen.findByRole('textbox', { name: 'Texto codificado' })).toHaveValue('Q29uc2VydmFyIMOx')
+  const information = screen.getByRole('button', { name: 'Información de criptografía' })
+  fireEvent.click(information)
+  fireEvent.click(information)
+  fireEvent.change(screen.getByRole('combobox', { name: 'Herramienta de criptografía' }), { target: { value: 'hash' } })
+  expect(toolbar.querySelectorAll('button')).toHaveLength(2)
+  expect(screen.queryByRole('button', { name: 'Codificar' })).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('combobox', { name: 'Herramienta de criptografía' }), { target: { value: 'base64' } })
+  expect(screen.getByRole('textbox', { name: 'Texto (UTF-8)' })).toHaveValue('Conservar ñ')
+  expect(screen.getByRole('textbox', { name: 'Texto codificado' })).toHaveValue('Q29uc2VydmFyIMOx')
+  expect(screen.getAllByRole('button', { name: 'Codificar' })).toHaveLength(1)
+})
+
 it('clears a confirmed deleted key reference so document preferences can still autosave', async () => {
   vi.mocked(libraryRequest).mockRejectedValueOnce(new UtilityRequestError('No disponible', 404))
   const setState = vi.fn()
@@ -104,10 +125,12 @@ it('preserves the saved key reference after a temporary service failure', async 
 it('clears the cipher selection after deleting the key that was explicitly chosen from the vault', async () => {
   mockSelectedKey()
   const setState = renderSelectedKey()
-  await screen.findByRole('checkbox', { name: /Usar la clave seleccionada/ })
+  expect(await screen.findByRole('checkbox', { name: /Usar la clave seleccionada/ })).toHaveAccessibleName(/Clave seleccionada · AES-GCM/)
   fireEvent.click(screen.getByRole('button', { name: 'Mis claves' }))
   fireEvent.click(await screen.findByRole('button', { name: 'Usar esta clave' }))
   expect(screen.getByRole('checkbox', { name: /Usar la clave seleccionada/ })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: /Usar la clave seleccionada/ })).toHaveAccessibleName(/Clave seleccionada · AES-GCM/)
+  expect(JSON.stringify(setState.mock.calls)).not.toContain(selectedKey.name)
   fireEvent.click(screen.getByRole('button', { name: 'Mis claves' }))
   fireEvent.click(await screen.findByRole('button', { name: 'Eliminar' }))
   fireEvent.click(screen.getByRole('button', { name: 'Eliminar definitivamente' }))

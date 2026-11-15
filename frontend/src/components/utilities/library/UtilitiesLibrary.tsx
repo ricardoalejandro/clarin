@@ -1,13 +1,15 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { flushSync } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { Braces, ChevronLeft, ChevronRight, Copy, Download, Folder, FolderPlus, Menu, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react'
+import { Braces, Check, ChevronLeft, ChevronRight, Copy, Download, Folder, FolderPlus, ListFilter, Loader2, Menu, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getAuthScope, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
+import { useUtilitiesWorkspacePreferences } from '@/lib/utilitiesWorkspacePreferences'
+import EditorPopover from '@/components/documents/EditorPopover'
 import { installEditorNavigationGuard } from '@/lib/fabric/editorNavigation'
 import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
 import { SessionTimingSummary } from '@/components/admin/SessionTimingSummary'
@@ -16,13 +18,14 @@ import { utilities, utilityById, type Utility } from '../catalog'
 import { UtilityWorkspace } from '../UtilityWorkspace'
 import { UtilityDocumentProvider } from './UtilityDocumentContext'
 import { UtilityDraft } from './UtilityDraft'
-import { libraryLayout } from './libraryLayout'
+import { activeTabScrollLeft, libraryDrawerBounds, libraryLayout, librarySaveStatus } from './libraryLayout'
+import '../utility-density.css'
 import { UtilityActionMenu, type UtilityMenuAction } from './UtilityActionMenu'
 import { closeOpenDocument, deletedWorkspaceMatches, jsonRequest, libraryRequest, moveOpenDocument, operationId, UtilityRequestError, type LibraryPage, type UtilityDocument, type UtilityFolder, type UtilityWorkspaceState } from './libraryApi'
 
-const buttonBase = 'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 disabled:cursor-wait disabled:opacity-50'
+const buttonBase = 'utility-control inline-flex items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 disabled:cursor-wait disabled:opacity-50'
 const button = `${buttonBase} hover:bg-slate-100`
-const field = 'min-h-11 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100'
+const field = 'utility-field w-full rounded-lg border border-slate-200 bg-white px-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100'
 const emptyWorkspace: UtilityWorkspaceState = { open_ids: [], active_id: null, version: 0 }
 type Dialog = { kind: 'rename' | 'delete' | 'move'; document: UtilityDocument } | { kind: 'folder' } | null
 
@@ -90,9 +93,20 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [dialog, setDialog] = useState<Dialog>(null)
-  const [libraryOpen, setLibraryOpen] = useState(false)
+  const { preferences: layoutPreferences, updatePreferences } = useUtilitiesWorkspacePreferences()
+  const libraryOpen = layoutPreferences.libraryOpen
+  const setLibraryOpen = (open: boolean) => updatePreferences({ libraryOpen: open })
   const [wide, setWide] = useState(false)
   const [compact, setCompact] = useState(true)
+  const [drawerBounds, setDrawerBounds] = useState<ReturnType<typeof libraryDrawerBounds>>({ left: 0, top: 44, width: 0, height: 0, panelWidth: 224 })
+  const libraryTrigger = useRef<HTMLButtonElement>(null)
+  const librarySurface = useRef<HTMLElement>(null)
+  const tabsViewport = useRef<HTMLDivElement>(null)
+  const libraryFocus = useRef<{ label: string | null; index: number; start: number | null; end: number | null } | null>(null)
+  const libraryFocusRestored = useRef(false)
+  const dockedRef = useRef(false)
+  const [filterAnchor, setFilterAnchor] = useState<HTMLElement | null>(null)
+  const [statusAnchor, setStatusAnchor] = useState<HTMLElement | null>(null)
   const host = useRef<HTMLElement>(null)
   const [reload, setReload] = useState(0)
   const [editorGeneration, setEditorGeneration] = useState(0)
@@ -113,15 +127,72 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const active = workspace.active_id ? sessions.current.get(workspace.active_id) : undefined
   const activeDocument = active?.document
   const indexingIds = [...new Set([...page.documents, ...(activeDocument ? [activeDocument] : [])].filter(document => document.slots.some(slot => slot.indexing)).map(document => document.id))].sort().join(',')
+  const overlay = libraryOpen && !wide
+  const overlayRef = useRef(overlay)
+  overlayRef.current = overlay
+  const closeTransientLibrary = () => { if (overlayRef.current) setLibraryOpen(false) }
+  const saveStatus = librarySaveStatus(active?.phase, workspacePhase, !ready || Boolean(active?.loading), Boolean(indexingIds), transitioning)
+
+  useLayoutEffect(() => {
+    const element = host.current
+    if (!element) return
+    const measure = () => {
+      const rect = element.getBoundingClientRect(), viewport = window.visualViewport
+      const layout = libraryLayout(rect.width, libraryOpen)
+      if (layout.sidebar !== dockedRef.current) {
+        const target = document.activeElement
+        if (target instanceof HTMLElement && librarySurface.current?.contains(target)) {
+          const controls = Array.from(librarySurface.current.querySelectorAll<HTMLElement>('input,button,select,a[href]'))
+          libraryFocus.current = { label: target.getAttribute('aria-label'), index: controls.indexOf(target), start: target instanceof HTMLInputElement ? target.selectionStart : null, end: target instanceof HTMLInputElement ? target.selectionEnd : null }
+        }
+        dockedRef.current = layout.sidebar
+      }
+      setWide(layout.sidebar); setCompact(layout.compact)
+      const bounds = libraryDrawerBounds(rect, { left: viewport?.offsetLeft || 0, top: viewport?.offsetTop || 0, width: viewport?.width || window.innerWidth, height: viewport?.height || window.innerHeight })
+      setDrawerBounds(current => Object.keys(bounds).every(key => current[key as keyof typeof bounds] === bounds[key as keyof typeof bounds]) ? current : bounds)
+    }
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
+    measure(); observer?.observe(element)
+    window.addEventListener('resize', measure); window.addEventListener('scroll', measure, true)
+    window.visualViewport?.addEventListener('resize', measure); window.visualViewport?.addEventListener('scroll', measure)
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true); window.visualViewport?.removeEventListener('resize', measure); window.visualViewport?.removeEventListener('scroll', measure) }
+  }, [libraryOpen])
+
+  useLayoutEffect(() => {
+    const previous = libraryFocus.current
+    libraryFocus.current = null
+    if (!libraryOpen || !previous || !librarySurface.current) return
+    const controls = Array.from(librarySurface.current.querySelectorAll<HTMLElement>('input,button,select,a[href]'))
+    const target = (previous.label ? controls.find(control => control.getAttribute('aria-label') === previous.label) : undefined) ?? controls[previous.index]
+    target?.focus({ preventScroll: true })
+    if (target instanceof HTMLInputElement && previous.start !== null && previous.end !== null) target.setSelectionRange(previous.start, previous.end)
+    libraryFocusRestored.current = Boolean(target)
+  }, [wide, libraryOpen])
 
   useEffect(() => {
-    const element = host.current
-    if (!element || typeof ResizeObserver === 'undefined') return
-    const measure = () => { const layout = libraryLayout(element.getBoundingClientRect().width); setWide(layout.sidebar); setCompact(layout.compact) }
-    const observer = new ResizeObserver(measure)
-    measure(); observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
+    if (!overlay) { libraryFocusRestored.current = false; return }
+    const restored = libraryFocusRestored.current
+    libraryFocusRestored.current = false
+    const frame = requestAnimationFrame(() => { if (!restored) librarySurface.current?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }) })
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true }) } }
+    document.addEventListener('keydown', escape)
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape) }
+  }, [overlay])
+  useEffect(() => { setFilterAnchor(null) }, [wide, libraryOpen])
+  useLayoutEffect(() => {
+    const viewport = tabsViewport.current
+    const tab = viewport && Array.from(viewport.querySelectorAll<HTMLElement>('[data-utility-tab-id]')).find(element => element.dataset.utilityTabId === workspace.active_id)
+    if (!viewport || !tab) return
+    const reveal = () => {
+      const rect = viewport.getBoundingClientRect(), item = tab.getBoundingClientRect()
+      viewport.scrollLeft = activeTabScrollLeft({ left: rect.left, right: rect.right, scrollLeft: viewport.scrollLeft, clientWidth: viewport.clientWidth, scrollWidth: viewport.scrollWidth }, item)
+    }
+    reveal()
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(reveal) : null
+    observer?.observe(viewport); observer?.observe(tab)
+    window.addEventListener('resize', reveal)
+    return () => { observer?.disconnect(); window.removeEventListener('resize', reveal) }
+  }, [workspace.active_id, workspace.open_ids.join(',')])
 
   const refreshDrafts = useCallback(() => {
     if (!mounted.current) return
@@ -360,7 +431,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       draft.session.searchQuery = settledQuery; draft.session.searchRequest = (draft.session.searchRequest ?? 0) + 1
       refreshDrafts()
     }
-    if (document.id === workspaceRef.current.active_id) { const draft = sessions.current.get(document.id); if (draft) requestSearch(draft); return }
+    if (document.id === workspaceRef.current.active_id) { const draft = sessions.current.get(document.id); if (draft) requestSearch(draft); closeTransientLibrary(); return }
     if (!beginTransition()) return
     try {
       if (!(await leaveActive())) return
@@ -371,7 +442,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       if (!releaseInactive(canonical.id)) return
       const current = workspaceRef.current
       flushSync(() => persistWorkspace({ ...current, open_ids: current.open_ids.includes(canonical.id) ? current.open_ids : [...current.open_ids, canonical.id], active_id: canonical.id }))
-      setLibraryOpen(false); setError('')
+      closeTransientLibrary(); setError('')
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : 'No se pudo abrir el documento.') } finally { finishTransition() }
   }
 
@@ -384,7 +455,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       if (!(await leaveActive())) return
       makeDraft(result.document); setDocuments(current => ({ ...current, [result.document.id]: result.document }))
       if (!releaseInactive(result.document.id)) return
-      flushSync(() => persistWorkspace({ ...workspaceRef.current, open_ids: [...workspaceRef.current.open_ids, result.document.id], active_id: result.document.id })); setReload(value => value + 1); setLibraryOpen(false)
+      flushSync(() => persistWorkspace({ ...workspaceRef.current, open_ids: [...workspaceRef.current.open_ids, result.document.id], active_id: result.document.id })); setReload(value => value + 1); closeTransientLibrary()
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : 'No se pudo crear el documento.') } finally { finishTransition() }
   }
 
@@ -537,6 +608,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const closeDialog = useCallback(() => setDialog(null), [])
   const newActions: UtilityMenuAction[] = utilities.map(utility => ({ id: utility.id, label: utility.id === 'json' ? 'JSON/XML' : utility.title, icon: Plus, disabled: busy || !ready, onSelect: () => { void createDocument(utility.id) } }))
   const documentActions: UtilityMenuAction[] = activeDocument ? [
+    { id: 'rename', label: 'Renombrar documento', icon: Pencil, disabled: busy, onSelect: () => setDialog({ kind: 'rename', document: activeDocument }) },
     { id: 'left', label: 'Mover pestaña a la izquierda', icon: ChevronLeft, disabled: busy || workspace.open_ids[0] === activeDocument.id, onSelect: () => persistWorkspace({ ...workspaceRef.current, open_ids: moveOpenDocument(workspaceRef.current.open_ids, activeDocument.id, -1) }) },
     { id: 'right', label: 'Mover pestaña a la derecha', icon: ChevronRight, disabled: busy || workspace.open_ids.at(-1) === activeDocument.id, onSelect: () => persistWorkspace({ ...workspaceRef.current, open_ids: moveOpenDocument(workspaceRef.current.open_ids, activeDocument.id, 1) }) },
     { id: 'favorite', label: activeDocument.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', icon: Star, disabled: busy, onSelect: () => { void changeMetadata(activeDocument, { favorite: !activeDocument.favorite }) } },
@@ -545,51 +617,52 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     { id: 'download', label: 'Descargar borrador', icon: Download, onSelect: () => { void downloadDraft() } },
     { id: 'delete', label: 'Eliminar documento', icon: Trash2, destructive: true, disabled: busy, onSelect: () => setDialog({ kind: 'delete', document: activeDocument }) },
   ] : []
-  return <section ref={host} aria-label="Biblioteca personal de Utilitarios" data-library-layout={wide ? 'wide' : 'narrow'} data-library-compact={compact} className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-slate-200 bg-white">
-    <aside className={`${libraryOpen || wide ? 'flex' : 'hidden'} ${wide ? 'w-64 shrink-0' : 'w-full'} min-w-0 flex-col border-r border-slate-200 bg-slate-50/70`} aria-label="Mis documentos">
-      <header className="flex items-center justify-between gap-2 px-3 py-2"><div><h1 className="text-sm font-semibold text-slate-900">Utilitarios</h1><p className="text-[11px] text-slate-500">Tu biblioteca personal</p></div><button type="button" className={`${button} ${wide ? 'hidden' : ''}`} aria-label="Cerrar biblioteca" onClick={() => setLibraryOpen(false)}><X size={16} /></button></header>
-      <div className="space-y-2 px-2 pb-2">
-        <label className="relative block"><Search aria-hidden size={15} className="pointer-events-none absolute left-3 top-3.5 text-slate-400" /><input aria-label="Buscar documentos por nombre o contenido" className={`${field} pl-9`} placeholder="Buscar nombre o contenido" value={query} maxLength={128} onChange={event => { setQuery(event.target.value); if (!event.target.value) settleQuery('') }} /></label>
-        {query !== settledQuery && <p role="status" className="px-1 text-[11px] text-slate-500">Preparando búsqueda…</p>}
-        <div className="grid grid-cols-2 gap-1"><button type="button" className={`${button} ${!favorite && folder === null ? 'bg-white text-emerald-800 shadow-sm' : ''}`} onClick={() => { setFavorite(false); setFolder(null) }}>Recientes</button><button type="button" aria-pressed={favorite} className={`${button} ${favorite ? 'bg-white text-emerald-800 shadow-sm' : ''}`} onClick={() => { setFavorite(value => !value); setFolder(null) }}><Star size={14} />Favoritos</button></div>
-        <select aria-label="Filtrar por tipo" className={field} value={type} onChange={event => setType(event.target.value)}><option value="">Todos los tipos</option>{utilities.map(utility => <option key={utility.id} value={utility.id}>{utility.title}</option>)}</select>
-        <div className="flex items-center justify-between"><span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Carpetas</span><button className={button} aria-label="Nueva carpeta" onClick={() => setDialog({ kind: 'folder' })}><FolderPlus size={15} /></button></div>
-        <div className="flex max-h-32 flex-col overflow-y-auto">{folders.map(item => <button type="button" key={item.id} className={`${button} justify-start ${folder === item.id ? 'bg-emerald-50 text-emerald-800' : 'text-slate-600'}`} onClick={() => { setFolder(item.id); setFavorite(false) }}><Folder size={14} /><span className="truncate">{item.name}</span></button>)}</div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto border-t border-slate-200 px-1 py-1" aria-live="polite">
-        {loading && page.documents.length === 0 && <p role="status" className="p-3 text-xs text-slate-500">Cargando documentos…</p>}
-        {!loading && page.documents.length === 0 && <p className="p-3 text-xs leading-5 text-slate-500">{settledQuery ? 'No hay documentos que coincidan.' : 'Tus documentos aparecerán aquí. Crea uno para comenzar.'}</p>}
-        {page.documents.map(document => <div key={document.id} className={`group rounded-lg ${workspace.active_id === document.id ? 'bg-emerald-50' : 'hover:bg-slate-100'}`}><button type="button" className="flex min-h-14 w-full min-w-0 items-start gap-2 rounded-lg px-2 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" disabled={busy} onClick={() => void openDocument(document)}><Braces size={15} aria-hidden className="mt-0.5 shrink-0 text-slate-400" /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-slate-800">{document.favorite && '★ '}{document.title}</span><span className="mt-1 block truncate text-[10px] text-slate-500">{utilityById(document.type)?.title} · {new Date(document.updated_at).toLocaleDateString('es-PE')}</span>{document.snippet && <span className="mt-1 block line-clamp-2 break-all text-[11px] text-slate-600">{document.snippet}</span>}</span></button></div>)}
-        {page.has_more && <button className={`${button} w-full`} disabled={loading} onClick={() => void loadMore()}>{loading ? 'Cargando…' : 'Cargar más'}</button>}
-      </div>
-      <footer className="shrink-0"><SessionTimingSummary /></footer>
-    </aside>
-    <div className={`${libraryOpen && !wide ? 'hidden' : 'flex'} min-h-0 min-w-0 flex-1 flex-col`}>
-      <header data-utility-create-toolbar className="flex min-h-12 shrink-0 flex-wrap items-center gap-1 border-b border-slate-200 px-2">
-        <button type="button" className={`${button} ${wide ? 'hidden' : ''}`} aria-label="Abrir biblioteca" onClick={() => setLibraryOpen(true)}><Menu size={16} /></button>
-        {compact ? <UtilityActionMenu label="Nuevo documento" actions={newActions} className={button} icon={Plus} showLabel /> : <><span className="mr-1 text-xs font-semibold text-slate-600">Nuevo</span>{utilities.map(utility => <button type="button" key={utility.id} disabled={busy || !ready} className={button} onClick={() => void createDocument(utility.id)}><Plus size={13} /><span>{utility.id === 'json' ? 'JSON/XML' : utility.id === 'imagen-base64' ? 'Imagen/Base64' : utility.title}</span></button>)}</>}
-      </header>
-      <div role="tablist" aria-label="Documentos abiertos" className="flex min-h-11 shrink-0 items-stretch overflow-x-auto border-b border-slate-200 bg-slate-50/70">
-        {workspace.open_ids.map(id => { const document = sessions.current.get(id)?.document ?? documents[id]; if (!document) return null; return <div key={id} className={`flex max-w-64 shrink-0 items-center border-r border-slate-200 ${id === workspace.active_id ? 'border-b-2 border-b-emerald-600 bg-white' : ''}`}><button role="tab" type="button" aria-selected={id === workspace.active_id} aria-controls="utility-active-document" className={`${button} min-w-0 max-w-48 justify-start rounded-none`} disabled={busy} onClick={() => void openDocument(document)}><span className="truncate">{document.title}</span>{sessions.current.get(id)?.dirty && <span aria-label="Cambios pendientes" className="text-amber-600">●</span>}</button><button type="button" className={`${button} px-1.5`} aria-label={`Cerrar pestaña ${document.title}`} disabled={busy} onClick={() => void closeDocument(id)}><X size={13} /></button></div> })}
-      </div>
-      {error && <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"><span>{error}</span><button type="button" className={button} aria-label="Cerrar aviso" onClick={() => setError('')}><X size={14} /></button></div>}
-      {notice && <div role="status" className="flex shrink-0 items-center justify-between gap-2 border-b border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"><span>{notice}</span><button type="button" className={button} aria-label="Cerrar confirmación" onClick={() => setNotice('')}><X size={14} /></button></div>}
-      {workspacePhase === 'saving' && <p role="status" className="shrink-0 px-3 py-1 text-[11px] text-slate-500">Guardando pestañas…</p>}
-      {workspacePhase === 'error' && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-900"><span>{workspaceError}</span><button type="button" className={button} onClick={() => void retryWorkspace()}>Guardar pestañas de esta ventana</button></div>}
-      {indexingIds && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-slate-100 bg-slate-50 px-3 py-1 text-[11px] text-slate-500">{indexSlow ? 'La indexación está tardando. El documento está guardado y puedes seguir trabajando.' : 'Indexando contenido para la búsqueda…'}{indexSlow && <button type="button" className={button} onClick={() => setIndexRetry(value => value + 1)}>Reintentar comprobación</button>}</div>}
-      {active?.loading && <p role="status" className="shrink-0 border-b border-slate-100 bg-slate-50 px-3 py-1 text-[11px] text-slate-500">Abriendo el contenido guardado…</p>}
-      {active && activeDocument ? <>
-        <div data-utility-document-toolbar className="flex shrink-0 items-center justify-between gap-1 border-b border-slate-200 px-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1"><button aria-label="Renombrar documento" className={`${button} min-w-0 max-w-60 justify-start text-slate-900`} onClick={() => setDialog({ kind: 'rename', document: activeDocument })}><span className="truncate font-semibold">{activeDocument.title}</span><Pencil size={12} className="shrink-0 text-slate-400" /></button><span role="status" className={`shrink-0 px-1 text-[11px] ${active.phase === 'error' || active.phase === 'conflict' ? 'text-rose-700' : 'text-slate-500'}`}>{active.phase === 'saved' ? 'Guardado' : active.phase === 'saving' ? 'Guardando…' : active.phase === 'dirty' ? 'Cambios pendientes' : active.phase === 'conflict' ? 'Conflicto de versión' : 'No se pudo guardar'}</span></div>
-          {compact ? <UtilityActionMenu key={activeDocument.id} label="Acciones del documento" actions={documentActions} className={`${button} shrink-0`} /> : <div className="flex shrink-0 items-center">{documentActions.map(action => <button key={action.id} type="button" className={`${button} ${action.destructive ? 'text-rose-600' : ''}`} aria-label={action.label} aria-pressed={action.id === 'favorite' ? activeDocument.favorite : undefined} disabled={action.disabled} onClick={action.onSelect}><action.icon size={15} className={action.id === 'favorite' && activeDocument.favorite ? 'fill-amber-400 text-amber-500' : ''} aria-hidden /></button>)}</div>}
-        </div>
-        {(active.phase === 'error' || active.phase === 'conflict') && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-rose-50 px-3 py-2 text-xs text-rose-800"><span>{active.error} Tu borrador sigue disponible.</span><button className={button} disabled={busy} onClick={() => void retryActive()}>Reintentar</button><button className={button} disabled={busy} onClick={() => void duplicateDocument(activeDocument)}>Guardar una copia</button><button className={button} onClick={() => void downloadDraft()}>Descargar</button></div>}
-        <div id="utility-active-document" role="tabpanel" aria-busy={transitioning || undefined} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          <div ref={editorSurface} inert={transitioning || undefined} className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><UtilityDocumentProvider key={`${activeDocument.id}:${editorGeneration}`} value={active.session}><UtilityWorkspace utility={utilityById(activeDocument.type)!} embedded /></UtilityDocumentProvider></div>
-          {transitioning && <div className="absolute inset-0 flex items-center justify-center bg-slate-100/70 p-4"><p role="status" className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">Guardando y abriendo documento…</p></div>}
-        </div>
-      </> : <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center"><Braces size={32} className="text-emerald-600" /><h2 className="text-lg font-semibold text-slate-900">Un lugar para cada trabajo</h2><p className="max-w-sm text-sm leading-6 text-slate-500">Crea un documento o abre uno de tu biblioteca. Puedes trabajar en varias pestañas y volver a ellas después.</p><p className="max-w-sm text-xs leading-5 text-slate-500">Los documentos se guardan en tu cuenta, solo para ti. Cerrar una pestaña conserva su contenido.</p></div>}
+  const libraryPanel = <aside key="library" ref={librarySurface} className="flex h-full min-h-0 shrink-0 flex-col border-r border-slate-200 bg-slate-50" style={{ width: wide ? 224 : drawerBounds.panelWidth }} aria-label="Mis documentos">
+    <div className="flex h-11 shrink-0 items-center justify-between gap-1 px-2"><h2 className="text-xs font-semibold text-slate-700">Documentos</h2><button type="button" className={`${button} ${type || folder !== null ? 'bg-emerald-50 text-emerald-800' : ''}`} aria-label="Filtrar documentos" aria-haspopup="dialog" aria-expanded={Boolean(filterAnchor)} onClick={event => { const target = event.currentTarget; setFilterAnchor(current => current ? null : target) }}><ListFilter size={15} aria-hidden /></button></div>
+    <div className="space-y-1 px-2 pb-2">
+      <label className="relative block"><Search aria-hidden size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" /><input aria-label="Buscar documentos por nombre o contenido" className={`${field} pl-8 text-xs`} placeholder="Nombre o contenido" value={query} maxLength={128} onChange={event => { setQuery(event.target.value); if (!event.target.value) settleQuery('') }} /></label>
+      {query !== settledQuery && <p role="status" className="px-1 text-[11px] text-slate-500">Preparando búsqueda…</p>}
+      <div className="grid grid-cols-2 gap-1"><button type="button" className={`${button} ${!favorite && folder === null ? 'bg-white text-emerald-800 shadow-sm' : ''}`} onClick={() => { setFavorite(false); setFolder(null) }}>Recientes</button><button type="button" aria-pressed={favorite} className={`${button} ${favorite ? 'bg-white text-emerald-800 shadow-sm' : ''}`} onClick={() => { setFavorite(value => !value); setFolder(null) }}><Star size={13} aria-hidden />Favoritos</button></div>
+      {(type || folder !== null) && <p className="truncate px-1 text-[11px] text-emerald-700">{[type ? utilityById(type)?.title : '', folder ? folders.find(item => item.id === folder)?.name : folder === '' ? 'Sin carpeta' : ''].filter(Boolean).join(' · ')}</p>}
     </div>
+    <div className="min-h-0 flex-1 overflow-y-auto border-t border-slate-200 p-1" aria-live="polite">
+      {loading && page.documents.length === 0 && <p role="status" className="p-2 text-xs text-slate-500">Cargando documentos…</p>}
+      {!loading && page.documents.length === 0 && <p className="p-2 text-xs leading-5 text-slate-500">{settledQuery ? 'No hay documentos que coincidan.' : 'Tus documentos aparecerán aquí. Crea uno para comenzar.'}</p>}
+      {page.documents.map(document => <button key={document.id} type="button" className={`utility-library-row flex w-full min-w-0 items-start gap-2 rounded-lg p-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 ${workspace.active_id === document.id ? 'bg-emerald-50' : 'hover:bg-slate-100'}`} disabled={busy} onClick={() => void openDocument(document)}><Braces size={14} aria-hidden className="mt-0.5 shrink-0 text-slate-400" /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-slate-800">{document.favorite && '★ '}{document.title}</span><span className="block truncate text-[10px] leading-4 text-slate-500">{utilityById(document.type)?.title} · {new Date(document.updated_at).toLocaleDateString('es-PE')}</span>{document.snippet && <span className="mt-1 block line-clamp-2 break-all text-[11px] text-slate-600">{document.snippet}</span>}</span></button>)}
+      {page.has_more && <button className={`${button} w-full`} disabled={loading} onClick={() => void loadMore()}>{loading ? 'Cargando…' : 'Cargar más'}</button>}
+    </div>
+    <footer className="shrink-0"><SessionTimingSummary compact /></footer>
+  </aside>
+  return <section ref={host} aria-label="Biblioteca personal de Utilitarios" data-library-layout={wide ? 'wide' : 'narrow'} data-library-compact={compact} className="utility-density-scope relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
+    <h1 className="sr-only">Utilitarios</h1>
+    <header data-utility-workspace-header className="flex h-11 min-h-11 min-w-0 shrink-0 items-center gap-0.5 border-b border-slate-200 bg-slate-50 px-1">
+      <button ref={libraryTrigger} type="button" disabled={busy} className={`${button} shrink-0 ${libraryOpen ? 'bg-emerald-50 text-emerald-800' : ''}`} aria-label={libraryOpen ? 'Cerrar biblioteca' : 'Abrir biblioteca'} aria-expanded={libraryOpen} title={libraryOpen ? 'Cerrar biblioteca' : 'Abrir biblioteca'} onClick={() => setLibraryOpen(!libraryOpen)}><Menu size={16} aria-hidden /></button>
+      <div ref={tabsViewport} role="tablist" aria-label="Documentos abiertos" className="flex h-full min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden" style={{ containerType: 'inline-size', scrollbarWidth: 'none' }}>
+        {workspace.open_ids.map(id => { const document = sessions.current.get(id)?.document ?? documents[id]; if (!document) return null; return <div key={id} data-utility-tab-id={id} style={{ maxWidth: 'min(240px, 100cqw)' }} className={`flex shrink-0 items-center border-r border-slate-200 ${id === workspace.active_id ? 'border-b-2 border-b-emerald-600 bg-white' : ''}`}><button role="tab" type="button" aria-selected={id === workspace.active_id} aria-controls="utility-active-document" title={document.title} style={{ minWidth: 0, flex: '1 1 0%' }} className={`${button} max-w-44 justify-start rounded-none`} disabled={busy} onDoubleClick={() => { if (id === workspace.active_id && !busy) setDialog({ kind: 'rename', document }) }} onClick={() => void openDocument(document)}><span className="truncate">{document.title}</span>{sessions.current.get(id)?.dirty && <span aria-label="Cambios pendientes" className="text-amber-600">●</span>}</button><button type="button" className={`${button} shrink-0 px-1`} aria-label={`Cerrar pestaña ${document.title}`} disabled={busy} onClick={() => void closeDocument(id)}><X size={13} aria-hidden /></button></div> })}
+      </div>
+      <UtilityActionMenu label="Nuevo documento" actions={newActions} className={`${button} shrink-0`} icon={Plus} />
+      <button type="button" className={`${button} min-w-0 shrink-0 ${saveStatus.tone === 'error' ? 'text-rose-700' : saveStatus.tone === 'pending' ? 'text-amber-700' : 'text-slate-500'}`} aria-label="Estado del guardado" title={saveStatus.label} aria-haspopup="dialog" aria-expanded={Boolean(statusAnchor)} onClick={event => { const target = event.currentTarget; setStatusAnchor(current => current ? null : target) }}>{saveStatus.tone === 'pending' ? <Loader2 size={14} className={active?.phase === 'dirty' ? '' : 'motion-safe:animate-spin'} aria-hidden /> : <Check size={14} aria-hidden />}<span role="status" className={compact ? 'sr-only' : 'max-w-40 truncate text-[11px]'}>{saveStatus.label}</span></button>
+      {activeDocument && <UtilityActionMenu key={activeDocument.id} label="Acciones del documento" actions={documentActions} className={`${button} shrink-0`} />}
+    </header>
+    <div className="flex min-h-0 min-w-0 flex-1">
+      {wide && libraryPanel}
+      <div key="workspace" inert={overlay || undefined} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {error && <div role="alert" className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-900"><span>{error}</span><button type="button" className={button} aria-label="Cerrar aviso" onClick={() => setError('')}><X size={14} /></button></div>}
+        {notice && <div role="status" className="flex shrink-0 items-center justify-between gap-2 border-b border-emerald-100 bg-emerald-50 px-3 py-1 text-xs text-emerald-900"><span>{notice}</span><button type="button" className={button} aria-label="Cerrar confirmación" onClick={() => setNotice('')}><X size={14} /></button></div>}
+        {workspacePhase === 'error' && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-100 bg-amber-50 px-3 py-1 text-xs text-amber-900"><span>{workspaceError}</span><button type="button" className={button} onClick={() => void retryWorkspace()}>Guardar pestañas de esta ventana</button></div>}
+        {indexSlow && <div role="status" className="flex shrink-0 flex-wrap items-center gap-2 bg-amber-50 px-3 py-1 text-xs text-amber-900">La indexación está tardando. El documento está guardado y puedes seguir trabajando.<button type="button" className={button} onClick={() => setIndexRetry(value => value + 1)}>Reintentar comprobación</button></div>}
+        {active && activeDocument ? <>
+          {(active.phase === 'error' || active.phase === 'conflict') && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-rose-50 px-3 py-1 text-xs text-rose-800"><span>{active.error} Tu borrador sigue disponible.</span><button className={button} disabled={busy} onClick={() => void retryActive()}>Reintentar</button><button className={button} disabled={busy} onClick={() => void duplicateDocument(activeDocument)}>Guardar una copia</button><button className={button} onClick={() => void downloadDraft()}>Descargar</button></div>}
+          <div id="utility-active-document" role="tabpanel" aria-busy={transitioning || undefined} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            <div ref={editorSurface} inert={transitioning || undefined} className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><UtilityDocumentProvider key={`${activeDocument.id}:${editorGeneration}`} value={active.session}><UtilityWorkspace utility={utilityById(activeDocument.type)!} embedded /></UtilityDocumentProvider></div>
+            {transitioning && <div className="absolute inset-0 flex items-center justify-center bg-slate-100/70 p-4"><p role="status" className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">Guardando y abriendo documento…</p></div>}
+          </div>
+        </> : <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center"><Braces size={32} className="text-emerald-600" /><h2 className="text-lg font-semibold text-slate-900">Un lugar para cada trabajo</h2><p className="max-w-sm text-sm leading-6 text-slate-500">Crea un documento o abre uno de tu biblioteca. Puedes trabajar en varias pestañas y volver a ellas después.</p><p className="max-w-sm text-xs leading-5 text-slate-500">Los documentos se guardan en tu cuenta, solo para ti. Cerrar una pestaña conserva su contenido.</p></div>}
+      </div>
+    </div>
+    {overlay && createPortal(<div data-utility-library-overlay className="fixed bg-slate-950/20" style={{ left: drawerBounds.left, top: drawerBounds.top, width: drawerBounds.width, height: drawerBounds.height, zIndex: OPERATIONAL_OVERLAY_LAYERS.workspacePopover }} onMouseDown={event => { if (event.target === event.currentTarget) { setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true }) } }}>{libraryPanel}</div>, document.body)}
+    {filterAnchor && <EditorPopover anchor={filterAnchor} label="Filtros de documentos" onClose={() => setFilterAnchor(null)} width={256}><div className="utility-density-scope space-y-2"><label className="block text-xs font-medium">Tipo<select aria-label="Filtrar por tipo" className={`${field} mt-1`} value={type} onChange={event => setType(event.target.value)}><option value="">Todos los tipos</option>{utilities.map(utility => <option key={utility.id} value={utility.id}>{utility.title}</option>)}</select></label><div className="flex items-center justify-between text-xs font-medium"><span>Carpetas</span><button className={button} aria-label="Nueva carpeta" onClick={() => { setFilterAnchor(null); setDialog({ kind: 'folder' }) }}><FolderPlus size={15} /></button></div><div className="max-h-40 overflow-y-auto"><button type="button" className={`${button} w-full justify-start`} onClick={() => setFolder(null)}>Todas las carpetas</button><button type="button" className={`${button} w-full justify-start`} onClick={() => setFolder('')}>Sin carpeta</button>{folders.map(item => <button type="button" key={item.id} className={`${button} w-full justify-start ${folder === item.id ? 'bg-emerald-50 text-emerald-800' : ''}`} onClick={() => { setFolder(item.id); setFavorite(false) }}><Folder size={14} /><span className="truncate">{item.name}</span></button>)}</div><button type="button" className={`${button} w-full`} onClick={() => setFilterAnchor(null)}>Cerrar filtros</button></div></EditorPopover>}
+    {statusAnchor && <EditorPopover anchor={statusAnchor} label="Estado del documento y las pestañas" onClose={() => setStatusAnchor(null)} width={280}><div className="utility-density-scope space-y-2 p-1 text-xs leading-5"><p className="font-semibold">{saveStatus.label}</p><p>{workspacePhase === 'saved' ? 'Pestañas confirmadas en el servidor.' : workspacePhase === 'saving' ? 'Guardando el orden y la pestaña activa.' : workspaceError}</p>{indexingIds && <p>Indexando contenido para la búsqueda. El contenido ya guardado sigue disponible.</p>}{active?.loading && <p>Abriendo el contenido guardado…</p>}<SessionTimingSummary /><button type="button" className={button} onClick={() => setStatusAnchor(null)}>Cerrar detalle</button></div></EditorPopover>}
     {dialog && <LibraryDialog key={dialog.kind + ('document' in dialog ? dialog.document.id : '')} dialog={dialog} folders={folders} busy={busy} onClose={closeDialog} onSubmit={submitDialog} />}
   </section>
 }

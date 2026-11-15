@@ -36,6 +36,7 @@ import {
 import { completeAuthIdentityChange, getAuthScope } from '@/lib/authScope'
 import { fetchAuthCookie } from '@/lib/authCookieLock'
 import { canUseUtilities, isUtilitiesPath, UTILITIES_HREF, UTILITIES_PERMISSION } from '@/components/utilities/catalog'
+import { effectiveUtilitiesNavigation, useUtilitiesWorkspacePreferences, UtilitiesWorkspacePreferencesProvider } from '@/lib/utilitiesWorkspacePreferences'
 import { browserOfflineV5Client } from '@/offline-v5/client'
 import { shouldToggleErosFromKeyboard } from '@/lib/dashboardKeyboard'
 import {
@@ -174,6 +175,8 @@ function DashboardLayoutContent({
   const [loading, setLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const utilitiesWorkspace = useUtilitiesWorkspacePreferences(user?.id, user?.account_id)
+  const effectiveSidebarCollapsed = effectiveUtilitiesNavigation(isUtilitiesPath(pathname), sidebarCollapsed, utilitiesWorkspace.preferences)
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [serverVersion, setServerVersion] = useState<string | null>(null)
   const [showChangelog, setShowChangelog] = useState(false)
@@ -330,6 +333,10 @@ function DashboardLayoutContent({
   }, [])
 
   const toggleSidebarCollapsed = () => {
+    if (isUtilitiesPath(pathname)) {
+      utilitiesWorkspace.updatePreferences({ navigationCollapsed: !effectiveSidebarCollapsed })
+      return
+    }
     const next = !sidebarCollapsed
     setSidebarCollapsed(next)
     localStorage.setItem('sidebar_collapsed', String(next))
@@ -670,8 +677,8 @@ function DashboardLayoutContent({
   }, [mobileAppMode, mobileDefaultHref, pathname, pwaReady, router, user])
 
   // When mobile overlay is open, always show expanded (not collapsed)
-  const isCollapsed = sidebarCollapsed && !sidebarOpen
-  const sidebarHeader = dashboardSidebarHeaderState(sidebarCollapsed, sidebarOpen)
+  const isCollapsed = effectiveSidebarCollapsed && !sidebarOpen
+  const sidebarHeader = dashboardSidebarHeaderState(effectiveSidebarCollapsed, sidebarOpen)
 
   if (loading || !pwaReady || (mobileAppMode && pathname === '/dashboard' && Boolean(mobileDefaultHref))) {
     return (
@@ -734,6 +741,7 @@ function DashboardLayoutContent({
   }
 
   return (
+    <UtilitiesWorkspacePreferencesProvider value={utilitiesWorkspace}>
     <DashboardFocusProvider scopeKey={JSON.stringify([user.id, user.account_id, pathname])} enabled={!mobileAppMode}>
     <LeadPolicyProvider value={leadPolicy}>
     <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
@@ -786,6 +794,7 @@ function DashboardLayoutContent({
               <Link
                 key={item.href}
                 href={item.href}
+                aria-label={item.label}
                 onClick={() => setSidebarOpen(false)}
                 className={`
                   group/nav relative flex min-h-11 lg:min-h-0 items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all duration-200 text-[13px]
@@ -977,7 +986,7 @@ function DashboardLayoutContent({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname === '/dashboard/utilities/json' || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || isUtilitiesPath(pathname) || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {mobileNoModules ? (
             <MobileUnavailableSurface returnHref="" noModules />
@@ -1098,5 +1107,6 @@ function DashboardLayoutContent({
     </NotificationProvider>
     </LeadPolicyProvider>
     </DashboardFocusProvider>
+    </UtilitiesWorkspacePreferencesProvider>
   )
 }
