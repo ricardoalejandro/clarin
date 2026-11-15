@@ -7,7 +7,7 @@ self.onmessage = async (event: MessageEvent<DocumentWorkerRequest>) => {
   let response: DocumentWorkerResponse
   switch (message.kind) {
     case 'transform': response = { kind: 'transform', result: processJson(message) }; break
-    case 'read-file': response = { kind: 'read-file', result: await readDocumentFile(message.file) }; break
+    case 'read-file': response = { kind: 'read-file', result: await readDocumentFile(message.file, message.encoding) }; break
     case 'measure': response = { kind: 'measure', metrics: measureDocument(message.source) }; break
   }
   self.postMessage(response)

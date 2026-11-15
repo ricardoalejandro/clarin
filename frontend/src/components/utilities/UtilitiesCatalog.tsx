@@ -21,7 +21,7 @@ function UtilityPreview({ id }: { id: Utility['id'] }) {
 }
 
 export function UtilityPrivacyNote() {
-  return <p className="flex items-start gap-2 text-xs leading-5 text-slate-600"><ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-emerald-700" />Tus datos se procesan en este navegador. El contenido se descarta al salir de la herramienta.</p>
+  return <p className="flex items-start gap-2 text-xs leading-5 text-slate-600"><ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-emerald-700" />Las operaciones se procesan en este navegador. Los documentos de tu biblioteca se guardan de forma privada en Clarin; las contraseñas permanecen temporales.</p>
 }
 
 export function UtilitiesCatalog() {

@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation'
 import { utilityById, utilities } from '@/components/utilities/catalog'
-import { UtilityWorkspace } from '@/components/utilities/UtilityWorkspace'
+import { UtilitiesLibrary } from '@/components/utilities/library/UtilitiesLibrary'
 
 export function generateStaticParams() {
   return utilities.map(utility => ({ tool: utility.id }))
@@ -9,5 +9,5 @@ export function generateStaticParams() {
 export default async function UtilityPage({ params }: { params: Promise<{ tool: string }> }) {
   const utility = utilityById((await params).tool)
   if (!utility) notFound()
-  return <UtilityWorkspace key={utility.id} utility={utility} />
+  return <UtilitiesLibrary initialTool={utility.id} />
 }

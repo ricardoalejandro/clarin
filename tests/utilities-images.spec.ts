@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
 const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
@@ -12,9 +13,11 @@ async function mockDashboard(page: Page) {
     localStorage.setItem('clarin:last_activity_at', now)
   })
   await page.context().addCookies([{ name: 'refresh-token', value: 'playwright-refresh-session', url: baseURL, httpOnly: true, sameSite: 'Lax' }])
-  await page.route('**/api/**', route => {
+  const library = createUtilitiesLibraryMock()
+  await page.route('**/api/**', async route => {
     const pathname = new URL(route.request().url()).pathname
     if (pathname === '/api/utilities/access') return route.fulfill({ status: 204 })
+    if (await library.handle(route)) return
     if (pathname === '/api/me') return route.fulfill({ json: {
       success: true,
       user: { id: 'utility-user', username: 'utility-user', display_name: 'Utilitarios QA', role: 'user', account_id: 'test-account', account_name: 'Cuenta QA', is_admin: false, is_super_admin: false, subscription_active: true, permissions: ['utilities'] },
@@ -58,7 +61,7 @@ test.describe('Utilitarios de imagen', () => {
     await page.getByRole('button', { name: 'Leer QR' }).click()
     await expect(page.getByRole('textbox', { name: 'Contenido del QR' })).toHaveValue(privateContent)
     await expect(page.getByRole('link', { name: privateContent })).toHaveCount(0)
-    expect(transferred.some(payload => payload.includes(privateContent) || payload.includes(encodeURIComponent(privateContent)))).toBe(false)
+    expect(transferred.filter(payload => !payload.includes('/api/utilities/')).some(payload => payload.includes(privateContent) || payload.includes(encodeURIComponent(privateContent)))).toBe(false)
 
     await page.getByRole('button', { name: 'Quitar imagen' }).click()
     await expect(page.getByRole('textbox', { name: 'Contenido del QR' })).toHaveCount(0)

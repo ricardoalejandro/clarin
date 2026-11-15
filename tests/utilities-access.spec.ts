@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, truncate, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { expect, test, type FileChooser, type Locator, type Page } from '@playwright/test'
+import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
 test.use({ channel: process.env.PLAYWRIGHT_CHANNEL })
@@ -14,6 +15,7 @@ async function mockAccount(page: Page, options: { permission: boolean; idleMs?: 
   })
   let idleAt = Date.now() + (options.idleMs ?? 300_000)
   const interactions: unknown[] = []
+  const library = createUtilitiesLibraryMock()
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/utilities/access') {
@@ -21,6 +23,7 @@ async function mockAccount(page: Page, options: { permission: boolean; idleMs?: 
       else await route.fulfill({ status: 403, json: { success: false } })
       return
     }
+    if (await library.handle(route)) return
     if (path === '/api/auth/activity' && route.request().postData()) {
       const activity = route.request().postDataJSON()
       interactions.push(activity)
@@ -63,7 +66,7 @@ async function downloadDocument(page: Page) {
   return { filename: download.suggestedFilename(), source: await readFile(path, 'utf8') }
 }
 
-test('catalog and document workspace adapt to measured width and keep editable drafts local', async ({ page }, testInfo) => {
+test('library and document workspace adapt to measured width and preserve saved drafts', async ({ page }, testInfo) => {
   await mockAccount(page, { permission: true })
   const marker = 'clarin-tool-data-only-7029'
   const outgoing: string[] = []
@@ -77,9 +80,8 @@ test('catalog and document workspace adapt to measured width and keep editable d
   })
   await page.setViewportSize({ width: 320, height: 740 })
   await page.goto(`${baseURL}/dashboard/utilities`)
-  const catalog = page.getByRole('region', { name: 'Utilitarios' })
-  await expect(catalog.getByRole('link')).toHaveCount(4)
-  await catalog.getByRole('link', { name: /Editor JSON/ }).click()
+  await page.getByRole('button', { name: 'Nuevo documento', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'JSON/XML', exact: true }).click()
   const editorA = page.getByTestId('document-editor-a')
   const editorB = page.getByTestId('document-editor-b')
   const linesA = editorA.locator('.view-lines')
@@ -90,6 +92,7 @@ test('catalog and document workspace adapt to measured width and keep editable d
   await typeDocument(page, editorA, raw)
   await expect(linesA).toContainText(marker)
   await page.getByRole('button', { name: 'Formatear', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Formatear', exact: true })).toBeEnabled({ timeout: 60_000 })
   await expect(linesA).toContainText(new RegExp(`9007199254740993[\\s\\S]+${marker}`))
   await expect(editorA.locator('.view-line')).toHaveCount(4)
   await editorA.getByRole('textbox').focus()
@@ -110,21 +113,21 @@ test('catalog and document workspace adapt to measured width and keep editable d
   expect((await editorB.boundingBox())!.x).toBeGreaterThan((await editorA.boundingBox())!.x)
   await typeDocument(page, editorB, `{"marker":"${secondMarker}"}`)
   await expect(editorB.locator('.view-lines')).toContainText(secondMarker)
-  await testInfo.attach('editor-desktop-dark.png', { body: await page.screenshot(), contentType: 'image/png' })
+  await testInfo.attach('editor-desktop-dark.png', { body: await page.screenshot({ path: testInfo.outputPath('editor-desktop-dark.png') }), contentType: 'image/png' })
   await page.getByRole('button', { name: 'Abrir Eros' }).click()
   await expect(linesA).toContainText(marker)
   await expectNoHorizontalOverflow(page)
   await page.getByLabel('Asistente Eros').getByTitle('Cerrar', { exact: true }).click()
 
   await page.setViewportSize({ width: 320, height: 740 })
-  await page.getByRole('button', { name: 'Ver documento A' }).click()
+  await page.getByRole('button', { name: 'Ver documento A', exact: true }).click()
   await expect(linesA).toContainText(marker)
   await expect(editorB).toBeHidden()
-  await page.getByRole('button', { name: 'Ver documento B' }).click()
+  await page.getByRole('button', { name: 'Ver documento B', exact: true }).click()
   await expect(editorB.locator('.view-lines')).toContainText(secondMarker)
   await expect(editorA).toBeHidden()
   await expectNoHorizontalOverflow(page)
-  await testInfo.attach('editor-narrow-dark.png', { body: await page.screenshot(), contentType: 'image/png' })
+  await testInfo.attach('editor-narrow-dark.png', { body: await page.screenshot({ path: testInfo.outputPath('editor-narrow-dark.png') }), contentType: 'image/png' })
 
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(editorA).toBeVisible()
@@ -149,13 +152,14 @@ test('catalog and document workspace adapt to measured width and keep editable d
   await expect(editorA.locator('.view-line')).toHaveCount(4)
   const leaked = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))
   expect(leaked).not.toContain(marker)
-  expect(outgoing.join('\n')).not.toContain(marker)
+  expect(outgoing.filter(value => !value.includes('/api/utilities/')).join('\n')).not.toContain(marker)
 
-  await page.getByRole('main').getByRole('link', { name: 'Utilitarios', exact: true }).click()
-  await expect(catalog.getByRole('link', { name: /Editor JSON/ })).toBeFocused()
-  await catalog.getByRole('link', { name: /Editor JSON/ }).press('Enter')
+  await page.getByRole('button', { name: /Cerrar pestaña/ }).click()
+  await page.setViewportSize({ width: 320, height: 740 })
+  await page.getByRole('button', { name: 'Abrir biblioteca' }).click()
+  await page.getByRole('complementary', { name: 'Mis documentos' }).getByRole('button', { name: /Sin título/ }).click()
   await expect(editorA).toBeVisible({ timeout: 20_000 })
-  await expect(linesA).not.toContainText(marker)
+  await expect(linesA).toContainText(marker)
   expect(editorErrors).toEqual([])
 })
 
@@ -205,7 +209,7 @@ test('Monaco applies the chosen theme and Ctrl+wheel changes font only over the 
   const initialFont = await fontSize()
   const initialViewport = await viewport()
 
-  const back = page.getByRole('main').getByRole('link', { name: 'Utilitarios', exact: true })
+  const back = page.getByRole('button', { name: 'JSON/XML', exact: true })
   await back.focus()
   expect(await wheel(lines, true)).toBe(false)
   expect(await fontSize()).toBe(initialFont)
@@ -430,11 +434,11 @@ test('Monaco compares JSON and XML without overwriting either document', async (
   await expect(editorB.locator('.view-lines')).toContainText('modificado-xml')
 })
 
-test('a local 25 MiB document with a long line remains navigable in bounded chunks', async ({ page }, testInfo) => {
+test('a 30 MiB document with a long line remains navigable in bounded editable chunks', async ({ page }, testInfo) => {
   await mockAccount(page, { permission: true })
   const firstMarker = 'primer-tramo-clarin-qa'
   const secondMarker = 'segundo-tramo-clarin-qa'
-  const size = 25 * 1024 * 1024
+  const size = 30 * 1024 * 1024
   const source = Buffer.alloc(size, 'a')
   source.write(`{"valor":"${firstMarker}`)
   source.write(secondMarker, 24_000)
@@ -469,13 +473,13 @@ test('a local 25 MiB document with a long line remains navigable in bounded chun
       contentType: 'application/json',
       body: Buffer.from(JSON.stringify({ bytes: size, openMs, validateMs: Math.round(performance.now() - validateStarted) })),
     })
-    await truncate(file, size + 1)
+    await truncate(file, 60 * 1024 * 1024 + 1)
     await openDocument(page, file)
-    await expect(page.getByRole('status').filter({ hasText: 'El archivo supera 25 MiB.' })).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'El archivo supera 60 MiB.' })).toBeVisible()
     await expect(page.getByText(firstMarker, { exact: false })).toBeVisible()
     await expectNoHorizontalOverflow(page)
-    expect(outgoing.join('\n')).not.toContain(firstMarker)
-    expect(outgoing.join('\n')).not.toContain(secondMarker)
+    expect(outgoing.filter(value => !value.includes('/api/utilities/')).join('\n')).not.toContain(firstMarker)
+    expect(outgoing.filter(value => !value.includes('/api/utilities/')).join('\n')).not.toContain(secondMarker)
   } finally {
     await rm(file, { force: true })
   }

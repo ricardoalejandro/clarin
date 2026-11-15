@@ -3,7 +3,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { editor, json, KeyCode, KeyMod, languages, Position, Range } from 'monaco-editor'
 import { jsonLiteralCompletions, xmlClosingTagCompletion } from './documentCompletions'
-import { acceptsEditorZoom, documentWrapOptions, tramRange } from './editorWorkspaceState'
+import { acceptsEditorZoom, documentRevealSelection, documentWrapOptions, tramRange } from './editorWorkspaceState'
 
 globalThis.MonacoEnvironment = {
   getWorker(_moduleId, label) {
@@ -90,6 +90,10 @@ interface Props {
   onFocus: () => void
   onPaste: (event: ClipboardEvent, start: number, end: number) => void
   onReady: (view: editor.IStandaloneCodeEditor | null) => void
+  onFind?: () => void
+  reveal?: { offset: number; length: number; nonce: number }
+  initialViewState?: editor.ICodeEditorViewState | null
+  onViewState?: (state: editor.ICodeEditorViewState | null) => void
 }
 
 export function DocumentCodeEditor(props: Props) {
@@ -99,6 +103,10 @@ export function DocumentCodeEditor(props: Props) {
   const viewState = useRef<editor.ICodeEditorViewState | null>(null)
   const preview = useRef<editor.ITextModel | null>(null)
   const previewState = useRef<{ chunk: number; revision: number; view: editor.ICodeEditorViewState | null } | null>(null)
+  const previewRange = useRef<{ chunk: number; start: number; end: number; revision: number } | null>(null)
+  const syncingPreview = useRef(false)
+  const restoredView = useRef(false)
+  const revealedMatch = useRef<number | null>(null)
   const latest = useRef(props)
   useLayoutEffect(() => { latest.current = props }, [props])
 
@@ -108,6 +116,12 @@ export function DocumentCodeEditor(props: Props) {
     const view = editor.create(element, { ...baseOptions, model: null, ariaLabel: label })
     instance.current = view
     const focus = view.onDidFocusEditorText(() => latest.current.onFocus())
+    const findAction = view.addAction({ id: 'clarin.document.findAll', label: 'Buscar en todo el documento', keybindings: [KeyMod.CtrlCmd | KeyCode.KeyF], run: () => latest.current.onFind?.() })
+    const undoAction = view.addAction({ id: 'clarin.document.undo', label: 'Deshacer en el documento', keybindings: [KeyMod.CtrlCmd | KeyCode.KeyZ], run: () => latest.current.chunk !== null ? model.undo() : view.trigger('clarin', 'undo', null) })
+    const redoAction = view.addAction({ id: 'clarin.document.redo', label: 'Rehacer en el documento', keybindings: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ, KeyMod.CtrlCmd | KeyCode.KeyY], run: () => latest.current.chunk !== null ? model.redo() : view.trigger('clarin', 'redo', null) })
+    const remember = () => latest.current.onViewState?.(view.saveViewState())
+    const scroll = view.onDidScrollChange(remember)
+    const cursor = view.onDidChangeCursorSelection(remember)
     const wrapAction = view.addAction({
       id: 'clarin.document.toggleWrap',
       label: 'Ajustar líneas',
@@ -118,22 +132,33 @@ export function DocumentCodeEditor(props: Props) {
     })
     const paste = (event: ClipboardEvent) => {
       const selection = view.getSelection()
-      if (!selection || view.getModel() !== model) return
-      latest.current.onPaste(event, model.getOffsetAt(selection.getStartPosition()), model.getOffsetAt(selection.getEndPosition()))
+      if (!selection) return
+      const activeModel = view.getModel()
+      if (!activeModel) return
+      const origin = activeModel === model ? 0 : previewRange.current?.start
+      if (origin === undefined) return
+      latest.current.onPaste(event, origin + activeModel.getOffsetAt(selection.getStartPosition()), origin + activeModel.getOffsetAt(selection.getEndPosition()))
     }
     const unbindWheel = bindWheel(element, () => view.hasTextFocus(), delta => latest.current.onZoom(delta))
     element.addEventListener('paste', paste, true)
     latest.current.onReady(view)
     return () => {
+      remember()
       instance.current = null
       latest.current.onReady(null)
       element.removeEventListener('paste', paste, true)
       unbindWheel()
       focus.dispose()
+      findAction.dispose()
+      undoAction.dispose()
+      redoAction.dispose()
+      scroll.dispose()
+      cursor.dispose()
       wrapAction.dispose()
       view.dispose()
       preview.current?.dispose()
       preview.current = null
+      previewRange.current = null
     }
   }, [label, model])
 
@@ -150,20 +175,50 @@ export function DocumentCodeEditor(props: Props) {
         return
       }
       const length = model.getValueLength()
+      if (previewRange.current?.chunk === chunk && previewRange.current.revision === revision && view.getModel() === preview.current && (!props.reveal || revealedMatch.current === props.reveal.nonce)) return
       const codeAt = (offset: number) => model.getValueInRange(Range.fromPositions(model.getPositionAt(offset), model.getPositionAt(offset + 1))).charCodeAt(0)
-      const { start, end } = tramRange(length, chunk, codeAt)
+      const { start, end: defaultEnd } = tramRange(length, chunk, codeAt)
+      const target = props.reveal
+      const end = target && target.nonce !== revealedMatch.current && target.offset >= start && target.offset < defaultEnd
+        ? Math.min(length, Math.max(defaultEnd, target.offset + target.length)) : defaultEnd
       const first = model.getPositionAt(start)
       const last = model.getPositionAt(end)
       const text = model.getValueInRange(Range.fromPositions(first, last))
-      preview.current ??= editor.createModel('', 'plaintext')
+      const previousView = previewRange.current?.chunk === chunk && view.getModel() === preview.current ? view.saveViewState() : null
+      if (!preview.current) {
+        preview.current = editor.createModel('', 'plaintext')
+        preview.current.setEOL(editor.EndOfLineSequence.LF)
+        preview.current.onDidChangeContent(change => {
+          const range = previewRange.current
+          if (syncingPreview.current || !range || range.revision !== model.getVersionId()) return
+          const edits = change.changes.map(edit => ({
+            range: Range.fromPositions(model.getPositionAt(range.start + edit.rangeOffset), model.getPositionAt(range.start + edit.rangeOffset + edit.rangeLength)), text: edit.text,
+          }))
+          const beforeLength = model.getValueLength()
+          const delta = change.changes.reduce((sum, edit) => sum + edit.text.length - edit.rangeLength, 0)
+          model.pushEditOperations(null, edits, () => null)
+          const expected = model.getValueInRange(Range.fromPositions(model.getPositionAt(range.start), model.getPositionAt(range.end + delta)))
+          if (model.getValueLength() !== beforeLength + delta || preview.current?.getValue() !== expected) {
+            // A size/Unicode guard may reject the source mutation. Restore only
+            // this bounded fragment, keeping the authoritative model intact.
+            syncingPreview.current = true
+            try { preview.current?.setValue(model.getValueInRange(Range.fromPositions(model.getPositionAt(range.start), model.getPositionAt(range.end)))) } finally { syncingPreview.current = false }
+          } else range.end += delta
+          range.revision = model.getVersionId()
+        })
+      }
       if (view.getModel() !== preview.current) view.setModel(preview.current)
       if (preview.current.getValue() !== text) {
-        preview.current.setValue(text)
-        view.setScrollPosition({ scrollTop: 0, scrollLeft: 0 })
+        syncingPreview.current = true
+        try { preview.current.setValue(text) } finally { syncingPreview.current = false }
+        if (previousView) view.restoreViewState(previousView)
+        else view.setScrollPosition({ scrollTop: 0, scrollLeft: 0 })
       }
+      previewRange.current = { chunk, start, end, revision }
       view.layout()
       const saved = previewState.current
       if (saved?.chunk === chunk && saved.revision === revision && saved.view) view.restoreViewState(saved.view)
+      else if (!restoredView.current && latest.current.initialViewState) { view.restoreViewState(latest.current.initialViewState); restoredView.current = true }
       previewState.current = null
     } else if (view.getModel() !== model) {
       view.setModel(model)
@@ -172,14 +227,15 @@ export function DocumentCodeEditor(props: Props) {
       previewState.current = null
       view.layout()
       if (viewState.current) view.restoreViewState(viewState.current)
+      else if (!restoredView.current && latest.current.initialViewState) { view.restoreViewState(latest.current.initialViewState); restoredView.current = true }
     }
-  }, [model, visible, chunk, revision])
+  }, [model, visible, chunk, revision, props.reveal])
 
   useLayoutEffect(() => {
     instance.current?.updateOptions({
       ...fontOptions(font),
-      readOnly: chunk !== null,
-      domReadOnly: chunk !== null,
+      readOnly: false,
+      domReadOnly: false,
       ariaLabel: label,
       folding: !reduced,
       bracketPairColorization: { enabled: !reduced },
@@ -194,6 +250,22 @@ export function DocumentCodeEditor(props: Props) {
       placeholder: 'Pega texto o abre un archivo local.',
     })
   }, [font, label, reduced, chunk, wrap])
+
+  useLayoutEffect(() => {
+    const target = props.reveal
+    const view = instance.current
+    const activeModel = view?.getModel()
+    if (!target || !view || !activeModel) return
+    const origin = activeModel === model ? 0 : previewRange.current?.start ?? 0
+    const selection = documentRevealSelection(revealedMatch.current, target, origin, activeModel.getValueLength())
+    if (!selection) return
+    revealedMatch.current = selection.nonce
+    const from = activeModel.getPositionAt(selection.start)
+    const until = activeModel.getPositionAt(selection.end)
+    view.setSelection(Range.fromPositions(from, until))
+    view.revealPositionInCenter(from)
+    view.focus()
+  }, [props.reveal, model, chunk, revision])
 
   return <div id={id} ref={host} data-testid={id} className="min-h-0 min-w-0 flex-1 overflow-hidden" />
 }

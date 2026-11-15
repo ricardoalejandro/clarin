@@ -363,6 +363,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, source *JWTClaims, targ
 		return "", "", nil, AuthSessionSnapshot{}, err
 	}
 	if credential.UserID != userID.String() || credential.AccountID != source.AccountID.String() || credential.SessionID != source.SessionID {
+		recordAuthSessionDiagnostic(source.SessionID, userID, source.AccountID, nil, "scope_changed")
 		return "", "", nil, AuthSessionSnapshot{}, ErrAuthSessionScopeChanged
 	}
 	previous, _, err := s.loadSession(ctx, source.SessionID, userID, source.AccountID)
@@ -453,6 +454,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, source *JWTClaims, targ
 	if err := s.repos.UserAccount.MarkSelected(ctx, userID, targetAccountID); err != nil {
 		log.Printf("[Auth] failed to remember selected account %s: %v", targetAccountID, err)
 	}
+	recordAuthSessionDiagnostic(source.SessionID, userID, source.AccountID, previous, "account_switch")
 	return tokenString, refreshToken, user, snapshot, nil
 }
 
@@ -535,10 +537,12 @@ func (s *AuthService) ValidateTokenWithSession(ctx context.Context, tokenString,
 	}
 	invalidated, err := s.checkUserSessionInvalidated(ctx, claims)
 	if err != nil {
+		recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, authSessionDiagnosticReason(err))
 		return nil, AuthSessionSnapshot{}, err
 	}
 	if invalidated {
-		return nil, AuthSessionSnapshot{}, fmt.Errorf("%w: session invalidated", ErrAuthSessionExpired)
+		recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, "revoked")
+		return nil, AuthSessionSnapshot{}, errAuthSessionRevoked
 	}
 	return claims, snapshot, nil
 }
@@ -592,10 +596,12 @@ func (s *AuthService) ValidateRefreshTokenReadOnly(ctx context.Context, refreshT
 		},
 	})
 	if err != nil {
+		recordAuthSessionDiagnostic(credential.SessionID, userID, accountID, session, authSessionDiagnosticReason(err))
 		return nil, err
 	}
 	if invalidated {
-		return nil, fmt.Errorf("%w: session invalidated", ErrAuthSessionExpired)
+		recordAuthSessionDiagnostic(credential.SessionID, userID, accountID, session, "revoked")
+		return nil, errAuthSessionRevoked
 	}
 	return &AuthSessionIdentity{
 		UserID: userID, AccountID: accountID, SessionID: credential.SessionID,
@@ -610,10 +616,13 @@ func (s *AuthService) GetUser(ctx context.Context, userID uuid.UUID) (*domain.Us
 // Logout revokes the current JWT and deletes the refresh token from Redis
 func (s *AuthService) Logout(ctx context.Context, claims *JWTClaims, refreshToken string) {
 	if s.cache == nil {
+		if claims != nil {
+			recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, "unavailable")
+		}
 		return
 	}
 	// Blacklist the JWT by its jti for its remaining lifetime
-	if claims.ID != "" && claims.ExpiresAt != nil {
+	if claims != nil && claims.ID != "" && claims.ExpiresAt != nil {
 		remaining := time.Until(claims.ExpiresAt.Time)
 		if remaining > 0 {
 			_ = s.cache.Set(ctx, jwtBlacklistKeyPrefix+claims.ID, []byte("1"), remaining)
@@ -624,7 +633,11 @@ func (s *AuthService) Logout(ctx context.Context, claims *JWTClaims, refreshToke
 		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+refreshToken)
 	}
 	if claims != nil && claims.SessionID != "" {
-		_ = s.cache.Del(ctx, sessionKeyPrefix+claims.SessionID)
+		if err := s.cache.Del(ctx, sessionKeyPrefix+claims.SessionID); err != nil {
+			recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, "unavailable")
+		} else {
+			recordAuthSessionDiagnostic(claims.SessionID, claims.UserID, claims.AccountID, nil, "logout")
+		}
 	}
 }
 
@@ -636,7 +649,13 @@ func (s *AuthService) LogoutByRefreshToken(ctx context.Context, refreshToken str
 	if data != nil {
 		var rt refreshTokenData
 		if err := json.Unmarshal(data, &rt); err == nil && rt.SessionID != "" {
-			_ = s.cache.Del(ctx, sessionKeyPrefix+rt.SessionID)
+			userID, _ := uuid.Parse(rt.UserID)
+			accountID, _ := uuid.Parse(rt.AccountID)
+			if err := s.cache.Del(ctx, sessionKeyPrefix+rt.SessionID); err != nil {
+				recordAuthSessionDiagnostic(rt.SessionID, userID, accountID, nil, "unavailable")
+			} else {
+				recordAuthSessionDiagnostic(rt.SessionID, userID, accountID, nil, "logout")
+			}
 		}
 	}
 	_ = s.cache.Del(ctx, refreshTokenKeyPrefix+refreshToken)
@@ -818,7 +837,7 @@ func (s *AuthService) validateSessionInvalidationGeneration(ctx context.Context,
 	// A missing marker accepts legacy sessions and sessions whose generation
 	// marker has outlived every older session. A present marker must match.
 	if marker != nil && session.InvalidationMarker != string(marker) {
-		return fmt.Errorf("%w: session invalidated", ErrAuthSessionExpired)
+		return errAuthSessionRevoked
 	}
 	return nil
 }

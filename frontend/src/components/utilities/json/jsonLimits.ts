@@ -1,5 +1,6 @@
-export const JSON_INPUT_LIMIT = 25 * 1024 * 1024
-export const JSON_OUTPUT_LIMIT = 50 * 1024 * 1024
+export const DOCUMENT_RECOMMENDED_LIMIT = 30 * 1024 * 1024
+export const JSON_INPUT_LIMIT = 60 * 1024 * 1024
+export const JSON_OUTPUT_LIMIT = JSON_INPUT_LIMIT
 export const JSON_REPAIR_LIMIT = 2 * 1024 * 1024
 export const DOCUMENT_DEPTH_LIMIT = 160
 

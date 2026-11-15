@@ -4107,6 +4107,9 @@ func Migrate(db *pgxpool.Pool) error {
 	if err := migrateProgramFolderIntegrity(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateUtilities(ctx, db); err != nil {
+		return err
+	}
 	// Storage reference guards depend on all business modules, including Work
 	// and whiteboards; install them only after those startup migrations.
 	for _, migration := range storagePrivateMediaMigrations() {

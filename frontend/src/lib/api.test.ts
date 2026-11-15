@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  api,
   apiGet,
   apiPost,
   apiBlob,
@@ -8,6 +9,8 @@ import {
   clearAuthState,
   continueOnlineSession,
   getOnlineSessionNotice,
+  getOnlineSessionTiming,
+  subscribeOnlineSessionNotice,
   initIdleTimeout,
   isAuthIdleExpired,
   getLoginNoticeForLogoutReason,
@@ -350,6 +353,48 @@ describe('auth session evidence', () => {
 })
 
 describe('account session policy', () => {
+  it('notifies diagnostic readers of the canonical deadline without extending it for utility autosave', async () => {
+    clearAuthState()
+    completeAuthIdentityChange()
+    const listener = vi.fn()
+    const unsubscribe = subscribeOnlineSessionNotice(listener)
+    const now = Date.now()
+    const snapshot = session(now, now + 180 * 60_000)
+    snapshot.idle_timeout_minutes = 180
+    markAuthSessionDetected(snapshot)
+    expect(listener).toHaveBeenCalled()
+    const timing = getOnlineSessionTiming()
+    expect(timing?.session.idle_timeout_minutes).toBe(180)
+    expect(timing?.deadlineAt).toBe(now + 180 * 60_000)
+    if (timing) timing.session.idle_timeout_minutes = 5
+    expect(getOnlineSessionTiming()?.session.idle_timeout_minutes).toBe(180)
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ success: true })))
+    expect((await api('/api/utilities/documents/one/changes', { method: 'POST', body: '{}', authMode: 'background' })).success).toBe(true)
+    expect((await apiBlob('/api/utilities/documents/one/content/panel-a', { authMode: 'background' })).success).toBe(true)
+    expect(getOnlineSessionTiming()?.deadlineAt).toBe(timing?.deadlineAt)
+    clearAuthState()
+    expect(getOnlineSessionTiming()).toBeNull()
+    unsubscribe()
+  })
+
+  it('refreshes background autosave credentials without creating user activity', async () => {
+    clearAuthState()
+    completeAuthIdentityChange()
+    const now = Date.now()
+    const snapshot = session(now, now + 180 * 60_000)
+    snapshot.idle_timeout_minutes = 180
+    markAuthTokenRefreshed(snapshot)
+    const deadline = getOnlineSessionTiming()?.deadlineAt
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'expired JWT' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, session: snapshot })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true })))
+    const result = await api('/api/utilities/documents/one/changes', { method: 'POST', body: '{}', authMode: 'background' })
+    expect(result, JSON.stringify({ result, calls: fetchMock.mock.calls.map(([url]) => url) })).toMatchObject({ success: true })
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/utilities/documents/one/changes', '/api/auth/refresh', '/api/utilities/documents/one/changes'])
+    expect(getOnlineSessionTiming()?.deadlineAt).toBe(deadline)
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBeNull()
+  })
   function session(now: number, idleAt: number) {
     return {
       scope: 'login-scope-a', account_id: 'account-a', idle_timeout_minutes: 5,

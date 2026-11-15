@@ -18,7 +18,7 @@ const workspaces = {
   criptografia: lazy(() => import('./crypto/CryptoUtility')),
 }
 
-export function UtilityWorkspace({ utility }: { utility: Utility }) {
+export function UtilityWorkspace({ utility, embedded = false }: { utility: Utility; embedded?: boolean }) {
   const heading = useRef<HTMLHeadingElement>(null)
   const [documentGeneration, setDocumentGeneration] = useState(0)
   const Workspace = workspaces[utility.id]
@@ -30,6 +30,10 @@ export function UtilityWorkspace({ utility }: { utility: Utility }) {
     window.addEventListener('pagehide', discardBeforeCaching)
     return () => window.removeEventListener('pagehide', discardBeforeCaching)
   }, [])
+
+  if (embedded) return <section aria-label={utility.title} className={`@container flex min-h-0 min-w-0 flex-1 flex-col ${utility.id === 'json' ? 'overflow-hidden' : 'overflow-y-auto p-3'}`}>
+    <Suspense fallback={<p role="status" className="p-4 text-sm text-slate-600">Abriendo herramienta…</p>}><Workspace /></Suspense>
+  </section>
 
   if (utility.id === 'json') {
     return <section aria-labelledby="utility-title" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">

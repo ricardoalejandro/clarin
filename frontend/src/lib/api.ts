@@ -53,6 +53,11 @@ export function subscribeOnlineSessionNotice(listener: () => void) {
 
 export function getOnlineSessionNotice() { return sessionNotice }
 
+/** Safe diagnostic metadata: never exposes cookies or credentials. */
+export function getOnlineSessionTiming() {
+  return onlineSession && onlineDeadline ? { session: { ...onlineSession }, deadlineAt: onlineDeadline.at } : null
+}
+
 function setSessionNotice(notice: OnlineSessionNotice) {
   if (sessionNotice === notice) return
   sessionNotice = notice
@@ -66,6 +71,7 @@ function setOnlineSession(value: unknown, receivedAt = Date.now(), broadcast = t
   const changed = !onlineSession || next.scope !== onlineSession.scope || next.idle_expires_at !== onlineSession.idle_expires_at
   onlineSession = next
   onlineDeadline = sessionDeadline(next, receivedAt)
+  if (changed) sessionListeners.forEach(listener => listener())
   if (typeof window !== 'undefined') {
     localStorage.removeItem(LAST_ACTIVITY_KEY)
     if (broadcast && changed) localStorage.setItem(SESSION_SYNC_KEY, JSON.stringify({ session: next, receivedAt }))
@@ -117,6 +123,7 @@ export function clearAuthState() {
   localStorage.removeItem(SESSION_SYNC_KEY)
   onlineSession = null
   onlineDeadline = null
+  sessionListeners.forEach(listener => listener())
   clearIdleTimeout()
 }
 
@@ -585,9 +592,11 @@ interface FetchOptions extends RequestInit {
   /**
    * Sends the existing cookie credentials without refreshing them or recording
    * activity. Reserved for background authorization probes such as a
-   * whiteboard collaboration-ticket retry.
+   * whiteboard collaboration-ticket retry. `background` retains normal
+   * credential refresh and session validation but never records activity;
+   * use it for autosave and loading a saved document.
    */
-  authMode?: 'active' | 'passive'
+  authMode?: 'active' | 'passive' | 'background'
 }
 
 export async function api<T>(
@@ -595,7 +604,8 @@ export async function api<T>(
   options: FetchOptions = {}
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   const { skipAuth = false, authMode = 'active', ...fetchOptions } = options
-  const activeAuth = !skipAuth && authMode === 'active'
+  const activeAuth = !skipAuth && authMode !== 'passive'
+  const recordActivity = !skipAuth && authMode === 'active'
   let requestScope = getAuthScope()
   const isCurrent = () => requestIsCurrent(requestScope, fetchOptions.signal)
   if (!isCurrent() || (activeAuth && isAuthIdentityChanging(requestScope))) return cancelledRequest()
@@ -670,13 +680,13 @@ export async function api<T>(
           if (!isCurrent()) return cancelledRequest()
           checkVersionHeader(retryRes)
           if (retryRes.status === 204 || retryRes.headers.get('content-length') === '0') {
-            markAuthActivity()
+            if (recordActivity) markAuthActivity()
             return { success: true, data: undefined as unknown as T, status: retryRes.status }
           }
           const retryData = await retryRes.json().catch(() => undefined) as T & { error?: string } | undefined
           if (!isCurrent()) return cancelledRequest()
           if (retryRes.ok) {
-            markAuthActivity()
+            if (recordActivity) markAuthActivity()
             return { success: true, data: retryData as T, status: retryRes.status }
           }
           if (retryRes.status !== 401) {
@@ -697,7 +707,7 @@ export async function api<T>(
       return { success: false, data: data as T, error: data?.error || `Error ${res.status}`, status: res.status }
     }
 
-    if (activeAuth && !_offlineRuntimeActive) markAuthActivity()
+    if (recordActivity && !_offlineRuntimeActive) markAuthActivity()
     return { success: true, data: data as T, status: res.status }
   } catch (err) {
     if (!isCurrent() || (err instanceof Error && err.name === 'AbortError')) {
@@ -735,7 +745,7 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 		...(body === undefined ? {} : { body: JSON.stringify(body) }),
 	})
 
-export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
+export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit; authMode?: 'active' | 'passive' | 'background' } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
   if (_offlineRuntimeActive) {
     return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
   }
@@ -748,7 +758,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
   try {
     let response = await request()
     if (!isCurrent()) return cancelledRequest()
-    if (response.status === 401 && !options.signal?.aborted) {
+    if (response.status === 401 && !options.signal?.aborted && options.authMode !== 'passive') {
       const refreshOutcome = await tryRefreshTokenOutcome()
       requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
       if (!isCurrent()) return cancelledRequest()
@@ -771,7 +781,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
       if (!isCurrent()) return cancelledRequest()
       return { success: false, error: payload?.error || `No se pudo abrir el archivo (${response.status})`, status: response.status }
     }
-    markAuthActivity()
+    if (!options.authMode || options.authMode === 'active') markAuthActivity()
     const disposition = response.headers.get('content-disposition') || ''
     const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
     const blob = await response.blob()

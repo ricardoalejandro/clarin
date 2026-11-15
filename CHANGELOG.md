@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-11-14
+
+### Build 1 — Biblioteca personal de Utilitarios
+
+- Hojas con pestañas, nombres, carpetas, favoritos y búsqueda por nombre y contenido; cerrar conserva el documento y eliminar programa el borrado físico de sus archivos.
+- Autoguardado con recuperación de conflictos y fallos temporales, protección al salir y actualización entre dispositivos; una referencia a una clave eliminada ya no bloquea los siguientes guardados.
+- JSON/XML admite hasta 60 MiB por panel, con 30 MiB recomendado, búsqueda completa, edición por tramos y codificaciones UTF-8, UTF-16, Windows-1252 e ISO-8859-1.
+- Biblioteca protegida de claves AES, RSA y EC, certificados X.509, PEM/DER, JWK y P12/PFX; generación de CSR, certificados de prueba y firma y verificación de JWT.
+- Duración efectiva de sesión visible y diagnóstico de cierres; el autoguardado y las consultas de fondo conservan la política de inactividad.
+
 ## 2026-11-02
 
 ### Build 2 — Vista amplia en Clarin
