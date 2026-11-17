@@ -2,6 +2,16 @@
 import { expect, it, vi } from 'vitest'
 import { originalDocumentAsset, prepareUtf8XmlDownload, readDocumentFile } from './documentFile'
 import { getXmlDeclaredEncoding, JSON_INPUT_LIMIT, measureDocument, segmentDocumentText } from './jsonLimits'
+import { DOCUMENT_FORMATS } from './documentFormats'
+
+it('opens supported text/code files and unknown text without JSON/XML coercion, rejecting binary nulls', async () => {
+  const source = 'first, Pe\u00f1a\r\nsecond, \u4e2d\u6587 \ud83d\ude00\n'
+  for (const format of DOCUMENT_FORMATS) {
+    expect(await readDocumentFile(new File([source], `sample.${format.extension}`))).toMatchObject({ ok: true, source, syntaxHint: format.id })
+  }
+  expect(await readDocumentFile(new File(['<root/>'], 'literal.unknown'))).toMatchObject({ ok: true, source: '<root/>', syntaxHint: 'plaintext' })
+  expect(await readDocumentFile(new File(['a\u0000b'], 'binary.txt'))).toMatchObject({ ok: false, message: expect.stringContaining('binarios') })
+})
 
 it('checks file size before reading and rejects invalid UTF-8 without replacement characters', async () => {
   const arrayBuffer = vi.fn()

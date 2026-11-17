@@ -182,7 +182,7 @@ it('restores a selected empty second panel and tolerates invalid saved editor pr
   }
   render(<UtilityDocumentProvider value={session}><JsonUtility /></UtilityDocumentProvider>)
   expect(await screen.findByRole('textbox', { name: 'Documento B' })).toBeVisible()
-  expect(screen.getByRole('combobox', { name: 'Formato del documento' })).toHaveValue('strict')
+  expect(screen.getByRole('combobox', { name: 'Formato del documento' })).toHaveTextContent('JSON')
   expect(screen.getByRole('button', { name: 'Restablecer zoom del editor' })).toHaveTextContent('100%')
 })
 
@@ -209,9 +209,31 @@ it('keeps secondary actions in More and limits JSON actions to JSON modes', () =
     expect(editorAction(name)).toBeVisible()
     expect(editorAction(name)).toBeDisabled()
   }
-  fireEvent.change(screen.getByRole('combobox', { name: 'Formato del documento' }), { target: { value: 'xml' } })
+  fireEvent.click(screen.getByRole('combobox', { name: 'Formato del documento' }))
+  fireEvent.click(screen.getByRole('option', { name: /^XML/ }))
   expect(screen.queryByRole('menuitem', { name: 'Reparar' })).not.toBeInTheDocument()
   expect(editorAction('Descargar documento')).toBeVisible()
+})
+
+it('switches text/code modes without changing either draft and disables structural operations with an explanation', () => {
+  render(<JsonUtility />)
+  const a = screen.getByRole('textbox', { name: 'Documento A' })
+  fireEvent.change(a, { target: { value: 'const answer = 42;\n// Pe\u00f1a \ud83d\ude00' } })
+  fireEvent.click(screen.getByRole('combobox', { name: 'Formato del documento' }))
+  fireEvent.click(screen.getByRole('option', { name: /^JavaScript/ }))
+  expect(a).toHaveValue('const answer = 42;\n// Pe\u00f1a \ud83d\ude00')
+  expect(screen.getByRole('button', { name: 'Formatear' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Formatear' })).toHaveAttribute('title', expect.stringContaining('Disponible para JSON'))
+  expect(screen.getByRole('button', { name: 'Validar' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Buscar en todo el documento' })).toBeEnabled()
+  expect(editorAction('Descargar documento')).toBeEnabled()
+  fireEvent.click(editorAction('Mostrar segundo panel'))
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento B' }))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Documento B' }), { target: { value: 'other draft' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Ver documento A' }))
+  expect(screen.getByRole('combobox', { name: 'Formato del documento' })).toHaveTextContent('JS')
+  expect(a).toHaveValue('const answer = 42;\n// Pe\u00f1a \ud83d\ude00')
+  expect(screen.getByLabelText('Abrir archivo local')).not.toHaveAttribute('accept')
 })
 
 it('moves complete groups to More using the editor width without remounting either draft', async () => {

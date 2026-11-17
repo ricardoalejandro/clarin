@@ -175,12 +175,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	if cfg.IsProduction() && len(cfg.CORSOrigins) > 0 {
 		corsOrigins = strings.Join(cfg.CORSOrigins, ",")
 	}
-	app.Use(cors.New(cors.Config{
-		AllowOrigins:     corsOrigins,
-		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS,PATCH",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,Upgrade,Connection,X-Clarin-Service-Proof",
-		AllowCredentials: true,
-	}))
+	app.Use(cors.New(browserCORSConfig(corsOrigins)))
 
 	// Load changelog content from file (copied during deploy)
 	changelogContent := ""

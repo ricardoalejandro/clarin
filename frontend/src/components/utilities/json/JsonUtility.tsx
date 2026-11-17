@@ -16,6 +16,8 @@ import { JSON_INPUT_LIMIT, JSON_REPAIR_LIMIT, measureDocument } from './jsonLimi
 import type { DocumentFileResult, DocumentWorkerRequest, DocumentWorkerResponse, JsonOperation, JsonRequest } from './jsonOperations'
 import { DocumentImportReview } from './DocumentImportReview'
 import { DOCUMENT_ENCODINGS, originalDocumentAsset, prepareUtf8XmlDownload } from './documentFile'
+import { documentExportExtension, documentFormat, isStructuredFormat } from './documentFormats'
+import { DocumentFormatPicker } from './DocumentFormatPicker'
 import { useDocumentSearch } from './useDocumentSearch'
 import type { DocumentMatch } from './documentSearch'
 import type { DocumentFoldingStatus } from './documentFolding'
@@ -150,7 +152,10 @@ export default function JsonUtility() {
   const activeNotice = notices[active]
   const working = busy !== null
   const canRun = Boolean(state.length && !working && !diff)
-  const canTransform = canRun && !(format === 'xml' && signedXml[active])
+  const structured = isStructuredFormat(format)
+  const canValidate = canRun && structured
+  const canTransform = canValidate && !(format === 'xml' && signedXml[active])
+  const unavailableFormat = structured ? undefined : 'Disponible para JSON, JSON con comentarios y XML. Este formato admite edición, búsqueda, comparación y descarga.'
   const selectClass = dark ? `${select} dark-input` : select
 
   function rememberView(panel: Panel, view: editor.ICodeEditorViewState | null) {
@@ -312,7 +317,7 @@ export default function JsonUtility() {
   useLayoutEffect(() => { editor.setTheme(dark ? 'vs-dark' : 'vs') }, [dark])
   useLayoutEffect(registerDocumentCompletions, [])
   useLayoutEffect(() => {
-    for (const panel of panels) documents.syncLanguage(panel, formats[panel], states[panel])
+    for (const panel of panels) documents.syncLanguage(panel, formats[panel], { ...states[panel], plainText: plainText[panel] })
   })
 
   useEffect(() => {
@@ -378,7 +383,7 @@ export default function JsonUtility() {
     const panel = active
     const source = documents.source(panel)
     const revision = states[panel].revision
-    if (!source || task.current) return
+    if (!source || task.current || !isStructuredFormat(format)) return
     if (operation === 'repair' && source.length > JSON_REPAIR_LIMIT) {
       announce(panel, 'Reparar admite documentos de hasta 2 MiB.', true)
       return
@@ -400,7 +405,7 @@ export default function JsonUtility() {
         return
       }
       if (result.text !== undefined && result.metrics && result.text !== source) {
-        const snapshot = { source: result.text, metrics: result.metrics, plainText: result.extension === 'txt' }
+        const snapshot: DocumentSnapshot = { source: result.text, metrics: result.metrics, plainText: result.extension === 'txt', formatHint: result.extension === 'txt' ? 'plaintext' : format }
         if (result.metrics.bytes > JSON_INPUT_LIMIT) {
           setOversized(current => ({ ...current, [panel]: { source: result.text!, extension: result.extension ?? 'txt' } }))
           announce(panel, 'El resultado supera 60 MiB. Se conservó el documento abierto.', true, result.warnings)
@@ -410,7 +415,7 @@ export default function JsonUtility() {
           const preview = repairPreview(source, result.text)
           setProposal(current => ({ ...current, [panel]: { ...snapshot, ...preview, revision } }))
         } else {
-          documents.replace(panel, snapshot)
+          documents.replace(panel, snapshot, format)
         }
       }
       const message = operation === 'smart' && result.text === source
@@ -469,7 +474,11 @@ export default function JsonUtility() {
     setOriginalNames(current => ({ ...current, [panel]: file.name }))
     setPendingEncoding(undefined)
     setPendingImport(undefined)
-    if (result.syntaxHint) setFormats(current => ({ ...current, [panel]: result.syntaxHint! }))
+    if (result.syntaxHint) {
+      setFormats(current => ({ ...current, [panel]: result.syntaxHint! }))
+      setPlainText(current => ({ ...current, [panel]: false }))
+      documents.setFormat(panel, result.syntaxHint)
+    }
     announce(panel, result.converted ? `Archivo abierto como ${result.encoding}. La descarga editada usará UTF-8; el original se conserva.` : 'Archivo local abierto.', false, result.warnings)
   }
 
@@ -508,6 +517,7 @@ export default function JsonUtility() {
 
   function selectFormat(next: DocumentFormat) {
     setFormats(current => ({ ...current, [active]: next }))
+    setPlainText(current => ({ ...current, [active]: false }))
     documents.setFormat(active, next)
     setProposal(current => ({ ...current, [active]: undefined }))
     setOversized(current => ({ ...current, [active]: undefined }))
@@ -566,7 +576,7 @@ export default function JsonUtility() {
   }
 
   function download(source: string, extension: string) {
-    if (extension === 'xml') {
+    if (format === 'xml' && extension !== 'txt') {
       const prepared = prepareUtf8XmlDownload(source, Boolean(signedXml[active]) || source.includes('http://www.w3.org/2000/09/xmldsig#'))
       if (!prepared.ok) {
         announce(active, prepared.message, true)
@@ -574,7 +584,7 @@ export default function JsonUtility() {
       }
       source = prepared.source
     }
-    const type = extension === 'xml' ? 'application/xml' : extension === 'json' ? 'application/json' : 'text/plain'
+    const type = extension === 'txt' ? 'text/plain' : documentFormat(format).mime
     const url = URL.createObjectURL(new Blob([source], { type: `${type};charset=utf-8` }))
     const link = document.createElement('a')
     link.href = url
@@ -617,15 +627,15 @@ export default function JsonUtility() {
     redo: { label: 'Rehacer', icon: Redo2, disabled: !state.redo, run: () => history('redo') },
     open: { label: 'Abrir archivo', icon: FileUp, disabled: working, run: () => { fileTarget.current = active; fileInput.current?.click() } },
     copy: { label: 'Copiar documento', icon: Copy, disabled: !state.length, run: () => { void copy() } },
-    download: { label: 'Descargar documento', icon: ArrowDownToLine, disabled: !state.length, run: () => download(documents.source(active), state.plainText ? 'txt' : format === 'strict' ? 'json' : format) },
-    smart: { label: 'Formato inteligente', title: 'Formato inteligente · Agrupa elementos cortos', icon: Sparkles, disabled: !canRun, run: () => run('smart') },
+    download: { label: 'Descargar documento', icon: ArrowDownToLine, disabled: !state.length, run: () => download(documents.source(active), documentExportExtension(format, originalNames[active], plainText[active])) },
+    smart: { label: 'Formato inteligente', title: unavailableFormat ?? 'Formato inteligente · Agrupa elementos cortos', icon: Sparkles, disabled: !canValidate, run: () => run('smart') },
     minify: { label: 'Compactar', icon: Shrink, disabled: !canTransform, run: () => run('minify') },
     wrap: { label: 'Ajustar líneas', title: state.huge ? 'El ajuste de línea está activo en la vista por tramos' : 'Ajustar líneas (Word wrap · Alt+Z)', icon: WrapText, disabled: state.huge, pressed: state.huge || wrap[active], run: () => toggleWrap(active) },
     panel: { label: split ? `Ocultar panel ${active.toUpperCase()}` : 'Mostrar segundo panel', icon: split ? X : PanelRightOpen, run: () => split ? hide(active) : reveal() },
     compare: { label: 'Comparar diferencias', icon: GitCompare, disabled: working, run: startComparison },
-    repair: { label: 'Reparar', icon: Wrench, disabled: !canRun, run: () => run('repair') },
-    escape: { label: 'Escapar', icon: Quote, disabled: !canRun, run: () => run('escape') },
-    unescape: { label: 'Desescapar', icon: Brackets, disabled: !canRun, run: () => run('unescape') },
+    repair: { label: 'Reparar', icon: Wrench, disabled: !canValidate, run: () => run('repair') },
+    escape: { label: 'Escapar', icon: Quote, disabled: !canValidate, run: () => run('escape') },
+    unescape: { label: 'Desescapar', icon: Brackets, disabled: !canValidate, run: () => run('unescape') },
     clear: { label: 'Limpiar documento', title: 'Limpiar documento · Se puede deshacer', icon: Eraser, disabled: !state.length, run: () => documents.replace(active, { source: '', metrics: measureDocument('') }) },
     original: { label: 'Descargar archivo original', title: `Descargar original · ${originalNames[active] ?? ''}`, icon: ArrowDownToLine, run: () => { void downloadOriginal() } },
     preferences: { label: 'Preferencias del editor', icon: Settings2, run: () => {
@@ -638,7 +648,7 @@ export default function JsonUtility() {
   const toolbar = jsonToolbarLayout(width, finePointer, format, split)
   const menuActions: EditorAction[] = diff ? ['preferences'] : [
     ...toolbar.overflow,
-    ...(format === 'xml' ? [] : ['repair', 'escape', 'unescape'] as const),
+    ...(format === 'strict' || format === 'jsonc' ? ['repair', 'escape', 'unescape'] as const : []),
     ...(originalNames[active] ? ['original'] as const : []),
     'clear', 'preferences',
   ]
@@ -657,13 +667,9 @@ export default function JsonUtility() {
           <Action label="Volver a editar" onClick={closeComparison}><ChevronLeft size={15} aria-hidden /> Volver a editar</Action>
         ) : <>
           <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Operaciones del panel activo">
-            <select aria-label="Formato del documento" className={`${selectClass} shrink-0`} style={{ width: toolbar.syntaxWidth }} value={format} disabled={working} onChange={event => selectFormat(event.target.value as DocumentFormat)}>
-              <option value="strict">JSON</option>
-              <option value="jsonc">JSONC</option>
-              <option value="xml">XML</option>
-            </select>
-            <Action label="Formatear" title={format === 'xml' ? 'Formatear XML' : 'Formatear · Un elemento por línea'} disabled={!canTransform} onClick={() => run('format')} className="json-toolbar-icon text-emerald-700 data-[theme=dark]:text-emerald-300" data-theme={dark ? 'dark' : 'light'}><Braces size={16} aria-hidden /></Action>
-            <Action label="Validar" disabled={!canRun} onClick={() => run('validate')} className="json-toolbar-icon"><Check size={16} aria-hidden /></Action>
+            <DocumentFormatPicker className={`${selectClass} shrink-0`} width={toolbar.syntaxWidth} value={format} disabled={working} onChange={selectFormat} />
+            <Action label="Formatear" title={unavailableFormat ?? (format === 'xml' ? 'Formatear XML' : 'Formatear · Un elemento por línea')} disabled={!canTransform} onClick={() => run('format')} className="json-toolbar-icon text-emerald-700 data-[theme=dark]:text-emerald-300" data-theme={dark ? 'dark' : 'light'}><Braces size={16} aria-hidden /></Action>
+            <Action label="Validar" title={unavailableFormat} disabled={!canValidate} onClick={() => run('validate')} className="json-toolbar-icon"><Check size={16} aria-hidden /></Action>
             <Action label="Buscar en todo el documento" disabled={!state.length} onClick={find} className="json-toolbar-icon"><Search size={16} aria-hidden /></Action>
           </div>
           {toolbar.visible.map(group => <div key={group[0]} className="json-toolbar-group" data-json-promoted role="group" aria-label="Acciones del documento activo">{group.map(toolbarAction)}</div>)}
@@ -681,7 +687,7 @@ export default function JsonUtility() {
             onClick={() => { setMenuAnchor(null); moreButton.current?.focus({ preventScroll: true }); action.run() }}><action.icon size={16} aria-hidden /><span>{action.label}</span>{action.pressed && <Check size={14} aria-label="Activado" className="ml-auto" />}</button>
         })}
       </WorkspaceActionsMenu>}
-      <input ref={fileInput} aria-label="Abrir archivo local" type="file" accept=".json,.jsonc,.xml,.txt,application/json,application/xml,text/xml,text/plain" hidden
+      <input ref={fileInput} aria-label="Abrir archivo local" type="file" hidden
         onChange={event => { openFile(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} />
           <div id="document-preferences" ref={preferences} popover="auto" className={menuClass} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); preferences.current?.hidePopover(); moreButton.current?.focus({ preventScroll: true }) } }}>
             <div className="grid gap-2 p-1">

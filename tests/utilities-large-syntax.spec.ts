@@ -101,7 +101,7 @@ test('XML 20 MiB keeps visible syntax colors and explains light mode in its tab'
     const editor = page.getByTestId('document-editor-a')
     await expect(editor.locator('.view-lines')).toContainText('Catalog', { timeout: 60_000 })
     const openMs = Math.round(performance.now() - started)
-    await expect(page.getByRole('combobox', { name: 'Formato del documento' })).toHaveValue('xml')
+    await expect(page.getByRole('combobox', { name: 'Formato del documento' })).toHaveText('XML')
     const colorStarted = performance.now()
     const visibleColors = await expectColors(editor)
     const colorMs = Math.round(performance.now() - colorStarted)

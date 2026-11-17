@@ -1,5 +1,6 @@
+import { documentFormat, isStructuredFormat, type DocumentFormat } from './documentFormats'
 export type Panel = 'a' | 'b'
-export type DocumentFormat = 'strict' | 'jsonc' | 'xml'
+export type { DocumentFormat } from './documentFormats'
 
 export const DIFF_LIMIT = 5 * 1024 * 1024
 export const DIFF_LINES = 100_000
@@ -56,11 +57,12 @@ export function acceptsEditorZoom(event: Pick<WheelEvent, 'ctrlKey' | 'altKey' |
 
 export interface DocumentSyntaxState { reduced: boolean; huge: boolean; plainText: boolean }
 
-/** Size reduces language services, not syntax colors. Long-line chunks remain plain. */
+/** Structured files retain bounded lexical colors; other large modes and chunks use plain text. */
 export function documentLanguage(format: DocumentFormat, state: DocumentSyntaxState) {
   if (state.plainText || state.huge) return 'plaintext'
-  if (format === 'xml') return 'xml'
-  return state.reduced ? LARGE_JSON_LANGUAGE : 'json'
+  if (state.reduced && (format === 'strict' || format === 'jsonc')) return LARGE_JSON_LANGUAGE
+  if (state.reduced && !isStructuredFormat(format)) return 'plaintext'
+  return documentFormat(format).language
 }
 
 export function repairPreview(original: string, proposal: string) {

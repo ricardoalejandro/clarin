@@ -21,10 +21,12 @@ export async function libraryRequest<T>(path: string, options: RequestInit = {})
 }
 export const jsonRequest = (method: string, value: unknown): RequestInit => ({ method, body: JSON.stringify(value) })
 export const operationId = () => crypto.randomUUID()
-export async function readDocumentSlot(id: string, slot: string, signal?: AbortSignal): Promise<Blob> {
+export async function readDocumentSlot(id: string, slot: string, signal?: AbortSignal): Promise<{ blob: Blob; version: number }> {
   const result = await apiBlob(`/api/utilities/documents/${id}/content/${encodeURIComponent(slot)}`, { signal, authMode: 'background' })
   if (!result.success || !result.blob) throw new UtilityRequestError(result.error || 'No se pudo abrir el archivo guardado.', result.status)
-  return result.blob
+  const version = Number(result.contentVersion)
+  if (!result.contentVersion || !/^\d+$/.test(result.contentVersion) || !Number.isSafeInteger(version) || version < 1) throw new UtilityRequestError('No se pudo verificar la versión del archivo. Reintenta la lectura.', 502)
+  return { blob: result.blob, version }
 }
 
 export interface TextEdit { offset: number; delete_count: number; text: string }

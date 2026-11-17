@@ -745,7 +745,7 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 		...(body === undefined ? {} : { body: JSON.stringify(body) }),
 	})
 
-export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit; authMode?: 'active' | 'passive' | 'background' } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
+export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit; authMode?: 'active' | 'passive' | 'background' } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; contentVersion?: string; error?: string; status?: number }> {
   if (_offlineRuntimeActive) {
     return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
   }
@@ -786,7 +786,8 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
     const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
     const blob = await response.blob()
     if (!isCurrent()) return cancelledRequest()
-    return { success: true, blob, filename, status: response.status }
+    const contentVersion = response.headers.get('X-Content-Version')
+    return { success: true, blob, filename, status: response.status, ...(contentVersion !== null ? { contentVersion } : {}) }
   } catch (error) {
     if (!isCurrent() || (error instanceof Error && error.name === 'AbortError') || options.signal?.aborted) {
       return { success: false, error: 'Solicitud cancelada' }

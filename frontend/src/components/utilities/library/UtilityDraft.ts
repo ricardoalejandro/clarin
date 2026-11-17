@@ -42,6 +42,12 @@ export class UtilityDraft {
   private configRevision = 0
   private savedConfigRevision = 0
   private saving: Promise<boolean> | null = null
+  private mutationTail: Promise<unknown> = Promise.resolve()
+  private mutationCount = 0
+  private deleted = false
+  private writeConflict = false
+  private uncertainMutation?: { operation: (document: UtilityDocument) => Promise<unknown>; deleting: boolean }
+  private replayingMutation: Promise<void> | null = null
   private disposed = false
   private pendingConfig?: PendingConfig
   private baselineConfig: Record<string, unknown>
@@ -94,10 +100,11 @@ export class UtilityDraft {
 
   private value(source: UtilitySlotSource): UtilitySlotValue { return typeof source === 'function' ? source() : source }
   private blob(source: UtilitySlotValue) { return typeof source === 'string' ? new Blob([source], { type: 'text/plain;charset=utf-8' }) : source }
-  private changed() { this.phase = this.configConflicts.size ? 'conflict' : 'dirty'; if (!this.configConflicts.size) this.error = ''; this.notify() }
+  private changed() { this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : 'dirty'; if (!this.writeConflict && !this.configConflicts.size) this.error = ''; this.notify() }
   get dirty() { return this.vaultPending.size > 0 || this.configRevision !== this.savedConfigRevision || [...this.slots.values()].some(slot => slot.saved !== slot.revision) }
   get reconcilingVault() { return this.vaultPending.size > 0 || this.reconciling !== null }
   get loading() { return this.readers.size > 0 }
+  get pendingMutation() { return this.mutationCount > 0 || Boolean(this.uncertainMutation || this.replayingMutation) }
 
   private async read(name: string): Promise<Blob | null> {
     const current = this.slots.get(name)
@@ -105,22 +112,34 @@ export class UtilityDraft {
     if (!this.document.slots.some(slot => slot.slot === name)) return null
     const existing = this.readers.get(name)
     if (existing) return existing
-    const read = readDocumentSlot(this.document.id, name, this.controller.signal).then(async blob => {
+    const read = readDocumentSlot(this.document.id, name, this.controller.signal).then(async ({ blob, version }) => {
       if (this.disposed) return null
       const baseline = blob.type.startsWith('text/') ? await blob.text() : undefined
+      // A GET may observe our own committed PUT before its acknowledgement.
+      // Reconcile that acknowledgement first; ambiguous operations retain their
+      // original identity and let the server decide CAS on the exact replay.
+      if (this.saving) await this.saving
       // An edit made while downloading must win over the old server snapshot.
       if (this.disposed) return null
-      if (!this.slots.has(name)) this.slots.set(name, { source: blob, blob, baseline, revision: 0, saved: 0, version: this.document.slots.find(slot => slot.slot === name)!.version })
+      if (!this.slots.has(name)) this.slots.set(name, { source: blob, blob, baseline, revision: 0, saved: 0, version })
+      else if (version > this.slots.get(name)!.version && !this.pendingSlots.has(name)) this.markExternalConflict('Existe una versión guardada más reciente. Tu borrador sigue abierto; guarda una copia para conservar ambos.')
       return this.slots.has(name) ? this.blob(this.value(this.slots.get(name)!.source)) : blob
-    }).catch(error => { if (!this.disposed) { this.phase = 'error'; this.error = error instanceof Error ? error.message : 'No se pudo abrir el archivo.'; this.notify() } throw error }).finally(() => { this.readers.delete(name); if (!this.disposed) this.notify() })
+    }).catch(error => { if (!this.disposed) { if (!this.writeConflict) { this.phase = 'error'; this.error = error instanceof Error ? error.message : 'No se pudo abrir el archivo.' } this.notify() } throw error }).finally(() => { this.readers.delete(name); if (!this.disposed) this.notify() })
     this.readers.set(name, read)
     this.notify()
     return read
   }
 
   flush(): Promise<boolean> {
-    if (this.disposed) return Promise.resolve(false)
-    if (this.reconciling || this.vaultPending.size) return this.reconcileVaultDeletion().then(success => success ? this.flush() : false)
+    if (this.disposed || this.deleted || this.writeConflict) return Promise.resolve(false)
+    if (this.mutationCount) return this.mutationTail.then(() => this.flush(), () => this.flush())
+    return this.flushUnqueued()
+  }
+
+  private flushUnqueued(): Promise<boolean> {
+    if (this.disposed || this.deleted || this.writeConflict) return Promise.resolve(false)
+    if (this.uncertainMutation || this.replayingMutation) return this.replayUncertainMutation().then(() => this.flushUnqueued(), () => false)
+    if (this.reconciling || this.vaultPending.size) return this.reconcileVaultDeletion().then(success => success ? this.flushUnqueued() : false)
     if (this.saving) return this.saving
     if (this.configConflicts.size) return Promise.resolve(false)
     if (!this.dirty) return Promise.resolve(true)
@@ -128,10 +147,66 @@ export class UtilityDraft {
     return this.saving
   }
 
+  /** Metadata/deletion share the content-save barrier, including edits made in flight. */
+  mutate<T>(operation: (document: UtilityDocument) => Promise<T>, options: { deleting?: boolean } = {}): Promise<T> {
+    this.mutationCount++
+    const previous = this.mutationTail
+    const result = previous.catch(() => undefined).then(async () => {
+      if (!(await this.flushUnqueued())) throw new UtilityRequestError(this.error || 'No se pudo guardar el borrador.', this.phase === 'conflict' ? 409 : undefined)
+      if (this.disposed || this.deleted) throw new UtilityRequestError('El documento ya no está disponible.', 404)
+      try {
+        const value = await operation(this.document)
+        if (options.deleting) this.deleted = true
+        return value
+      } catch (error) {
+        if (error instanceof UtilityRequestError && error.status === 409) this.markExternalConflict(error.message)
+        else if (!definitivelyRejected(error)) {
+          this.uncertainMutation = { operation, deleting: Boolean(options.deleting) }
+          this.phase = 'error'; this.error = error instanceof Error ? error.message : 'No se pudo comprobar el cambio pendiente.'; this.notify()
+        }
+        throw error
+      }
+    }).finally(() => { this.mutationCount--; if (!this.disposed) this.notify() })
+    this.mutationTail = result
+    this.notify()
+    return result
+  }
+
+  /** Resolve a lost metadata ACK before any later content/config version is sent. */
+  private replayUncertainMutation(): Promise<void> {
+    if (this.replayingMutation) return this.replayingMutation
+    const pending = this.uncertainMutation
+    if (!pending) return Promise.resolve()
+    this.replayingMutation = Promise.resolve().then(async () => {
+      if (this.disposed) return
+      try {
+        await pending.operation(this.document)
+        if (this.disposed) return
+        if (pending.deleting) this.deleted = true
+        this.uncertainMutation = undefined
+        this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : this.dirty ? 'dirty' : 'saved'
+        if (this.phase !== 'conflict') this.error = ''
+        this.notify()
+      } catch (error) {
+        if (this.disposed) return
+        if (definitivelyRejected(error)) this.uncertainMutation = undefined
+        if (error instanceof UtilityRequestError && error.status === 409) this.markExternalConflict(error.message)
+        else if (!this.writeConflict) { this.phase = 'error'; this.error = error instanceof Error ? error.message : 'No se pudo comprobar el cambio pendiente.'; this.notify() }
+        throw error
+      }
+    }).finally(() => { this.replayingMutation = null })
+    return this.replayingMutation
+  }
+
+  acceptMetadata(document: UtilityDocument) {
+    if (document.id !== this.document.id || document.version < this.document.version || this.disposed) return
+    this.accept(document)
+  }
+
   private async save() {
     this.phase = 'saving'; this.notify()
     try {
-      saveDraft: while (this.dirty && !this.disposed && !this.vaultPending.size) {
+      saveDraft: while (this.dirty && !this.disposed && !this.vaultPending.size && !this.writeConflict) {
         if (this.configRevision !== this.savedConfigRevision) {
           const pending = this.pendingConfig ??= { revision: this.configRevision, config: { ...this.document.config }, baseVersion: this.document.version, operation: operationId() }
           const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${this.document.id}`, { ...jsonRequest('PATCH', { base_version: pending.baseVersion, operation_id: pending.operation, config: pending.config }), signal: this.controller.signal }).catch(error => {
@@ -183,11 +258,14 @@ export class UtilityDraft {
       }
       if (this.disposed) return false
       if (this.vaultPending.size) return false
+      if (this.writeConflict) { this.phase = 'conflict'; this.notify(); return false }
       this.phase = 'saved'; this.error = ''; this.notify(); return true
     } catch (error) {
       if (this.disposed) return false
+      if (this.writeConflict) { this.phase = 'conflict'; this.notify(); return false }
       if (this.vaultPending.size) { this.phase = 'saving'; this.error = ''; this.notify(); return false }
       this.phase = error instanceof UtilityRequestError && error.status === 409 ? 'conflict' : 'error'
+      this.writeConflict ||= this.phase === 'conflict'
       this.error = error instanceof Error ? error.message : 'No se pudo guardar. Tu trabajo sigue abierto.'
       this.notify(); return false
     }
@@ -220,13 +298,13 @@ export class UtilityDraft {
           if (sameConfig(merged.config, canonical.config)) this.savedConfigRevision = this.configRevision
           for (const id of deleted) { this.vaultPending.delete(id); this.vaultReconciled.add(id) }
           for (const listener of this.stateListeners) listener(merged.config)
-          this.phase = this.configConflicts.size ? 'conflict' : this.dirty ? 'dirty' : 'saved'
-          this.error = this.configConflicts.size ? 'Las preferencias cambiaron también en otra sesión. Tu borrador se conservó; recarga o guarda una copia para resolver el conflicto.' : ''
+          this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : this.dirty ? 'dirty' : 'saved'
+          this.error = this.writeConflict ? this.error : this.configConflicts.size ? 'Las preferencias cambiaron también en otra sesión. Tu borrador se conservó; guarda una copia para resolver el conflicto.' : ''
           this.notify()
         }
-        return !this.disposed && !this.configConflicts.size
+        return !this.disposed && !this.writeConflict && !this.configConflicts.size
       } catch {
-        if (!this.disposed) { this.phase = 'error'; this.error = 'La clave fue eliminada. Falta actualizar la versión del documento; reintenta para guardar tus preferencias.'; this.notify() }
+        if (!this.disposed) { if (!this.writeConflict) { this.phase = 'error'; this.error = 'La clave fue eliminada. Falta actualizar la versión del documento; reintenta para guardar tus preferencias.' } this.notify() }
         return false
       }
     }).finally(() => { this.reconciling = null })
@@ -251,7 +329,7 @@ export class UtilityDraft {
       this.phase = 'error'; this.error = 'No se pudo detener la operación. El documento sigue abierto para reintentar.'; this.notify(); return false
     }
   }
-  markExternalConflict(message: string) { if (!this.disposed) { this.phase = 'conflict'; this.error = message; this.notify() } }
+  markExternalConflict(message: string) { if (!this.disposed) { this.writeConflict = true; this.phase = 'conflict'; this.error = message; this.notify() } }
   reconcileIndexing(document: UtilityDocument) {
     if (this.disposed) return
     this.document = { ...this.document, slots: this.document.slots.map(slot => {
@@ -266,7 +344,7 @@ export class UtilityDraft {
     try {
       for (const callback of this.beforeDeactivate) { try { callback() } catch { /* Resource teardown must continue even when one worker fails. */ } }
     } finally {
-      this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined; this.stateListeners.clear(); this.vaultPending.clear(); this.vaultReconciled.clear()
+      this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined; this.uncertainMutation = undefined; this.stateListeners.clear(); this.vaultPending.clear(); this.vaultReconciled.clear()
     }
   }
 }

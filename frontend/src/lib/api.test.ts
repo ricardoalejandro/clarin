@@ -353,6 +353,12 @@ describe('auth session evidence', () => {
 })
 
 describe('account session policy', () => {
+  it('returns the exact content version with downloaded utility bytes', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('saved', { headers: { 'X-Content-Version': '17', 'Content-Type': 'text/plain' } }))
+    const result = await apiBlob('/api/utilities/documents/one/content/panel-a', { authMode: 'background' })
+    expect(result).toMatchObject({ success: true, contentVersion: '17' })
+    expect(await result.blob!.text()).toBe('saved')
+  })
   it('notifies diagnostic readers of the canonical deadline without extending it for utility autosave', async () => {
     clearAuthState()
     completeAuthIdentityChange()

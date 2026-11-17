@@ -26,6 +26,22 @@ type integrationObjects struct{ *storage.Storage }
 
 type failedUploadObjects struct{ ObjectStorage }
 
+type pausedReadObjects struct {
+	ObjectStorage
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (s pausedReadObjects) GetFileLimited(ctx context.Context, key string, limit int64) ([]byte, error) {
+	close(s.entered)
+	select {
+	case <-s.resume:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return s.ObjectStorage.GetFileLimited(ctx, key, limit)
+}
+
 func (s failedUploadObjects) UploadObject(context.Context, string, []byte, string) (string, error) {
 	return "", errors.New("fixture upload failure")
 }
@@ -139,6 +155,33 @@ func TestUtilitiesPostgresAndMinIOIntegration(t *testing.T) {
 		data, c, e := s.ReadContent(ctx, a, u, doc.ID, "panel-a")
 		if e != nil || string(data) != "a😀listo" || c.Version != revision {
 			t.Fatalf("journal recovery: %q %v", data, e)
+		}
+	})
+	t.Run("content read protects its snapshot and journal from checkpointing", func(t *testing.T) {
+		exec(`UPDATE utility_content_jobs SET available_at=NOW() WHERE account_id=$1 AND document_id=$2`, a, doc.ID)
+		paused := pausedReadObjects{ObjectStorage: s.Objects, entered: make(chan struct{}), resume: make(chan struct{})}
+		reader := *s
+		reader.Objects = paused
+		finished := make(chan error, 1)
+		go func() {
+			data, content, e := reader.ReadContent(ctx, a, u, doc.ID, "panel-a")
+			if e == nil && (string(data) != "a😀listo" || content.Version != revision) {
+				e = fmt.Errorf("incoherent content snapshot: version %d", content.Version)
+			}
+			finished <- e
+		}()
+		select {
+		case <-paused.entered:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		checkpointErr := s.processContentJob(ctx)
+		close(paused.resume)
+		if checkpointErr == nil {
+			t.Fatal("checkpoint must wait for the shared document read lock")
+		}
+		if e := <-finished; e != nil {
+			t.Fatal(e)
 		}
 	})
 	t.Run("checkpoint and content search", func(t *testing.T) {
