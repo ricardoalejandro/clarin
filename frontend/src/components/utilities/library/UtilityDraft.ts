@@ -47,7 +47,7 @@ export class UtilityDraft {
   private deleted = false
   private writeConflict = false
   private uncertainMutation?: { operation: (document: UtilityDocument) => Promise<unknown>; deleting: boolean }
-  private replayingMutation: Promise<void> | null = null
+  private replayingMutation: Promise<unknown> | null = null
   private disposed = false
   private pendingConfig?: PendingConfig
   private baselineConfig: Record<string, unknown>
@@ -100,7 +100,7 @@ export class UtilityDraft {
 
   private value(source: UtilitySlotSource): UtilitySlotValue { return typeof source === 'function' ? source() : source }
   private blob(source: UtilitySlotValue) { return typeof source === 'string' ? new Blob([source], { type: 'text/plain;charset=utf-8' }) : source }
-  private changed() { this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : 'dirty'; if (!this.writeConflict && !this.configConflicts.size) this.error = ''; this.notify() }
+  private changed() { this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : this.uncertainMutation?.deleting ? 'error' : 'dirty'; if (!this.writeConflict && !this.configConflicts.size && !this.uncertainMutation?.deleting) this.error = ''; this.notify() }
   get dirty() { return this.vaultPending.size > 0 || this.configRevision !== this.savedConfigRevision || [...this.slots.values()].some(slot => slot.saved !== slot.revision) }
   get reconcilingVault() { return this.vaultPending.size > 0 || this.reconciling !== null }
   get loading() { return this.readers.size > 0 }
@@ -138,6 +138,9 @@ export class UtilityDraft {
 
   private flushUnqueued(): Promise<boolean> {
     if (this.disposed || this.deleted || this.writeConflict) return Promise.resolve(false)
+    // Autosave may resolve metadata ACKs, but must never resend a destructive
+    // request after its confirmation dialog has been closed.
+    if (this.uncertainMutation?.deleting) return Promise.resolve(false)
     if (this.uncertainMutation || this.replayingMutation) return this.replayUncertainMutation().then(() => this.flushUnqueued(), () => false)
     if (this.reconciling || this.vaultPending.size) return this.reconcileVaultDeletion().then(success => success ? this.flushUnqueued() : false)
     if (this.saving) return this.saving
@@ -152,6 +155,10 @@ export class UtilityDraft {
     this.mutationCount++
     const previous = this.mutationTail
     const result = previous.catch(() => undefined).then(async () => {
+      if (this.uncertainMutation?.deleting) {
+        if (!options.deleting) throw new UtilityRequestError(this.error || 'Confirma la eliminación pendiente o conserva el borrador en una copia.')
+        return await this.replayUncertainMutation() as T
+      }
       if (!(await this.flushUnqueued())) throw new UtilityRequestError(this.error || 'No se pudo guardar el borrador.', this.phase === 'conflict' ? 409 : undefined)
       if (this.disposed || this.deleted) throw new UtilityRequestError('El documento ya no está disponible.', 404)
       try {
@@ -162,7 +169,7 @@ export class UtilityDraft {
         if (error instanceof UtilityRequestError && error.status === 409) this.markExternalConflict(error.message)
         else if (!definitivelyRejected(error)) {
           this.uncertainMutation = { operation, deleting: Boolean(options.deleting) }
-          this.phase = 'error'; this.error = error instanceof Error ? error.message : 'No se pudo comprobar el cambio pendiente.'; this.notify()
+          this.phase = 'error'; this.error = options.deleting ? 'No se pudo confirmar la eliminación. Tu borrador sigue abierto; vuelve a confirmar la eliminación o guarda una copia.' : error instanceof Error ? error.message : 'No se pudo comprobar el cambio pendiente.'; this.notify()
         }
         throw error
       }
@@ -173,20 +180,21 @@ export class UtilityDraft {
   }
 
   /** Resolve a lost metadata ACK before any later content/config version is sent. */
-  private replayUncertainMutation(): Promise<void> {
+  private replayUncertainMutation(): Promise<unknown> {
     if (this.replayingMutation) return this.replayingMutation
     const pending = this.uncertainMutation
     if (!pending) return Promise.resolve()
     this.replayingMutation = Promise.resolve().then(async () => {
       if (this.disposed) return
       try {
-        await pending.operation(this.document)
+        const value = await pending.operation(this.document)
         if (this.disposed) return
         if (pending.deleting) this.deleted = true
         this.uncertainMutation = undefined
         this.phase = this.writeConflict || this.configConflicts.size ? 'conflict' : this.dirty ? 'dirty' : 'saved'
         if (this.phase !== 'conflict') this.error = ''
         this.notify()
+        return value
       } catch (error) {
         if (this.disposed) return
         if (definitivelyRejected(error)) this.uncertainMutation = undefined

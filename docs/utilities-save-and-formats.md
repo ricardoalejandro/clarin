@@ -17,6 +17,8 @@ Los guardados y cambios de metadatos de un documento se serializan. Los reintent
 tras respuestas perdidas conservan la identidad de la operación. El contenido
 descargado utiliza su propia cabecera de versión; en el servidor, una lectura
 mantiene el bloqueo compartido del documento hasta materializar su snapshot y diario.
+Una eliminación sin respuesta no se repite desde el autoguardado: requiere
+volver a confirmar la eliminación o conservar el borrador en una copia.
 
 Un conflicto de documento es distinto de una desconexión o una sesión caducada.
 Un conflicto conserva el borrador y detiene los reintentos con la versión antigua.

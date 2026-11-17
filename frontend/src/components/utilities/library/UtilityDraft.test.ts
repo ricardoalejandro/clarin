@@ -273,6 +273,24 @@ describe('utility autosave session', () => {
     expect(await draft.session.getSlot('panel-a')!.text()).toBe('local text')
   })
 
+  it('never retries an uncertain deletion from autosave, and requires another explicit confirmation', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const outcome = { cleanup_pending: true, workspace: null }
+    const deletion = vi.fn().mockRejectedValueOnce(new UtilityRequestError('Lost acknowledgement', 503)).mockResolvedValueOnce(outcome)
+    await expect(draft.mutate(deletion, { deleting: true })).rejects.toThrow('Lost acknowledgement')
+    draft.session.setSlot('panel-a', 'continued editing after closing the dialog')
+    expect(draft.phase).toBe('error')
+    expect(draft.error).toContain('confirmar la eliminación')
+    expect(await draft.flush()).toBe(false)
+    expect(deletion).toHaveBeenCalledOnce()
+    expect(request).not.toHaveBeenCalled()
+    const replacement = vi.fn()
+    expect(await draft.mutate(replacement, { deleting: true })).toEqual(outcome)
+    expect(deletion).toHaveBeenCalledTimes(2)
+    expect(replacement).not.toHaveBeenCalled()
+    expect(await draft.flush()).toBe(false)
+  })
+
   it('retains conflict feedback after unrelated reads fail or vault reconciliation completes', async () => {
     const document = { ...base(), type: 'criptografia' as const, slots: [{ slot: 'input', version: 1, bytes: 1 }] }
     const draft = new UtilityDraft(document, vi.fn())
