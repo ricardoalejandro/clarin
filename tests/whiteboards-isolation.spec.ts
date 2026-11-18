@@ -2164,7 +2164,7 @@ test('exportación de fuentes · ejecuta el worker local real sin file URLs ni f
     expect(source).toContain('data:font/woff2;base64,')
     const replies = await page.evaluate(() => (window as unknown as { __subsetWorkerReplies: Array<{ url: string; bytes: number }> }).__subsetWorkerReplies)
     expect(replies.length).toBeGreaterThan(0)
-    const expectedURL = new URL('/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js', baseURL).href
+    const expectedURL = new URL('/vendor/whiteboards-editor/0.18.1-clarin.9/subset-worker.js', baseURL).href
     expect(replies.every(reply => reply.url === expectedURL && reply.bytes > 0)).toBe(true)
     expect(workerURLs).toContain(expectedURL)
     expect(workerURLs.some(url => url.startsWith('file:'))).toBe(false)
@@ -2565,6 +2565,7 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
 
   try {
     await openEditor(page)
+    const modifier = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform) ? 'Meta' : 'Control')
     await page.getByTestId('toolbar-text').check({ force: true })
     await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
     const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
@@ -2644,10 +2645,10 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
     })
     await page.keyboard.press('Shift+ArrowLeft')
     await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
-    await page.keyboard.press('Control+b')
+    await page.keyboard.press(`${modifier}+b`)
     await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
     await expect(page.locator('[aria-label="Asistente Eros"]')).toHaveCount(0)
-    await page.keyboard.press('Control+i')
+    await page.keyboard.press(`${modifier}+i`)
     await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
     await expect(page.locator('[aria-label="Asistente Eros"]')).toHaveCount(0)
     await page.keyboard.press('Shift+ArrowLeft')
@@ -2729,9 +2730,15 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
       // Safari iOS computes focus zoom from the focused contenteditable root.
       // Keep that root at 16px while every paragraph retains the real 12px
       // scene typography and equal line boxes; user scaling remains enabled.
+      // Resize the selected object: an inline range now owns only its own typography.
+      await page.keyboard.press(`${modifier}+Enter`)
+      await expect(editable).toBeHidden()
       for (let step = 0; step < 6; step += 1) {
-        await page.keyboard.press('Control+Shift+,')
+        await page.keyboard.press(`${modifier}+Shift+,`)
       }
+      await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === expectedText)?.fontSize).toBe(12)
+      await page.keyboard.press('Enter')
+      await expect(editable).toBeVisible()
       await expect.poll(mobileFontGeometry).toMatchObject({
         value: expectedText,
         inline: '12px',
@@ -2745,7 +2752,7 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
       expect(Math.max(...compactHeights)).toBeLessThan(Math.max(...regularMobileHeights))
     }
 
-    await page.keyboard.press('Control+Enter')
+    await page.keyboard.press(`${modifier}+Enter`)
     await expect(editable).toBeHidden()
     await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === expectedText)?.originalText)
       .toBe(expectedText)
@@ -3026,6 +3033,238 @@ test('texto enriquecido · Ctrl+C conserva el texto seleccionado y no lo reempla
     await context.close()
   }
 })
+
+test('texto enriquecido · color, fuente y tamaño respetan selección, cursor y objeto completo', async ({ browser, browserName }, testInfo) => {
+  test.setTimeout(180_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block', hasTouch: browserName === 'chromium' })
+  const secondContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await harness.install(secondContext, 'Luis QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, new Set())
+  await installWhiteboardHTTP(secondContext, harness, 'Luis QA', requests, blocked, new Set())
+  const page = await context.newPage()
+  const secondPage = await secondContext.newPage()
+  try {
+    await openEditor(page)
+    await openEditor(secondPage)
+    await page.bringToFront()
+    const modifier = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform) ? 'Meta' : 'Control')
+    const documentStart = modifier === 'Meta' ? 'Meta+ArrowUp' : 'Control+Home'
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    const origin = { x: box!.x + box!.width * 0.58, y: box!.y + box!.height * 0.38 }
+    await page.mouse.click(origin.x, origin.y)
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    await expect(editable).toBeVisible()
+    await page.keyboard.insertText('Título\n\nCuerpo')
+    await page.keyboard.press(documentStart)
+    for (let index = 0; index < 6; index++) await page.keyboard.press('Shift+ArrowRight')
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('Título')
+
+    const paragraphStyles = () => editable.evaluate(editor => {
+      const session = editor.getAttribute('data-clarin-color-session')
+      const stylesheet = document.querySelector(`[data-clarin-text-colors="${session}"]`)
+      const colors = new Map<string, string>()
+      const decorations = new Map<string, string>()
+      for (const match of stylesheet?.textContent?.matchAll(/::highlight\(([-\w]+)\)\s*\{([^}]*)\}/gi) ?? []) {
+        const color = match[2].match(/(?:^|;)\s*color\s*:\s*(#[\da-f]{6})\s*(?:;|$)/i)?.[1]
+        if (color) colors.set(match[1], color.toUpperCase())
+        const decoration = match[2].match(/(?:^|;)\s*text-decoration-line\s*:\s*([^;]+)\s*(?:;|$)/i)?.[1].trim()
+        if (decoration) decorations.set(match[1], decoration)
+      }
+      const painted = [...CSS.highlights.entries()].filter(([name]) => name.startsWith(`clarin-text-color-${session}-`))
+        .flatMap(([name, highlight]) => [...highlight].map(range => ({ range: range as Range, color: colors.get(name), decoration: decorations.get(name) ?? 'none' })))
+        .sort((left, right) => left.range.compareBoundaryPoints(Range.START_TO_START, right.range))
+      return [...editor.querySelectorAll('[data-clarin-paragraph-start]')].map(paragraph => ({
+        text: paragraph.textContent,
+        height: paragraph.getBoundingClientRect().height,
+        colors: painted.filter(({ range }) => paragraph.contains(range.startContainer)).map(({ range, color }) => ({ text: range.toString(), color })),
+        decorations: painted.filter(({ range, decoration }) => paragraph.contains(range.startContainer) && decoration !== 'none')
+          .map(({ range, color, decoration }) => ({ text: range.toString(), color, decoration })),
+        spans: [...paragraph.querySelectorAll('span')].map(span => ({
+          text: span.textContent,
+          family: getComputedStyle(span).fontFamily,
+          size: getComputedStyle(span).fontSize,
+        })),
+      }))
+    })
+    if (browserName === 'chromium') await page.getByTestId('color-top-pick-#e03131').tap()
+    else await page.getByTestId('color-top-pick-#e03131').click()
+    await expect.poll(async () => (await paragraphStyles())[0].colors).toEqual([{ text: 'Título', color: '#E03131' }])
+    await expect.poll(async () => (await paragraphStyles())[2].colors.some(run => run.color === '#E03131')).toBe(false)
+    await page.getByTestId('clarin-text-mark-subrayado').click()
+    await expect.poll(async () => (await paragraphStyles())[0].decorations).toEqual([
+      { text: 'Título', color: '#E03131', decoration: 'underline' },
+    ])
+    await page.keyboard.press(`${modifier}+z`)
+    await expect(page.getByTestId('clarin-text-mark-subrayado')).toHaveAttribute('aria-pressed', 'false')
+    await expect.poll(() => editable.evaluate(editor => {
+      const session = editor.getAttribute('data-clarin-color-session')
+      return document.querySelector(`[data-clarin-text-colors="${session}"]`)?.textContent ?? ''
+    })).not.toMatch(/text-decoration-line\s*:\s*(?:underline|line-through)/)
+
+    await page.getByTestId('font-family-show-fonts').click()
+    const fontList = page.locator('.dropdown-menu.fonts')
+    await fontList.locator('button.dropdown-menu-item').filter({ hasText: 'Cascadia' }).click()
+    await expect(fontList).toBeHidden()
+    await page.getByTestId('fontSize-veryLarge').check({ force: true })
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].family).toContain('Cascadia')
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].size).toBe('36px')
+    await expect.poll(async () => (await paragraphStyles())[2].spans[0].size).toBe('20px')
+    const lines = await paragraphStyles()
+    expect(lines[0].height).toBeGreaterThan(lines[2].height)
+    expect(lines[1].height).toBeCloseTo(lines[2].height, 0)
+    await testInfo.attach('pizarra-texto-tamano-mixto-lineas-vacias', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' })
+
+    // Cancelling a font preview restores the committed character style.
+    await page.getByTestId('font-family-show-fonts').click()
+    await fontList.locator('button.dropdown-menu-item').filter({ hasText: 'Nunito' }).hover()
+    await page.keyboard.press('Escape')
+    await expect(fontList).toBeHidden()
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].family).toContain('Cascadia')
+    await page.keyboard.press(`${modifier}+z`)
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].size).toBe('20px')
+    await page.keyboard.press(`${modifier}+Shift+z`)
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].size).toBe('36px')
+
+    // A collapsed selection changes the next insertion, not existing glyphs.
+    await editable.focus()
+    await page.keyboard.press(documentStart)
+    for (let index = 0; index < 6; index++) await page.keyboard.press('ArrowRight')
+    await page.getByTestId('color-top-pick-#1971c2').click()
+    await expect.poll(async () => (await paragraphStyles())[0].colors).toEqual([{ text: 'Título', color: '#E03131' }])
+    await page.keyboard.insertText('!')
+    await expect.poll(async () => (await paragraphStyles())[0].colors).toEqual([
+      { text: 'Título', color: '#E03131' }, { text: '!', color: '#1971C2' },
+    ])
+    const colorSession = await editable.getAttribute('data-clarin-color-session')
+    expect(colorSession).toBeTruthy()
+    await page.keyboard.press(`${modifier}+Enter`)
+    await expect(editable).toBeHidden()
+    await expect(page.locator(`[data-clarin-text-colors="${colorSession}"]`)).toHaveCount(0)
+    await expect.poll(() => page.evaluate(session => [...CSS.highlights.keys()].some(name => name.startsWith(`clarin-text-color-${session}-`)), colorSession)).toBe(false)
+    await expectEditorSaved(page)
+    const partialExport = await exportEditableScene(page)
+    const partial = partialExport.elements.find(element => element.type === 'text' && element.originalText === 'Título!\n\nCuerpo')
+    expect(partial?.customData?.clarinCharacterStyle?.runs).toEqual([
+      { from: 0, to: 6, color: '#E03131', fontFamily: 3, fontScale: 1.8 },
+      { from: 6, to: 7, color: '#1971C2', fontFamily: 3, fontScale: 1.8 },
+    ])
+    expect(partial?.customData ?? {}).not.toHaveProperty('clarinTextFormat')
+    const partialOperation = () => harness.scenePatches.filter(patch => patch.userID === 'Ana QA'
+      && patch.elements.some(element => element.id === partial?.id && element.originalText === 'Título!\n\nCuerpo')).at(-1)?.operationID
+    await expect.poll(partialOperation, { timeout: 30_000 }).toBeTruthy()
+    await expect.poll(() => harness.deliveries.some(delivery => delivery.recipient === 'Luis QA'
+      && delivery.operationID === partialOperation()), { timeout: 30_000 }).toBe(true)
+    await secondPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    await secondPage.bringToFront()
+    const remoteExport = await exportEditableScene(secondPage)
+    expect(remoteExport.elements.find(element => element.id === partial?.id)?.customData?.clarinCharacterStyle)
+      .toEqual(partial?.customData?.clarinCharacterStyle)
+
+    await page.bringToFront()
+    await openEditor(page)
+    await page.mouse.dblclick(origin.x + 30, origin.y + 12)
+    await expect(editable).toBeVisible()
+    await expect.poll(async () => (await paragraphStyles())[0].colors).toEqual([
+      { text: 'Título', color: '#E03131' }, { text: '!', color: '#1971C2' },
+    ])
+    await expect.poll(async () => (await paragraphStyles())[0].spans[0].size).toBe('36px')
+    await page.keyboard.press(`${modifier}+Enter`)
+    await expect(editable).toBeHidden()
+
+    // Selecting the object applies only the changed property to all characters.
+    await page.getByTestId('color-top-pick-#2f9e44').click()
+    await expect.poll(() => harness.elements.find(element => element.id === partial?.id)?.strokeColor).toBe('#2f9e44')
+    await expect.poll(() => harness.elements.find(element => element.id === partial?.id)?.customData?.clarinCharacterStyle?.runs).toEqual([
+      { from: 0, to: 7, fontFamily: 3, fontScale: 1.8 },
+    ])
+    await page.getByTestId('font-family-normal').click()
+    await expect.poll(() => harness.elements.find(element => element.id === partial?.id)?.fontFamily).toBe(6)
+    await page.getByTestId('fontSize-medium').click({ force: true })
+    await expect.poll(() => harness.elements.find(element => element.id === partial?.id)?.customData?.clarinCharacterStyle ?? null).toBeNull()
+    await expect(page.getByTestId('fontSize-medium')).toBeChecked()
+    await expectEditorSaved(page)
+    const wholeExport = await exportEditableScene(page)
+    const whole = wholeExport.elements.find(element => element.id === partial?.id)
+    expect(whole).toMatchObject({ originalText: 'Título!\n\nCuerpo', strokeColor: '#2f9e44', fontFamily: 6, fontSize: 20 })
+    expect(blocked).toEqual([])
+  } finally {
+    await testInfo.attach('pizarra-texto-trafico-local', {
+      body: Buffer.from(JSON.stringify({ requests: [...requests].sort(), blocked }, null, 2)),
+      contentType: 'application/json',
+    })
+    await Promise.allSettled([context.close(), secondContext.close()])
+  }
+})
+
+test('texto táctil · conserva la selección al aplicar color con un toque', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName === 'chromium', 'El escenario completo de Chromium ya verifica el toque real sobre el control de color.')
+  test.setTimeout(60_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, hasTouch: true, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, new Set())
+  const page = await context.newPage()
+  let stage = 'navigation'
+  let entry = 'text-tool-tap'
+  try {
+    await openEditor(page)
+    await page.bringToFront()
+    await page.evaluate(() => {
+      const state = window as typeof window & { __touchReview?: Array<{ type: string; target: string | null }> }
+      state.__touchReview = []
+      document.addEventListener('pointerdown', event => state.__touchReview!.push({ type: event.pointerType, target: (event.target as Element).closest('[data-testid]')?.getAttribute('data-testid') ?? null }))
+    })
+    stage = 'editor-entry'
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    await page.touchscreen.tap(box!.x + box!.width * 0.58, box!.y + box!.height * 0.38)
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    try {
+      await expect(editable).toBeVisible({ timeout: 3_000 })
+    } catch {
+      entry = 'selected-text-enter'
+      await page.getByTestId('toolbar-selection').check({ force: true })
+      await page.touchscreen.tap(box!.x + Number(loadedTextFixture.x) + 10, box!.y + Number(loadedTextFixture.y) + 10)
+      await page.keyboard.press('Enter')
+      await expect(editable).toBeVisible({ timeout: 5_000 })
+    }
+    stage = 'range-and-color'
+    const modifier = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform) ? 'Meta' : 'Control')
+    await editable.focus()
+    await page.keyboard.press(`${modifier}+a`)
+    await page.keyboard.insertText('Toque seguro')
+    await page.keyboard.press(modifier === 'Meta' ? 'Meta+ArrowUp' : 'Control+Home')
+    for (let index = 0; index < 5; index++) await page.keyboard.press('Shift+ArrowRight')
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('Toque')
+    await page.getByTestId('color-top-pick-#e03131').tap()
+    await page.keyboard.press(`${modifier}+Enter`)
+    await expect(editable).toBeHidden()
+    await expectEditorSaved(page)
+    await expect.poll(() => harness.elements.find(element => element.originalText === 'Toque seguro')?.customData?.clarinCharacterStyle?.runs).toEqual([{ from: 0, to: 5, color: '#E03131' }])
+    const touchEvents = await page.evaluate(() => (window as any).__touchReview as Array<{ type: string; target: string | null }>)
+    expect(touchEvents.some(event => event.type === 'touch' && event.target === 'color-top-pick-#e03131')).toBe(true)
+    expect(blocked).toEqual([])
+    stage = 'complete'
+    await testInfo.attach('native-touch-review', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' })
+  } finally {
+    await testInfo.attach('native-touch-review-evidence', { body: Buffer.from(JSON.stringify({ browserName, stage, entry, blocked, requests: [...requests], touchEvents: await page.evaluate(() => (window as any).__touchReview ?? []).catch(() => []) }, null, 2)), contentType: 'application/json' })
+    await context.close()
+  }
+})
+
 
 test('texto enriquecido · cursiva se activa y desactiva sin depender de negrita', async ({ browser }) => {
   test.setTimeout(120_000)
@@ -3856,7 +4095,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.8/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.9/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())
