@@ -1,4 +1,5 @@
 import type { DocumentFormat } from './editorWorkspaceState'
+import { isStructuredFormat } from './documentFormats'
 
 export type JsonToolbarAction = 'undo' | 'redo' | 'open' | 'copy' | 'download' | 'smart' | 'minify' | 'wrap' | 'panel' | 'compare'
 
@@ -12,7 +13,7 @@ export function jsonToolbarLayout(width: number, fine: boolean, format: Document
   const groups: JsonToolbarAction[][] = [
     ['undo', 'redo'],
     ['open', 'copy', 'download'],
-    format === 'xml' ? ['minify'] : ['smart', 'minify'],
+    ...(isStructuredFormat(format) ? [format === 'xml' ? ['minify'] as JsonToolbarAction[] : ['smart', 'minify'] as JsonToolbarAction[]] : []),
     ['wrap'],
     split ? ['compare'] : ['panel'],
   ]

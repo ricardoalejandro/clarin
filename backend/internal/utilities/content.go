@@ -40,13 +40,19 @@ type ChangeInput struct {
 	Edits       []Edit    `json:"edits"`
 }
 
-func (s *Service) content(ctx context.Context, account, owner, id uuid.UUID, slot string) (domain.UtilityContent, error) {
+func (s *Service) content(ctx context.Context, q contentReadQuerier, account, owner, id uuid.UUID, slot string) (domain.UtilityContent, error) {
 	var c domain.UtilityContent
 	c.Slot = slot
-	err := s.Store.DB.QueryRow(ctx, `SELECT version,snapshot_version,object_key,bytes,content_type,indexed_version<version FROM utility_content WHERE account_id=$1 AND owner_id=$2 AND document_id=$3 AND slot=$4`, account, owner, id, slot).Scan(&c.Version, &c.SnapshotVersion, &c.ObjectKey, &c.Bytes, &c.ContentType, &c.Indexing)
+	err := q.QueryRow(ctx, `SELECT version,snapshot_version,object_key,bytes,content_type,indexed_version<version FROM utility_content WHERE account_id=$1 AND owner_id=$2 AND document_id=$3 AND slot=$4`, account, owner, id, slot).Scan(&c.Version, &c.SnapshotVersion, &c.ObjectKey, &c.Bytes, &c.ContentType, &c.Indexing)
 	return c, missing(err)
 }
-func (s *Service) load(ctx context.Context, account, owner, id uuid.UUID, c domain.UtilityContent) ([]byte, error) {
+
+type contentReadQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func (s *Service) load(ctx context.Context, q contentReadQuerier, account, owner, id uuid.UUID, c domain.UtilityContent) ([]byte, error) {
 	if s.Objects == nil {
 		return nil, ErrVaultUnavailable
 	}
@@ -57,7 +63,7 @@ func (s *Service) load(ctx context.Context, account, owner, id uuid.UUID, c doma
 	if c.SnapshotVersion == c.Version {
 		return data, nil
 	}
-	rows, err := s.Store.DB.Query(ctx, `SELECT version,edits FROM utility_changes WHERE account_id=$1 AND owner_id=$2 AND document_id=$3 AND slot=$4 AND version>$5 AND version<=$6 ORDER BY version`, account, owner, id, c.Slot, c.SnapshotVersion, c.Version)
+	rows, err := q.Query(ctx, `SELECT version,edits FROM utility_changes WHERE account_id=$1 AND owner_id=$2 AND document_id=$3 AND slot=$4 AND version>$5 AND version<=$6 ORDER BY version`, account, owner, id, c.Slot, c.SnapshotVersion, c.Version)
 	if err != nil {
 		return nil, err
 	}
@@ -95,12 +101,31 @@ func (s *Service) ReadContent(ctx context.Context, account, owner, id uuid.UUID,
 	if !validSlot(slot) {
 		return nil, domain.UtilityContent{}, ErrInvalid
 	}
-	c, err := s.content(ctx, account, owner, id, slot)
+	// Writers and checkpointing lock the parent FOR UPDATE. Keep a shared lock
+	// through object materialization so its snapshot/journal cannot disappear.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	tx, err := s.Store.DB.Begin(ctx)
+	if err != nil {
+		return nil, domain.UtilityContent{}, err
+	}
+	defer tx.Rollback(ctx)
+	var found uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT id FROM utility_documents WHERE account_id=$1 AND owner_id=$2 AND id=$3 FOR SHARE`, account, owner, id).Scan(&found); err != nil {
+		return nil, domain.UtilityContent{}, missing(err)
+	}
+	c, err := s.content(ctx, tx, account, owner, id, slot)
 	if err != nil {
 		return nil, c, err
 	}
-	data, err := s.load(ctx, account, owner, id, c)
-	return data, c, err
+	data, err := s.load(ctx, tx, account, owner, id, c)
+	if err != nil {
+		return nil, c, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, c, err
+	}
+	return data, c, nil
 }
 
 // prepareObject commits a cleanup candidate BEFORE upload, so an interrupted
@@ -313,7 +338,7 @@ func (s *Service) Changes(ctx context.Context, account, owner, id uuid.UUID, in 
 	if kind == "criptografia" {
 		return result, ErrInvalid
 	}
-	c, err := s.content(ctx, account, owner, id, in.Slot)
+	c, err := s.content(ctx, tx, account, owner, id, in.Slot)
 	if err != nil {
 		return result, err
 	}
@@ -323,7 +348,7 @@ func (s *Service) Changes(ctx context.Context, account, owner, id uuid.UUID, in 
 	if !strings.HasPrefix(c.ContentType, "text/") && c.ContentType != "application/json" && c.ContentType != "application/xml" {
 		return result, ErrInvalid
 	}
-	source, err := s.load(ctx, account, owner, id, c)
+	source, err := s.load(ctx, tx, account, owner, id, c)
 	if err != nil {
 		return result, err
 	}
@@ -435,11 +460,11 @@ func (s *Service) processContentJob(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
-	c, err := s.content(ctx, account, owner, id, slot)
+	c, err := s.content(ctx, tx, account, owner, id, slot)
 	if err != nil {
 		return err
 	}
-	data, err := s.load(ctx, account, owner, id, c)
+	data, err := s.load(ctx, tx, account, owner, id, c)
 	if err != nil {
 		return err
 	}

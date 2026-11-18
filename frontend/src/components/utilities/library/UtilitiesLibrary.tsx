@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEve
 import { createPortal } from 'react-dom'
 import { flushSync } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { Braces, Check, ChevronLeft, ChevronRight, Copy, Download, Folder, FolderPlus, ListFilter, Loader2, Menu, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react'
+import { Braces, Check, ChevronLeft, ChevronRight, Copy, Download, Folder, FolderPlus, ListFilter, Loader2, Menu, Pencil, Plus, Save, Search, Star, Trash2, X } from 'lucide-react'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getAuthScope, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
@@ -20,6 +20,8 @@ import { UtilityDocumentProvider } from './UtilityDocumentContext'
 import { duplicateCryptoDocument } from '../crypto/duplicateCryptoDocument'
 import { UtilityDraft } from './UtilityDraft'
 import { DocumentModeIndicator } from './DocumentModeIndicator'
+import { documentExportExtension, isDocumentFormat } from '../json/documentFormats'
+import { prepareUtf8XmlDownload } from '../json/documentFile'
 import { activeTabScrollLeft, libraryDrawerBounds, libraryLayout, librarySaveStatus } from './libraryLayout'
 import '../utility-density.css'
 import { UtilityActionMenu, type UtilityMenuAction } from './UtilityActionMenu'
@@ -31,7 +33,7 @@ const field = 'utility-field w-full rounded-lg border border-slate-200 bg-white 
 const emptyWorkspace: UtilityWorkspaceState = { open_ids: [], active_id: null, version: 0 }
 type Dialog = { kind: 'rename' | 'delete' | 'move'; document: UtilityDocument } | { kind: 'folder' } | null
 
-function LibraryDialog({ dialog, folders, onClose, onSubmit, busy }: { dialog: NonNullable<Dialog>; folders: UtilityFolder[]; onClose: () => void; onSubmit: (value: string) => Promise<void>; busy: boolean }) {
+function LibraryDialog({ dialog, folders, onClose, onSubmit, busy, error }: { dialog: NonNullable<Dialog>; folders: UtilityFolder[]; onClose: () => void; onSubmit: (value: string) => Promise<void>; busy: boolean; error?: string }) {
   const [value, setValue] = useState(dialog.kind === 'rename' ? dialog.document.title : dialog.kind === 'move' ? dialog.document.folder_id ?? '' : '')
   const ref = useRef<HTMLDivElement>(null)
   const busyRef = useRef(busy)
@@ -43,13 +45,18 @@ function LibraryDialog({ dialog, folders, onClose, onSubmit, busy }: { dialog: N
     ref.current?.querySelector<HTMLElement>('input,select,button')?.focus()
     const key = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busyRef.current) { event.preventDefault(); onClose() } }
     document.addEventListener('keydown', key)
-    return () => { document.removeEventListener('keydown', key); previous?.focus() }
+    return () => {
+      document.removeEventListener('keydown', key)
+      if (previous?.isConnected) previous.focus({ preventScroll: true })
+      else document.querySelector<HTMLElement>('[aria-label="Buscar documentos por nombre o contenido"], [role="tab"][aria-selected="true"]')?.focus({ preventScroll: true })
+    }
   }, [onClose])
   function submit(event: FormEvent) { event.preventDefault(); if (!busy) void onSubmit(value.trim()) }
   return createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose() }}>
     <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="utility-dialog-title" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
       <h2 id="utility-dialog-title" className="text-base font-semibold text-slate-900">{title}</h2>
       <form onSubmit={submit} className="mt-4 space-y-4">
+        {error && <p role="alert" className="rounded-lg bg-rose-50 p-2 text-xs text-rose-800">{error}</p>}
         {dialog.kind === 'delete' ? <p className="text-sm leading-6 text-slate-600">Se eliminará <strong className="break-words text-slate-900">{dialog.document.title}</strong> y sus archivos guardados en Clarin. Esta acción es permanente.</p>
           : dialog.kind === 'move' ? <label className="block text-sm text-slate-700">Carpeta<select className={`${field} mt-2`} value={value} onChange={event => setValue(event.target.value)}><option value="">Sin carpeta</option>{folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>
             : <label className="block text-sm text-slate-700">Nombre<input className={`${field} mt-2`} value={value} maxLength={160} required onChange={event => setValue(event.target.value)} /></label>}
@@ -95,6 +102,11 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [dialog, setDialog] = useState<Dialog>(null)
+  const dialogRef = useRef(dialog)
+  dialogRef.current = dialog
+  const [dialogError, setDialogError] = useState('')
+  const pendingMetadata = useRef(new Map<string, { changes: string; request: RequestInit }>())
+  const actionInFlight = useRef(false)
   const { preferences: layoutPreferences, updatePreferences } = useUtilitiesWorkspacePreferences()
   const libraryOpen = layoutPreferences.libraryOpen
   const setLibraryOpen = (open: boolean) => updatePreferences({ libraryOpen: open })
@@ -121,6 +133,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const mounted = useRef(true)
   const firstDirty = useRef<number | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const workspaceQueue = useRef<Promise<void>>(Promise.resolve())
   const workspacePending = useRef(0)
   const workspaceFailed = useRef(false)
@@ -134,6 +147,19 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   overlayRef.current = overlay
   const closeTransientLibrary = () => { if (overlayRef.current) setLibraryOpen(false) }
   const saveStatus = librarySaveStatus(active?.phase, workspacePhase, !ready || Boolean(active?.loading), Boolean(indexingIds), transitioning)
+  const saveCommand = useRef<() => void>(() => {})
+  saveCommand.current = () => { void saveActive() }
+
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if ((!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 's' || !host.current?.contains(event.target as Node)) return
+      event.preventDefault(); event.stopPropagation()
+      if (!event.repeat) saveCommand.current()
+    }
+    document.addEventListener('keydown', key, true)
+    return () => document.removeEventListener('keydown', key, true)
+  }, [])
+  useEffect(() => { setDialogError('') }, [dialog?.kind, dialog && 'document' in dialog ? dialog.document.id : null])
 
   useLayoutEffect(() => {
     const element = host.current
@@ -176,9 +202,18 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     const restored = libraryFocusRestored.current
     libraryFocusRestored.current = false
     const frame = requestAnimationFrame(() => { if (!restored) librarySurface.current?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }) })
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true }) } }
-    document.addEventListener('keydown', escape)
-    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape) }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || dialogRef.current) return
+      const target = event.target === document ? document.activeElement : event.target as Node | null
+      if (!target || (!librarySurface.current?.contains(target) && !libraryTrigger.current?.contains(target))) return
+      // A nested portaled menu or picker owns the first Escape, even while its
+      // focus transfer is pending. The library then owns its own focused Escape.
+      if (librarySurface.current?.querySelector('[aria-haspopup][aria-expanded="true"]')) return
+      event.preventDefault(); event.stopImmediatePropagation()
+      setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true })
+    }
+    document.addEventListener('keydown', escape, true)
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape, true) }
   }, [overlay])
   useEffect(() => { setFilterAnchor(null) }, [wide, libraryOpen])
   useLayoutEffect(() => {
@@ -198,6 +233,8 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
 
   const refreshDrafts = useCallback(() => {
     if (!mounted.current) return
+    const activeId = workspaceRef.current.active_id
+    if (activeId && sessions.current.get(activeId)?.dirty) setNotice(current => current === 'Documento guardado.' ? '' : current)
     setPage(current => ({ ...current, documents: current.documents.map(document => {
       const draft = sessions.current.get(document.id)
       return draft && draft.document.version >= document.version ? { ...draft.document, snippet: document.snippet } : document
@@ -237,7 +274,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       void libraryRequest<{ document: UtilityDocument }>(`/documents/${id}`, { signal: controller.signal }).then(result => {
         if (controller.signal.aborted || !mounted.current) return
         const draft = sessions.current.get(id)
-        if (!draft || draft.dirty || draft.reconcilingVault || result.document.version <= draft.document.version) return
+        if (!draft || draft.dirty || draft.pendingMutation || draft.reconcilingVault || result.document.version <= draft.document.version) return
         draft.dispose(); sessions.current.delete(id)
         setDocuments(current => ({ ...current, [id]: result.document }))
         if (workspaceRef.current.active_id === id) { makeDraft(result.document); setEditorGeneration(value => value + 1) }
@@ -266,6 +303,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     return () => {
       mounted.current = false; controller.abort()
       if (timer.current) clearTimeout(timer.current)
+      if (saveNoticeTimer.current) clearTimeout(saveNoticeTimer.current)
       sessions.current.forEach(draft => draft.dispose()); sessions.current.clear()
     }
   }, [makeDraft])
@@ -319,7 +357,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   })
 
   useEffect(() => {
-    const navigationPending = () => workspacePending.current > 0 || workspaceFailed.current || [...sessions.current.values()].some(draft => draft.dirty)
+    const navigationPending = () => workspacePending.current > 0 || workspaceFailed.current || [...sessions.current.values()].some(draft => draft.dirty || draft.pendingMutation)
     const beforeUnload = (event: BeforeUnloadEvent) => { if (navigationPending()) { event.preventDefault(); event.returnValue = '' } }
     const flushAll = async () => {
       if (!beginTransition()) return false
@@ -521,54 +559,126 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
 
   async function retryActive() {
     if (!active || !activeDocument) return
-    if (active.dirty) { await active.flush(); return }
+    if (active.dirty || active.pendingMutation) {
+      const draft = active, attemptedError = draft.error
+      const saved = await draft.flush()
+      if (saved && mounted.current && workspaceRef.current.active_id === draft.document.id) announceSaved(attemptedError)
+      return
+    }
     if (!beginTransition()) return
     try {
+      if (!(await leaveActive())) return
       const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${activeDocument.id}`)
       if (!mounted.current) return
-      if (!(await leaveActive())) return
       active.dispose(); sessions.current.delete(activeDocument.id); makeDraft(result.document)
       flushSync(() => setEditorGeneration(value => value + 1))
     } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : 'No se pudo volver a abrir el documento.') } finally { finishTransition() }
   }
 
+  async function saveActive() {
+    if (!active || !ready || busy || active.loading || transitioning) return
+    if (active.phase === 'error' && !active.dirty) { await retryActive(); return }
+    const draft = active
+    if (timer.current) clearTimeout(timer.current)
+    firstDirty.current = null
+    const saved = await draft.flush()
+    if (!mounted.current || workspaceRef.current.active_id !== draft.document.id) return
+    if (saved) announceSaved()
+  }
+
+  function announceSaved(matchingError?: string) {
+    setError(current => matchingError === undefined || current === matchingError ? '' : current)
+    setNotice('Documento guardado.')
+    if (saveNoticeTimer.current) clearTimeout(saveNoticeTimer.current)
+    saveNoticeTimer.current = setTimeout(() => { if (mounted.current) setNotice(current => current === 'Documento guardado.' ? '' : current) }, 2000)
+  }
+
   async function changeMetadata(document: UtilityDocument, changes: Record<string, unknown>) {
+    if (actionInFlight.current) return
+    actionInFlight.current = true
     const draft = sessions.current.get(document.id)
-    if (draft && !(await draft.flush())) return
+    setDialogError('')
     setBusy(true)
     try {
-      const result = await libraryRequest<{ document: UtilityDocument }>(`/documents/${document.id}`, jsonRequest('PATCH', { base_version: draft?.document.version ?? document.version, operation_id: operationId(), ...changes }))
+      const mutate = async (canonical: UtilityDocument) => {
+        const desired = JSON.stringify(changes)
+        // A lost acknowledgement may have committed. Replay its exact identity
+        // before accepting a different rename/favorite/folder request.
+        let current = canonical
+        for (;;) {
+          const retained = pendingMetadata.current.get(document.id)
+          if (!retained && Object.entries(changes).every(([key, value]) => JSON.stringify((current as unknown as Record<string, unknown>)[key]) === JSON.stringify(value))) return { document: current }
+          const pending = retained ?? { changes: desired, request: jsonRequest('PATCH', { base_version: current.version, operation_id: operationId(), ...changes }) }
+          pendingMetadata.current.set(document.id, pending)
+          const response = await libraryRequest<{ document: UtilityDocument }>(`/documents/${document.id}`, pending.request)
+          draft?.acceptMetadata(response.document)
+          pendingMetadata.current.delete(document.id)
+          if (pending.changes === desired) return response
+          current = response.document
+        }
+      }
+      const result = await (draft ? draft.mutate(mutate) : mutate(document))
       if (!mounted.current) return
-      if (draft) draft.document = { ...result.document, config: draft.document.config }
-      setDocuments(current => ({ ...current, [document.id]: result.document })); setReload(value => value + 1); setDialog(null)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo guardar el cambio.') } finally { if (mounted.current) setBusy(false) }
+      setDocuments(current => ({ ...current, [document.id]: result.document }))
+      setPage(current => ({ ...current, documents: current.documents.map(item => item.id === document.id ? { ...result.document, snippet: item.snippet } : item) }))
+      setReload(value => value + 1); setDialog(null); setError('')
+    } catch (reason) {
+      if (reason instanceof UtilityRequestError && reason.status && reason.status >= 400 && reason.status < 500 && ![408, 429].includes(reason.status)) pendingMetadata.current.delete(document.id)
+      const message = reason instanceof Error ? reason.message : 'No se pudo guardar el cambio.'
+      if (mounted.current) { setDialogError(message); setError(message) }
+      if (!draft && reason instanceof UtilityRequestError && reason.status === 409) await refreshDialogDocument(document.id)
+    } finally { actionInFlight.current = false; if (mounted.current) setBusy(false) }
   }
 
   async function submitDialog(value: string) {
     if (!dialog) return
     if (dialog.kind === 'rename' || dialog.kind === 'move') return changeMetadata(dialog.document, dialog.kind === 'rename' ? { title: value } : { folder_id: value || null })
+    if (actionInFlight.current) return
+    actionInFlight.current = true
+    setDialogError('')
     setBusy(true)
     try {
       if (dialog.kind === 'folder') {
         const result = await libraryRequest<{ folder: UtilityFolder }>('/folders', jsonRequest('POST', { name: value }))
         setFolders(current => [...current, result.folder]); setFolder(result.folder.id)
       } else {
-        const draft = sessions.current.get(dialog.document.id)
-        if (draft && !(await draft.flush())) return
-        pendingDeletionIds.current.add(dialog.document.id)
-        const result = await libraryRequest<{ cleanup_pending: boolean; workspace?: UtilityWorkspaceState | null }>(`/documents/${dialog.document.id}?version=${draft?.document.version ?? dialog.document.version}`, { method: 'DELETE' })
+        const document = dialog.document
+        const draft = sessions.current.get(document.id)
+        const mutate = (canonical: UtilityDocument) => {
+          pendingDeletionIds.current.add(document.id)
+          return libraryRequest<{ cleanup_pending: boolean; workspace?: UtilityWorkspaceState | null }>(`/documents/${document.id}?version=${canonical.version}`, { method: 'DELETE' })
+        }
+        const result = await (draft ? draft.mutate(mutate, { deleting: true }) : mutate(document))
         await closeDocument(dialog.document.id, adoptDeletedWorkspace(dialog.document.id, result.workspace), true)
-        setDocuments(current => { const next = { ...current }; delete next[dialog.document.id]; return next }); setReload(value => value + 1)
+        setDocuments(current => { const next = { ...current }; delete next[dialog.document.id]; return next })
+        setPage(current => ({ ...current, documents: current.documents.filter(item => item.id !== document.id) })); setReload(value => value + 1)
         setNotice(result.cleanup_pending ? 'Documento eliminado. La limpieza de sus archivos está pendiente de confirmación.' : 'Documento y archivos eliminados.')
       }
       setDialog(null)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo completar la operación.') } finally { if (dialog && 'document' in dialog) pendingDeletionIds.current.delete(dialog.document.id); if (mounted.current) setBusy(false) }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : 'No se pudo completar la operación.'
+      if (mounted.current) { setDialogError(message); setError(message) }
+      if ('document' in dialog && !sessions.current.has(dialog.document.id) && reason instanceof UtilityRequestError && reason.status === 409) await refreshDialogDocument(dialog.document.id)
+    } finally { actionInFlight.current = false; if (dialog && 'document' in dialog) pendingDeletionIds.current.delete(dialog.document.id); if (mounted.current) setBusy(false) }
   }
 
-  async function duplicateDocument(document: UtilityDocument) {
+  async function refreshDialogDocument(id: string) {
+    try {
+      const current = await libraryRequest<{ document: UtilityDocument }>(`/documents/${id}`)
+      if (!mounted.current) return
+      setDocuments(items => ({ ...items, [id]: current.document }))
+      setPage(page => ({ ...page, documents: page.documents.map(item => item.id === id ? current.document : item) }))
+      setDialog(dialog => dialog && 'document' in dialog && dialog.document.id === id ? { ...dialog, document: current.document } : dialog)
+      setDialogError('El documento cambió. Se actualizó su versión; revisa la operación y vuelve a confirmar.')
+    } catch { /* Keep the existing error and exact user-entered name for a later retry. */ }
+  }
+
+  async function duplicateDocument(document: UtilityDocument, loadOriginalAfter = false) {
     const draft = sessions.current.get(document.id) ?? makeDraft(document)
     if (!beginTransition()) return
+    let savedCopy: UtilityDocument | undefined
     try {
+      if (!draft.freezeSources()) return
       // A conflict must still allow preserving the user's unsaved work as a copy.
       if (draft.phase !== 'conflict' && draft.phase !== 'error' && !(await draft.flush())) return
       const result = document.type === 'criptografia'
@@ -578,14 +688,42 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       const slots = new Set([...(draft.session.slotNames?.() ?? draft.document.slots.map(slot => slot.slot))])
       for (const slot of slots) { const blob = draft.session.getSlot(slot) ?? await draft.session.readSlot(slot); if (blob) copy.session.setSlot(slot, blob) }
       if (!(await copy.flush())) throw new Error(copy.error)
+      savedCopy = copy.document
       setDocuments(current => ({ ...current, [copy.document.id]: copy.document }))
+      setError('')
+      if (loadOriginalAfter) {
+        // The independent copy is durable before any original model is replaced.
+        // A failed canonical reload keeps the original draft and the saved copy.
+        const canonical = await libraryRequest<{ document: UtilityDocument }>(`/documents/${document.id}`)
+        if (!mounted.current) return
+        if (canonical.document.id !== document.id) throw new Error('No se pudo confirmar la versión guardada. Tu borrador y su copia siguen disponibles.')
+        draft.dispose(); sessions.current.delete(document.id)
+        makeDraft(canonical.document)
+        setDocuments(current => ({ ...current, [document.id]: canonical.document }))
+        flushSync(() => {
+          persistWorkspace({ ...workspaceRef.current, open_ids: [...new Set([...workspaceRef.current.open_ids, copy.document.id, document.id])], active_id: document.id })
+          setEditorGeneration(value => value + 1)
+        })
+        setNotice('Tu borrador se guardó en una copia. Se cargó la versión guardada del documento original.')
+        setReload(value => value + 1)
+        return
+      }
       const replacingConflict = draft.phase === 'conflict' || draft.phase === 'error'
       if (!draft.freezeSources()) return
       if (draft.phase !== 'conflict' && draft.phase !== 'error' && !(await draft.flush())) return
       flushSync(() => persistWorkspace({ ...workspaceRef.current, open_ids: [...workspaceRef.current.open_ids.filter(id => !replacingConflict || id !== draft.document.id), copy.document.id], active_id: copy.document.id }))
       if (replacingConflict) { draft.dispose(); sessions.current.delete(draft.document.id); setNotice('Tu borrador se guardó en una copia independiente.') }
       releaseInactive(copy.document.id); setReload(value => value + 1)
-    } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : 'No se pudo guardar la copia.') } finally { finishTransition() }
+    } catch (reason) {
+      if (mounted.current) {
+        if (savedCopy) {
+          persistWorkspace({ ...workspaceRef.current, open_ids: [...new Set([...workspaceRef.current.open_ids, savedCopy.id])] })
+          setNotice('La copia está guardada y disponible en otra pestaña. Tu borrador original sigue abierto.')
+          setReload(value => value + 1)
+        }
+        setError(reason instanceof Error ? reason.message : 'No se pudo guardar la copia.')
+      }
+    } finally { finishTransition() }
   }
 
   async function loadMore() {
@@ -604,17 +742,36 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
 
   async function downloadDraft() {
     if (!active) return
-    const slots = new Set(active.session.slotNames?.() ?? active.document.slots.map(slot => slot.slot))
-    for (const name of slots) {
-      const blob = active.session.getSlot(name) ?? await active.session.readSlot(name)
-      if (!blob?.size) continue
-      const url = URL.createObjectURL(blob), link = document.createElement('a')
-      link.href = url; link.download = `${active.document.title}-${name}.${blob.type.startsWith('image/') ? blob.type.split('/')[1] : 'txt'}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
-    }
+    const draft = active
+    try {
+      const slots = new Set(draft.session.slotNames?.() ?? draft.document.slots.map(slot => slot.slot))
+      for (const name of slots) {
+        const blob = draft.session.getSlot(name) ?? await draft.session.readSlot(name)
+        if (!blob || !mounted.current || workspaceRef.current.active_id !== draft.document.id) continue
+        const panel = name === 'panel-b' || name === 'original-b' ? 'b' : 'a'
+        const formats = draft.document.config['json.formats'] as Record<string, unknown> | undefined
+        const originals = draft.document.config['json.originalNames'] as Record<string, unknown> | undefined
+        const plain = draft.document.config['json.plainText'] as Record<string, unknown> | undefined
+        const format = formats?.[panel]
+        const originalName = typeof originals?.[panel] === 'string' ? originals[panel] as string : undefined
+        const extension = name.startsWith('panel-') && isDocumentFormat(format) ? documentExportExtension(format, originalName, plain?.[panel] === true) : blob.type.startsWith('image/') ? blob.type.split('/')[1] : 'txt'
+        let downloadBlob = blob
+        if (name.startsWith('panel-') && format === 'xml' && extension !== 'txt') {
+          const source = await blob.text()
+          const prepared = prepareUtf8XmlDownload(source, source.includes('http://www.w3.org/2000/09/xmldsig#'))
+          if (!mounted.current || workspaceRef.current.active_id !== draft.document.id) return
+          if (!prepared.ok) { setError(prepared.message); continue }
+          if (prepared.source !== source) downloadBlob = new Blob([prepared.source], { type: 'application/xml;charset=utf-8' })
+        }
+        const url = URL.createObjectURL(downloadBlob), link = document.createElement('a')
+        link.href = url; link.download = name.startsWith('original-') && originalName ? originalName : `${draft.document.title}-${name}.${extension}`
+        link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+      }
+    } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : 'No se pudo descargar el borrador. Reintenta.') }
   }
 
   const closeDialog = useCallback(() => setDialog(null), [])
-  const newActions: UtilityMenuAction[] = utilities.map(utility => ({ id: utility.id, label: utility.id === 'json' ? 'JSON/XML' : utility.title, icon: Plus, disabled: busy || !ready, onSelect: () => { void createDocument(utility.id) } }))
+  const newActions: UtilityMenuAction[] = utilities.map(utility => ({ id: utility.id, label: utility.title, icon: Plus, disabled: busy || !ready, onSelect: () => { void createDocument(utility.id) } }))
   const documentActions: UtilityMenuAction[] = activeDocument ? [
     { id: 'rename', label: 'Renombrar documento', icon: Pencil, disabled: busy, onSelect: () => setDialog({ kind: 'rename', document: activeDocument }) },
     { id: 'left', label: 'Mover pestaña a la izquierda', icon: ChevronLeft, disabled: busy || workspace.open_ids[0] === activeDocument.id, onSelect: () => persistWorkspace({ ...workspaceRef.current, open_ids: moveOpenDocument(workspaceRef.current.open_ids, activeDocument.id, -1) }) },
@@ -636,7 +793,13 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     <div className="min-h-0 flex-1 overflow-y-auto border-t border-slate-200 p-1" aria-live="polite">
       {loading && page.documents.length === 0 && <p role="status" className="p-2 text-xs text-slate-500">Cargando documentos…</p>}
       {!loading && page.documents.length === 0 && <p className="p-2 text-xs leading-5 text-slate-500">{settledQuery ? 'No hay documentos que coincidan.' : 'Tus documentos aparecerán aquí. Crea uno para comenzar.'}</p>}
-      {page.documents.map(document => <button key={document.id} type="button" className={`utility-library-row flex w-full min-w-0 items-start gap-2 rounded-lg p-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 ${workspace.active_id === document.id ? 'bg-emerald-50' : 'hover:bg-slate-100'}`} disabled={busy} onClick={() => void openDocument(document)}><Braces size={14} aria-hidden className="mt-0.5 shrink-0 text-slate-400" /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-slate-800">{document.favorite && '★ '}{document.title}</span><span className="block truncate text-[10px] leading-4 text-slate-500">{utilityById(document.type)?.title} · {new Date(document.updated_at).toLocaleDateString('es-PE')}</span>{document.snippet && <span className="mt-1 block line-clamp-2 break-all text-[11px] text-slate-600">{document.snippet}</span>}</span></button>)}
+      {page.documents.map(document => <div key={document.id} className={`utility-library-row flex w-full min-w-0 items-start rounded-lg ${workspace.active_id === document.id ? 'bg-emerald-50' : 'hover:bg-slate-100'}`}>
+        <button type="button" className="flex min-w-0 flex-1 items-start gap-2 rounded-lg p-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" disabled={busy} onClick={() => void openDocument(document)}><Braces size={14} aria-hidden className="mt-0.5 shrink-0 text-slate-400" /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-slate-800">{document.favorite && '★ '}{document.title}</span><span className="block truncate text-[10px] leading-4 text-slate-500">{utilityById(document.type)?.title} · {new Date(document.updated_at).toLocaleDateString('es-PE')}</span>{document.snippet && <span className="mt-1 block line-clamp-2 break-all text-[11px] text-slate-600">{document.snippet}</span>}</span></button>
+        <UtilityActionMenu label={`Acciones de ${document.title}`} className={`${button} mt-1 shrink-0 px-1`} actions={[
+          { id: 'rename', label: 'Renombrar documento', icon: Pencil, disabled: busy, onSelect: () => setDialog({ kind: 'rename', document }) },
+          { id: 'delete', label: 'Eliminar documento', icon: Trash2, disabled: busy, destructive: true, onSelect: () => setDialog({ kind: 'delete', document }) },
+        ]} />
+      </div>)}
       {page.has_more && <button className={`${button} w-full`} disabled={loading} onClick={() => void loadMore()}>{loading ? 'Cargando…' : 'Cargar más'}</button>}
     </div>
     <footer className="shrink-0"><SessionTimingSummary compact /></footer>
@@ -649,6 +812,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
         {workspace.open_ids.map(id => { const document = sessions.current.get(id)?.document ?? documents[id]; if (!document) return null; return <div key={id} data-utility-tab-id={id} style={{ maxWidth: 'min(240px, 100cqw)' }} className={`flex shrink-0 items-center border-r border-slate-200 ${id === workspace.active_id ? 'border-b-2 border-b-emerald-600 bg-white' : ''}`}><button role="tab" type="button" aria-selected={id === workspace.active_id} aria-controls="utility-active-document" title={document.title} style={{ minWidth: 0, flex: '1 1 0%' }} className={`${button} max-w-44 justify-start rounded-none`} disabled={busy} onDoubleClick={() => { if (id === workspace.active_id && !busy) setDialog({ kind: 'rename', document }) }} onClick={() => void openDocument(document)}><span className="truncate">{document.title}</span>{sessions.current.get(id)?.dirty && <span aria-label="Cambios pendientes" className="text-amber-600">●</span>}</button><DocumentModeIndicator status={sessions.current.get(id)?.displayStatus} /><button type="button" className={`${button} shrink-0 px-1`} aria-label={`Cerrar pestaña ${document.title}`} disabled={busy} onClick={() => void closeDocument(id)}><X size={13} aria-hidden /></button></div> })}
       </div>
       <UtilityActionMenu label="Nuevo documento" actions={newActions} className={`${button} shrink-0`} icon={Plus} />
+      <button type="button" className={`${button} shrink-0`} aria-label="Guardar documento" aria-keyshortcuts="Control+S Meta+S" title="Guardar documento (Ctrl+S / ⌘S)" disabled={!activeDocument || !ready || busy || Boolean(active?.loading)} onClick={() => void saveActive()}><Save size={15} aria-hidden /><span className={compact ? 'sr-only' : ''}>Guardar</span></button>
       <button type="button" className={`${button} min-w-0 shrink-0 ${saveStatus.tone === 'error' ? 'text-rose-700' : saveStatus.tone === 'pending' ? 'text-amber-700' : 'text-slate-500'}`} aria-label="Estado del guardado" title={saveStatus.label} aria-haspopup="dialog" aria-expanded={Boolean(statusAnchor)} onClick={event => { const target = event.currentTarget; setStatusAnchor(current => current ? null : target) }}>{saveStatus.tone === 'pending' ? <Loader2 size={14} className={active?.phase === 'dirty' ? '' : 'motion-safe:animate-spin'} aria-hidden /> : <Check size={14} aria-hidden />}<span role="status" className={compact ? 'sr-only' : 'max-w-40 truncate text-[11px]'}>{saveStatus.label}</span></button>
       {activeDocument && <UtilityActionMenu key={activeDocument.id} label="Acciones del documento" actions={documentActions} className={`${button} shrink-0`} />}
     </header>
@@ -660,7 +824,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
         {workspacePhase === 'error' && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-100 bg-amber-50 px-3 py-1 text-xs text-amber-900"><span>{workspaceError}</span><button type="button" className={button} onClick={() => void retryWorkspace()}>Guardar pestañas de esta ventana</button></div>}
         {indexSlow && <div role="status" className="flex shrink-0 flex-wrap items-center gap-2 bg-amber-50 px-3 py-1 text-xs text-amber-900">La indexación está tardando. El documento está guardado y puedes seguir trabajando.<button type="button" className={button} onClick={() => setIndexRetry(value => value + 1)}>Reintentar comprobación</button></div>}
         {active && activeDocument ? <>
-          {(active.phase === 'error' || active.phase === 'conflict') && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-rose-50 px-3 py-1 text-xs text-rose-800"><span>{active.error} Tu borrador sigue disponible.</span><button className={button} disabled={busy} onClick={() => void retryActive()}>Reintentar</button><button className={button} disabled={busy} onClick={() => void duplicateDocument(activeDocument)}>Guardar una copia</button><button className={button} onClick={() => void downloadDraft()}>Descargar</button></div>}
+          {(active.phase === 'error' || active.phase === 'conflict') && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-rose-50 px-3 py-1 text-xs text-rose-800"><span>{active.error} Tu borrador sigue disponible.</span>{active.phase === 'error' && <button className={button} disabled={busy} onClick={() => void retryActive()}>Reintentar</button>}<button className={button} disabled={busy} onClick={() => void duplicateDocument(activeDocument)}>Guardar una copia</button>{active.phase === 'conflict' && <button className={button} disabled={busy} onClick={() => void duplicateDocument(activeDocument, true)}>Guardar copia y cargar versión guardada</button>}<button className={button} disabled={busy} onClick={() => void downloadDraft()}>Descargar borrador</button></div>}
           <div id="utility-active-document" role="tabpanel" aria-busy={transitioning || undefined} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
             <div ref={editorSurface} inert={transitioning || undefined} className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><UtilityDocumentProvider key={`${activeDocument.id}:${editorGeneration}`} value={active.session}><UtilityWorkspace utility={utilityById(activeDocument.type)!} embedded /></UtilityDocumentProvider></div>
             {transitioning && <div className="absolute inset-0 flex items-center justify-center bg-slate-100/70 p-4"><p role="status" className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">Guardando y abriendo documento…</p></div>}
@@ -671,6 +835,6 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     {overlay && createPortal(<div data-utility-library-overlay className="fixed bg-slate-950/20" style={{ left: drawerBounds.left, top: drawerBounds.top, width: drawerBounds.width, height: drawerBounds.height, zIndex: OPERATIONAL_OVERLAY_LAYERS.workspacePopover }} onMouseDown={event => { if (event.target === event.currentTarget) { setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true }) } }}>{libraryPanel}</div>, document.body)}
     {filterAnchor && <EditorPopover anchor={filterAnchor} label="Filtros de documentos" onClose={() => setFilterAnchor(null)} width={256}><div className="utility-density-scope space-y-2"><label className="block text-xs font-medium">Tipo<select aria-label="Filtrar por tipo" className={`${field} mt-1`} value={type} onChange={event => setType(event.target.value)}><option value="">Todos los tipos</option>{utilities.map(utility => <option key={utility.id} value={utility.id}>{utility.title}</option>)}</select></label><div className="flex items-center justify-between text-xs font-medium"><span>Carpetas</span><button className={button} aria-label="Nueva carpeta" onClick={() => { setFilterAnchor(null); setDialog({ kind: 'folder' }) }}><FolderPlus size={15} /></button></div><div className="max-h-40 overflow-y-auto"><button type="button" className={`${button} w-full justify-start`} onClick={() => setFolder(null)}>Todas las carpetas</button><button type="button" className={`${button} w-full justify-start`} onClick={() => setFolder('')}>Sin carpeta</button>{folders.map(item => <button type="button" key={item.id} className={`${button} w-full justify-start ${folder === item.id ? 'bg-emerald-50 text-emerald-800' : ''}`} onClick={() => { setFolder(item.id); setFavorite(false) }}><Folder size={14} /><span className="truncate">{item.name}</span></button>)}</div><button type="button" className={`${button} w-full`} onClick={() => setFilterAnchor(null)}>Cerrar filtros</button></div></EditorPopover>}
     {statusAnchor && <EditorPopover anchor={statusAnchor} label="Estado del documento y las pestañas" onClose={() => setStatusAnchor(null)} width={280}><div className="utility-density-scope space-y-2 p-1 text-xs leading-5"><p className="font-semibold">{saveStatus.label}</p><p>{workspacePhase === 'saved' ? 'Pestañas confirmadas en el servidor.' : workspacePhase === 'saving' ? 'Guardando el orden y la pestaña activa.' : workspaceError}</p>{indexingIds && <p>Indexando contenido para la búsqueda. El contenido ya guardado sigue disponible.</p>}{active?.loading && <p>Abriendo el contenido guardado…</p>}<SessionTimingSummary /><button type="button" className={button} onClick={() => setStatusAnchor(null)}>Cerrar detalle</button></div></EditorPopover>}
-    {dialog && <LibraryDialog key={dialog.kind + ('document' in dialog ? dialog.document.id : '')} dialog={dialog} folders={folders} busy={busy} onClose={closeDialog} onSubmit={submitDialog} />}
+    {dialog && <LibraryDialog key={dialog.kind + ('document' in dialog ? dialog.document.id : '')} dialog={dialog} folders={folders} busy={busy} error={dialogError} onClose={closeDialog} onSubmit={submitDialog} />}
   </section>
 }

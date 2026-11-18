@@ -107,7 +107,7 @@ func utilityError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, utilities.ErrMissing):
 		status, code, message = 404, "utility_not_found", "El documento no está disponible."
 	case errors.Is(err, utilities.ErrConflict):
-		status, code, message = 409, "utility_conflict", "El documento cambió en otra sesión. Conserva tu borrador y vuelve a cargar o guarda una copia."
+		status, code, message = 409, "utility_conflict", "Existe una versión guardada más reciente. Tu borrador sigue abierto; guarda una copia para conservar ambos."
 	case errors.Is(err, utilities.ErrInvalid):
 		status, code, message = 400, "invalid_utility", "Revisa el contenido, la versión y los límites de esta operación."
 	case errors.Is(err, utilities.ErrQuota):

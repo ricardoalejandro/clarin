@@ -1,18 +1,27 @@
 import { expect, test, type Page } from '@playwright/test'
-import { writeFile } from 'node:fs/promises'
-import { createUtilitiesLibraryMock } from './helpers/utilitiesLibraryMock'
+import { readFile, writeFile } from 'node:fs/promises'
+import { createUtilitiesLibraryHttpMock } from './helpers/utilitiesLibraryHttpMock'
+import { clickEditorAction, editorAction } from './helpers/jsonToolbar'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3011'
 test.use({ channel: process.env.PLAYWRIGHT_CHANNEL })
 test.setTimeout(90_000)
+const libraryServers = new Map<Page, () => Promise<void>>()
+test.afterEach(async ({ page }) => {
+  const close = libraryServers.get(page)
+  libraryServers.delete(page)
+  await close?.()
+})
 
 async function setup(page: Page) {
-  const library = createUtilitiesLibraryMock()
+  const library = await createUtilitiesLibraryHttpMock()
+  libraryServers.set(page, library.close)
   await page.context().addCookies([{ name: 'auth-token', value: 'library-browser-session', url: baseURL }])
   await page.addInitScript(() => { localStorage.setItem('token', 'cookie-session'); localStorage.setItem('clarin:auth_refreshed_at', String(Date.now())) })
   await page.route('**/api/**', async route => {
-    if (await library.handle(route)) return
-    if (new URL(route.request().url()).pathname === '/api/utilities/access') return route.fulfill({ status: 204 })
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/utilities/access') return route.fulfill({ status: 204 })
+    if (url.pathname.startsWith('/api/utilities/')) return route.continue({ url: `${library.url}${url.pathname}${url.search}` })
     return route.fulfill({ json: { success: true, user: { id: 'library-user', username: 'qa', display_name: 'Biblioteca QA', account_id: 'library-account', account_name: 'Cuenta QA', permissions: ['utilities'] }, session: { scope: 'library-scope', account_id: 'library-account', idle_timeout_minutes: 180, server_now: new Date().toISOString(), idle_expires_at: new Date(Date.now() + 10_800_000).toISOString(), absolute_expires_at: new Date(Date.now() + 86_400_000).toISOString() } } })
   })
   await page.setViewportSize({ width: 1600, height: 1000 })
@@ -31,6 +40,23 @@ async function rename(page: Page, title: string) {
 async function createQr(page: Page) {
   await page.getByRole('button', { name: 'Nuevo documento', exact: true }).click()
   await page.getByRole('menuitem', { name: 'Códigos QR', exact: true }).click()
+}
+
+async function typeEditorLines(page: Page, text: string) {
+  // Firefox's synthetic multiline insertText creates one IME composition across
+  // line breaks. Use the editor's real Enter gesture between individual lines.
+  const lines = text.split('\n')
+  for (let index = 0; index < lines.length; index++) {
+    if (index) await page.keyboard.press('Enter')
+    await page.keyboard.insertText(lines[index])
+  }
+}
+
+async function pressEditorShortcut(page: Page, key: string, macKey = key) {
+  // Monaco follows the emulated browser OS; Playwright's ControlOrMeta follows
+  // the runner host, which differs for Desktop Safari on a Windows runner.
+  const modifier = await page.evaluate(() => /Macintosh|iPhone|iPad|iPod/.test(navigator.userAgent) ? 'Meta' : 'Control')
+  await page.keyboard.press(`${modifier}+${modifier === 'Meta' ? macKey : key}`)
 }
 
 test('keeps independent same-tool tabs, saves, renames, searches, reopens and deletes documents', async ({ page }, testInfo) => {
@@ -56,7 +82,7 @@ test('keeps independent same-tool tabs, saves, renames, searches, reopens and de
   await page.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }).fill('contenido-buscable-iquitos')
   const sidebar = page.getByRole('complementary', { name: 'Mis documentos' })
   await expect(sidebar.getByRole('button', { name: /QR pruebas/ })).toHaveCount(0)
-  await sidebar.getByRole('button', { name: /QR sucursal/ }).click()
+  await sidebar.getByRole('button', { name: /^QR sucursal/ }).click()
   await expect(page.getByRole('textbox', { name: 'Texto o enlace' })).toHaveValue('contenido-buscable-iquitos')
   await expect.poll(() => library.documents.get(library.getWorkspace().active_id ?? '')?.title).toBe('QR sucursal')
   await page.reload()
@@ -71,6 +97,142 @@ test('keeps independent same-tool tabs, saves, renames, searches, reopens and de
   await expect(page.getByRole('tab', { name: 'QR sucursal' })).toHaveCount(0)
   expect(library.documents.size).toBe(1)
   expect([...library.contents.values()].some(value => value.toString().includes('contenido-buscable-iquitos'))).toBe(false)
+})
+
+test('saves real Monaco TXT and SQL with Ctrl+S, preserves modes on reload and exports their actual extensions', async ({ page }, testInfo) => {
+  const library = await setup(page)
+  const downloads: string[] = []
+  page.on('download', download => downloads.push(download.suggestedFilename()))
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editor = page.getByTestId('document-editor-a')
+  await expect(editor).toBeVisible({ timeout: 30_000 })
+  const mode = page.getByRole('combobox', { name: 'Formato del documento', exact: true })
+  await mode.click()
+  const choices = page.getByRole('dialog', { name: 'Elegir formato del documento' })
+  const bounds = (await choices.boundingBox())!
+  expect(bounds.x).toBeGreaterThanOrEqual(0)
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(1600)
+  await choices.getByRole('option', { name: /^Texto plano/ }).click()
+  const text = 'Texto libre, Pe\u00f1a y \ud83d\ude00\nSegunda l\u00ednea.'
+  await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
+  const id = library.getWorkspace().active_id!
+  await editor.getByRole('textbox').focus()
+  await typeEditorLines(page, text)
+  await pressEditorShortcut(page, 's')
+  await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString(), { timeout: 1500 }).toBe(text)
+  expect(downloads).toEqual([])
+  await expect(page.getByRole('button', { name: 'Formatear', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Validar', exact: true })).toBeDisabled()
+  await mode.click()
+  await page.getByRole('combobox', { name: 'Buscar formato' }).fill('SQL')
+  await expect(page.getByRole('listbox', { name: 'Formatos del documento' }).getByRole('option')).toHaveCount(1)
+  await page.getByRole('option', { name: /^SQL/ }).click()
+  await editor.getByRole('textbox').focus()
+  await pressEditorShortcut(page, 'a')
+  await typeEditorLines(page, "select '\u00f1' as nombre;\n-- Texto, no ejecuci\u00f3n")
+  await page.getByRole('button', { name: 'Guardar documento' }).click()
+  await expect.poll(() => library.documents.get(id)?.config['json.formats']).toEqual({ a: 'sql', b: 'strict' })
+  await page.reload()
+  await expect(mode).toHaveText('SQL', { timeout: 30_000 })
+  await expect(editor.locator('.view-lines')).toContainText('select')
+  const downloadAction = await editorAction(page, 'Descargar documento')
+  const [download] = await Promise.all([page.waitForEvent('download'), downloadAction.click()])
+  expect(download.suggestedFilename()).toBe('documento-a.sql')
+  expect(await readFile((await download.path())!, 'utf8')).toBe("select '\u00f1' as nombre;\n-- Texto, no ejecuci\u00f3n")
+  await page.screenshot({ path: testInfo.outputPath('editor-text-and-code.png') })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await mode.click()
+  const mobilePicker = (await choices.boundingBox())!
+  expect(mobilePicker.x).toBeGreaterThanOrEqual(0)
+  expect(mobilePicker.x + mobilePicker.width).toBeLessThanOrEqual(375)
+  expect(mobilePicker.y + mobilePicker.height).toBeLessThanOrEqual(812)
+  await page.keyboard.press('Escape')
+  await expect(mode).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('editor-text-and-code-375.png') })
+})
+
+test('Ctrl+S saves the whole chunked text document and the active document while comparison has focus', async ({ page }) => {
+  const library = await setup(page)
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editorA = page.getByTestId('document-editor-a')
+  await expect(editorA).toBeVisible({ timeout: 30_000 })
+  await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'large.txt', mimeType: 'text/plain', buffer: Buffer.from('x'.repeat(100_100)) })
+  await expect(page.getByRole('button', { name: 'Tramo siguiente', exact: true })).toBeVisible()
+  await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
+  const id = library.getWorkspace().active_id!
+  const chunkInput = editorA.getByRole('textbox')
+  await chunkInput.focus()
+  await pressEditorShortcut(page, 'Home', 'ArrowUp')
+  // Position the native caret explicitly: WebKit's emulated Mac key gesture
+  // leaves the native textarea caret at context offset500 on a Windows runner.
+  await chunkInput.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0))
+  await chunkInput.pressSequentially('chunk-save:')
+  await expect(chunkInput).toHaveValue(/^chunk-save:/)
+  await expect(editorA.locator('.view-lines')).toContainText('chunk-save:')
+  await pressEditorShortcut(page, 's')
+  await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString(), { timeout: 1500 }).toBe('chunk-save:' + 'x'.repeat(100_100))
+  await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'small.txt', mimeType: 'text/plain', buffer: Buffer.from('first') })
+  await clickEditorAction(page, 'Mostrar segundo panel')
+  const editorB = page.getByTestId('document-editor-b')
+  await editorB.getByRole('textbox').focus()
+  await page.keyboard.insertText('second')
+  await clickEditorAction(page, 'Comparar diferencias')
+  const diff = page.getByTestId('document-editor-diff')
+  await expect(diff).toBeVisible()
+  await diff.getByRole('textbox').last().focus()
+  await pressEditorShortcut(page, 's')
+  await expect.poll(() => library.contents.get(`${id}/panel-b`)?.toString(), { timeout: 1500 }).toBe('second')
+  expect(library.contents.get(`${id}/panel-a`)?.toString()).toBe('first')
+})
+
+test('renames and deletes closed library documents without opening their tabs', async ({ page }) => {
+  const library = await setup(page)
+  await page.goto(`${baseURL}/dashboard/utilities/qr`)
+  await rename(page, 'Documento cerrado')
+  await page.getByRole('textbox', { name: 'Texto o enlace' }).fill('contenido cerrado')
+  await createQr(page)
+  await rename(page, 'Documento activo')
+  await page.getByRole('button', { name: 'Cerrar pestaña Documento cerrado' }).click()
+  const editor = page.getByRole('textbox', { name: 'Texto o enlace' })
+  await editor.fill('borrador activo')
+  await page.getByRole('button', { name: 'Abrir biblioteca', exact: true }).click()
+  await page.getByRole('button', { name: 'Acciones de Documento cerrado', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Renombrar documento', exact: true }).click()
+  const renameDialog = page.getByRole('dialog', { name: 'Renombrar documento' })
+  await renameDialog.getByRole('textbox', { name: 'Nombre' }).fill('Renombrado desde biblioteca')
+  await renameDialog.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(renameDialog).toBeHidden()
+  await expect(page.getByRole('tab', { name: 'Renombrado desde biblioteca', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'Documento activo', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('button', { name: 'Acciones de Renombrado desde biblioteca', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Eliminar documento', exact: true }).click()
+  expect(library.documents.size).toBe(2)
+  await page.getByRole('dialog', { name: 'Eliminar documento' }).getByRole('button', { name: 'Eliminar definitivamente' }).click()
+  await expect.poll(() => library.documents.size).toBe(1)
+  await expect(editor).toHaveValue('borrador activo')
+  await expect(page.getByRole('tab')).toHaveCount(1)
+})
+
+test('copies a conflicting draft durably before loading the original saved version', async ({ page }) => {
+  const library = await setup(page)
+  await page.goto(`${baseURL}/dashboard/utilities/qr`)
+  const editor = page.getByRole('textbox', { name: 'Texto o enlace' })
+  await editor.fill('versión guardada')
+  await page.getByRole('button', { name: 'Guardar documento' }).click()
+  await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
+  const originalId = library.getWorkspace().active_id!
+  await expect.poll(() => library.contents.get(`${originalId}/qr-text`)?.toString()).toBe('versión guardada')
+  library.failSave(409)
+  await editor.fill('borrador local protegido')
+  await page.getByRole('button', { name: 'Guardar documento' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Conflicto de versión' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reintentar', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Guardar copia y cargar versión guardada', exact: true }).click()
+  await expect(editor).toHaveValue('versión guardada')
+  expect(library.getWorkspace().active_id).toBe(originalId)
+  expect(library.documents.size).toBe(2)
+  const copyId = [...library.documents.keys()].find(id => id !== originalId)!
+  expect(library.contents.get(`${copyId}/qr-text`)?.toString()).toBe('borrador local protegido')
 })
 
 test('preserves unsaved work on conflict and saves it as an independent copy', async ({ page }) => {
@@ -113,6 +275,7 @@ test('keeps at least 200px for editing at 320px and exposes complete keyboard me
   await actions.focus(); await actions.press('ArrowDown')
   const actionMenu = page.getByRole('menu', { name: 'Acciones del documento' })
   await expect(actionMenu).toBeVisible()
+  await expect(actionMenu.getByRole('menuitem').first()).toBeFocused()
   await page.keyboard.press('End')
   await expect(actionMenu.getByRole('menuitem', { name: 'Eliminar documento', exact: true })).toBeFocused()
   const rectangle = (await actionMenu.boundingBox())!
@@ -209,6 +372,7 @@ for (const hasTouch of [false, true]) test.describe(hasTouch ? 'touch document m
     await page.getByRole('button', { name: 'Acciones del documento', exact: true }).click()
     const menu = page.getByRole('menu', { name: 'Acciones del documento' })
     await expect(menu).toBeVisible()
+    await expect(menu.getByRole('menuitem').first()).toBeFocused()
     const heights = await menu.getByRole('menuitem').evaluateAll(items => items.map(item => item.getBoundingClientRect().height))
     expect(heights.length).toBeGreaterThan(0)
     expect(heights.every(height => height === (hasTouch ? 44 : 32))).toBe(true)

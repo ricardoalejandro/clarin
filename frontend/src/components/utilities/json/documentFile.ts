@@ -1,5 +1,6 @@
 import { getXmlDeclaredEncoding, JSON_INPUT_LIMIT, measureDocument } from './jsonLimits'
 import type { DocumentFileResult } from './jsonOperations'
+import { formatFromFileName } from './documentFormats'
 
 export const DOCUMENT_ENCODINGS = ['utf-8', 'utf-16le', 'utf-16be', 'windows-1252', 'iso-8859-1'] as const
 export type DocumentEncoding = typeof DOCUMENT_ENCODINGS[number]
@@ -83,8 +84,8 @@ export async function readDocumentFile(file: File, selectedEncoding?: string): P
   const genericUtf16 = /^utf-16$/i.test(declaration ?? '') && /^utf-16/.test(encoding)
   const declarationConflict = declaration && (!actualDeclared || actualDeclared !== encoding && !genericUtf16)
   if (!explicit && declarationConflict) return { ok: false, encodingConflict: true, suggestedEncoding: encoding, message: `La firma del archivo indica ${encoding.toUpperCase()} y la declaración XML indica ${declaration}. Elige la codificación correcta.` }
-  const name = file.name.toLowerCase()
-  const syntaxHint = name.endsWith('.xml') ? 'xml' : name.endsWith('.jsonc') ? 'jsonc' : name.endsWith('.json') ? 'strict' : source.trimStart().startsWith('<') ? 'xml' : undefined
+  if (source.includes('\u0000')) return { ok: false, message: 'El archivo contiene datos binarios o caracteres nulos. Se conservó el documento anterior.' }
+  const syntaxHint = formatFromFileName(file.name)
   const metrics = measureDocument(source)
   if (metrics.bytes > JSON_INPUT_LIMIT) return { ok: false, message: 'El texto decodificado supera el límite de 60 MiB UTF-8. Se conservó el documento anterior.' }
   const warnings: string[] = []

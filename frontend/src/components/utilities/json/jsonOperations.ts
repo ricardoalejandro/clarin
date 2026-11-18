@@ -3,6 +3,7 @@ import { jsonrepair } from 'jsonrepair'
 import { BoundedDocumentText, DocumentLimitError, indentationLines } from './boundedDocumentText'
 import { DOCUMENT_DEPTH_LIMIT, JSON_INPUT_LIMIT, JSON_OUTPUT_LIMIT, JSON_REPAIR_LIMIT, measureDocument, segmentDocumentText, utf8ByteLength, type DocumentMetrics } from './jsonLimits'
 import { processXml } from './xmlOperations'
+import type { DocumentFormat } from './documentFormats'
 
 const MAX_ACTIVE_JSON_KEYS = 250_000
 const SMART_COLUMNS = 100
@@ -26,7 +27,7 @@ export interface JsonRequest {
 }
 
 export type DocumentFileResult =
-  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: JsonMode | 'xml'; xmlEncoding?: string; encoding?: string; converted?: boolean; warnings?: string[] }
+  | { ok: true; source: string; metrics: DocumentMetrics; syntaxHint?: DocumentFormat; xmlEncoding?: string; encoding?: string; converted?: boolean; warnings?: string[] }
   | { ok: false; message: string; encodingConflict?: true; suggestedEncoding?: string }
 
 export type DocumentWorkerRequest =

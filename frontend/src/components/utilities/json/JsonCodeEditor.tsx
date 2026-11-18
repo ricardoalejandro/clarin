@@ -1,7 +1,7 @@
 'use client'
 
 import { useLayoutEffect, useRef } from 'react'
-import { editor, json, KeyCode, KeyMod, languages, Position, Range } from 'monaco-editor'
+import { css, editor, html, json, KeyCode, KeyMod, languages, Position, Range, typescript } from 'monaco-editor'
 import { jsonLiteralCompletions, xmlClosingTagCompletion } from './documentCompletions'
 import { acceptsEditorZoom, documentRevealSelection, documentWrapOptions, tramRange } from './editorWorkspaceState'
 import { registerLargeJsonSyntax } from './largeJsonSyntax'
@@ -18,6 +18,11 @@ globalThis.MonacoEnvironment = {
 // JSON and JSONC can be open together. Explicit local validation owns diagnostics.
 json.jsonDefaults.setDiagnosticsOptions({ validate: false, schemas: [], enableSchemaRequest: false })
 json.jsonDefaults.setModeConfiguration({ ...json.jsonDefaults.modeConfiguration, diagnostics: false, documentFormattingEdits: false, documentRangeFormattingEdits: false })
+// Additional modes use Monaco's bundled lexical highlighting only. No language
+// servers, schema fetches, code execution, preview or background worker requests.
+for (const defaults of [css.cssDefaults, html.htmlDefaults, typescript.javascriptDefaults, typescript.typescriptDefaults]) {
+  defaults.setModeConfiguration(Object.fromEntries(Object.keys(defaults.modeConfiguration).map(key => [key, false])))
+}
 registerLargeJsonSyntax(languages)
 registerDocumentFolding(languages)
 

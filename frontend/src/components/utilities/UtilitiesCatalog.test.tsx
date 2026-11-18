@@ -17,7 +17,7 @@ describe('Utilitarios', () => {
   it('links the four selectable cards to separate workspaces', () => {
     render(<UtilitiesCatalog />)
     expect(screen.getAllByRole('link')).toHaveLength(4)
-    expect(screen.getByRole('link', { name: /Editor JSON/ })).toHaveAttribute('href', '/dashboard/utilities/json')
+    expect(screen.getByRole('link', { name: /Editor de texto y código/ })).toHaveAttribute('href', '/dashboard/utilities/json')
     expect(screen.getByRole('link', { name: /Códigos QR/ })).toHaveAttribute('href', '/dashboard/utilities/qr')
     expect(screen.getByRole('link', { name: /Imagen ⇄ Base64/ })).toHaveAttribute('href', '/dashboard/utilities/imagen-base64')
     expect(screen.getByRole('link', { name: /Criptografía/ })).toHaveAttribute('href', '/dashboard/utilities/criptografia')

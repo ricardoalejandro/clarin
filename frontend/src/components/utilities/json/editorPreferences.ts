@@ -1,9 +1,9 @@
-import { DEFAULT_FONT, MAX_FONT, MIN_FONT, type DocumentFormat, type Panel } from './editorWorkspaceState'
+import { DEFAULT_FONT, MAX_FONT, MIN_FONT, type Panel } from './editorWorkspaceState'
 import type { editor } from 'monaco-editor'
 import { utf8ByteLength } from './jsonLimits'
+import { isDocumentFormat } from './documentFormats'
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value))
-const format = (value: unknown): value is DocumentFormat => value === 'strict' || value === 'jsonc' || value === 'xml'
 
 /** Stored configuration is untrusted even when it belongs to the current user. */
 export function validJsonPreference(key: string, value: unknown) {
@@ -13,7 +13,7 @@ export function validJsonPreference(key: string, value: unknown) {
     case 'json.font': return typeof value === 'number' && Number.isFinite(value) && value >= MIN_FONT && value <= MAX_FONT
     case 'json.indent': return value === '2' || value === '4' || value === 'tab'
     case 'json.wrap': case 'json.plainText': return record(value) && typeof value.a === 'boolean' && typeof value.b === 'boolean'
-    case 'json.formats': return record(value) && format(value.a) && format(value.b)
+    case 'json.formats': return record(value) && isDocumentFormat(value.a) && isDocumentFormat(value.b)
     case 'json.chunks': return record(value) && ['a', 'b'].every(panel => Number.isSafeInteger(value[panel]) && Number(value[panel]) >= 0)
     case 'json.originalNames': return record(value) && Object.keys(value).every(panel => (panel === 'a' || panel === 'b') && typeof value[panel] === 'string' && String(value[panel]).length <= 1024)
     default: return false

@@ -111,7 +111,7 @@ describe('utility autosave session', () => {
     const document = { ...base(), slots: [{ slot: 'panel-a', version: 4, bytes: 1000 }] }
     const draft = new UtilityDraft(document, vi.fn())
     const text = 'x'.repeat(1000)
-    vi.mocked(readDocumentSlot).mockResolvedValue(new Blob([text], { type: 'text/plain' }))
+    vi.mocked(readDocumentSlot).mockResolvedValue({ blob: new Blob([text], { type: 'text/plain' }), version: 4 })
     await draft.session.readSlot('panel-a')
     draft.session.setSlot('panel-a', text.slice(0, 500) + 'ñ' + text.slice(501))
     request.mockResolvedValue({ document: { ...document, version: 2 }, content: { slot: 'panel-a', version: 5, bytes: 1001 } })
@@ -123,12 +123,12 @@ describe('utility autosave session', () => {
 
   it('owns the loading phase and a late download cannot replace a new local edit', async () => {
     const draft = new UtilityDraft({ ...base(), slots: [{ slot: 'panel-a', version: 1, bytes: 3 }] }, vi.fn())
-    let finish!: (blob: Blob) => void
+    let finish!: (value: { blob: Blob; version: number }) => void
     vi.mocked(readDocumentSlot).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
     const reading = draft.session.readSlot('panel-a')
     expect(draft.loading).toBe(true)
     draft.session.setSlot('panel-a', 'new local edit')
-    finish(new Blob(['old'], { type: 'text/plain' }))
+    finish({ blob: new Blob(['old'], { type: 'text/plain' }), version: 1 })
     expect(await (await reading)!.text()).toBe('new local edit')
     expect(draft.loading).toBe(false)
     expect(draft.dirty).toBe(true)
@@ -145,6 +145,164 @@ describe('utility autosave session', () => {
     expect((request.mock.calls[1][1]!.headers as Record<string, string>)['X-Operation-Id']).toBe(operation)
     expect(draft.phase).toBe('conflict')
     expect(await draft.session.getSlot('panel-a')!.text()).toBe('my draft')
+    draft.session.setSlot('panel-a', 'continued typing')
+    draft.session.setState({ wrap: true })
+    expect(draft.phase).toBe('conflict')
+    expect(await draft.flush()).toBe(false)
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses the downloaded content version instead of stale list metadata', async () => {
+    const draft = new UtilityDraft({ ...base(), slots: [{ slot: 'panel-a', version: 1, bytes: 1000 }] }, vi.fn())
+    vi.mocked(readDocumentSlot).mockResolvedValue({ blob: new Blob(['x'.repeat(1000)], { type: 'text/plain' }), version: 7 })
+    await draft.session.readSlot('panel-a')
+    draft.session.setSlot('panel-a', 'y' + 'x'.repeat(999))
+    request.mockResolvedValue({ document: { ...base(), version: 8 }, content: { slot: 'panel-a', version: 8, bytes: 1000 } })
+    expect(await draft.flush()).toBe(true)
+    expect(JSON.parse(request.mock.calls[0][1]!.body as string).base_version).toBe(7)
+  })
+
+  it('ignores an old download arriving after our own newer successful save', async () => {
+    const document = { ...base(), slots: [{ slot: 'panel-a', version: 1, bytes: 3 }] }
+    const draft = new UtilityDraft(document, vi.fn())
+    let finish!: (value: { blob: Blob; version: number }) => void
+    vi.mocked(readDocumentSlot).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const reading = draft.session.readSlot('panel-a')
+    draft.session.setSlot('panel-a', 'local saved text')
+    request.mockResolvedValue({ document: { ...document, version: 2 }, content: { slot: 'panel-a', version: 2, bytes: 16 } })
+    expect(await draft.flush()).toBe(true)
+    finish({ blob: new Blob(['old'], { type: 'text/plain' }), version: 1 })
+    expect(await (await reading)!.text()).toBe('local saved text')
+    expect(draft.phase).toBe('saved')
+    expect(await draft.flush()).toBe(true)
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('does not mistake a GET of our committed content for another editor before the PUT acknowledgement', async () => {
+    const document = { ...base(), slots: [{ slot: 'panel-a', version: 1, bytes: 3 }] }
+    const draft = new UtilityDraft(document, vi.fn())
+    let finishRead!: (value: { blob: Blob; version: number }) => void
+    let finishSave!: (value: unknown) => void
+    vi.mocked(readDocumentSlot).mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve }))
+    const reading = draft.session.readSlot('panel-a')
+    draft.session.setSlot('panel-a', 'new')
+    request.mockImplementationOnce(() => new Promise(resolve => { finishSave = resolve }))
+    const saving = draft.flush()
+    finishRead({ blob: new Blob(['new'], { type: 'text/plain' }), version: 2 })
+    finishSave({ document: { ...document, version: 2 }, content: { slot: 'panel-a', version: 2, bytes: 3 } })
+    expect(await saving).toBe(true)
+    expect(await (await reading)!.text()).toBe('new')
+    expect(draft.phase).toBe('saved')
+  })
+
+  it('preserves an externally marked conflict if an in-flight save later fails by network', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setSlot('panel-a', 'local')
+    let reject!: (reason: unknown) => void
+    request.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
+    const saving = draft.flush()
+    draft.markExternalConflict('Canonical conflict')
+    reject(new UtilityRequestError('Offline', 503))
+    expect(await saving).toBe(false)
+    expect(draft.phase).toBe('conflict')
+    expect(draft.error).toBe('Canonical conflict')
+    expect(await draft.flush()).toBe(false)
+  })
+
+  it('serializes metadata with autosave, keeping edits made while metadata is pending', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setState({ wrap: true })
+    request.mockResolvedValueOnce({ document: { ...base(), version: 2 } })
+    let finish!: () => void
+    let started!: () => void
+    const entered = new Promise<void>(resolve => { started = resolve })
+    const metadata = draft.mutate(async document => {
+      expect(document.version).toBe(2)
+      started()
+      await new Promise<void>(resolve => { finish = resolve })
+      draft.acceptMetadata({ ...document, title: 'Renamed', version: 3 })
+    })
+    await entered
+    draft.session.setState({ wrap: false })
+    request.mockResolvedValueOnce({ document: { ...base(), title: 'Renamed', version: 4 } })
+    const saving = draft.flush()
+    expect(request).toHaveBeenCalledTimes(1)
+    finish()
+    await metadata
+    expect(await saving).toBe(true)
+    expect(JSON.parse(request.mock.calls[1][1]!.body as string)).toMatchObject({ base_version: 3, config: { wrap: false } })
+    expect(draft.document.title).toBe('Renamed')
+  })
+
+  it('blocks writes after successful deletion and resumes them after a definitively rejected deletion', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    await expect(draft.mutate(async () => { throw new UtilityRequestError('Forbidden', 403) }, { deleting: true })).rejects.toThrow('Forbidden')
+    draft.session.setSlot('panel-a', 'retained')
+    request.mockResolvedValue({ document: { ...base(), version: 2 }, content: { slot: 'panel-a', version: 1, bytes: 8 } })
+    expect(await draft.flush()).toBe(true)
+    await draft.mutate(async () => undefined, { deleting: true })
+    draft.session.setSlot('panel-a', 'after deletion')
+    expect(await draft.flush()).toBe(false)
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('replays an uncertain metadata mutation before saving newly edited configuration', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const versions: number[] = []
+    const rename = vi.fn(async (document: UtilityDocument) => {
+      versions.push(document.version)
+      if (versions.length === 1) throw new UtilityRequestError('Lost acknowledgement', 503)
+      draft.acceptMetadata({ ...document, title: 'Renamed', version: 2 })
+    })
+    await expect(draft.mutate(rename)).rejects.toThrow('Lost acknowledgement')
+    draft.session.setState({ wrap: true })
+    request.mockResolvedValueOnce({ document: { ...base(), title: 'Renamed', version: 3 } })
+    expect(await draft.flush()).toBe(true)
+    expect(rename).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(request.mock.calls[0][1]!.body as string).base_version).toBe(2)
+    expect(draft.document.title).toBe('Renamed')
+  })
+
+  it('keeps uncertain metadata as a barrier while its replay still fails', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const rename = vi.fn(async () => { throw new UtilityRequestError('Offline', 503) })
+    await expect(draft.mutate(rename)).rejects.toThrow('Offline')
+    draft.session.setSlot('panel-a', 'local text')
+    expect(await draft.flush()).toBe(false)
+    expect(request).not.toHaveBeenCalled()
+    expect(await draft.session.getSlot('panel-a')!.text()).toBe('local text')
+  })
+
+  it('never retries an uncertain deletion from autosave, and requires another explicit confirmation', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const outcome = { cleanup_pending: true, workspace: null }
+    const deletion = vi.fn().mockRejectedValueOnce(new UtilityRequestError('Lost acknowledgement', 503)).mockResolvedValueOnce(outcome)
+    await expect(draft.mutate(deletion, { deleting: true })).rejects.toThrow('Lost acknowledgement')
+    draft.session.setSlot('panel-a', 'continued editing after closing the dialog')
+    expect(draft.phase).toBe('error')
+    expect(draft.error).toContain('confirmar la eliminación')
+    expect(await draft.flush()).toBe(false)
+    expect(deletion).toHaveBeenCalledOnce()
+    expect(request).not.toHaveBeenCalled()
+    const replacement = vi.fn()
+    expect(await draft.mutate(replacement, { deleting: true })).toEqual(outcome)
+    expect(deletion).toHaveBeenCalledTimes(2)
+    expect(replacement).not.toHaveBeenCalled()
+    expect(await draft.flush()).toBe(false)
+  })
+
+  it('retains conflict feedback after unrelated reads fail or vault reconciliation completes', async () => {
+    const document = { ...base(), type: 'criptografia' as const, slots: [{ slot: 'input', version: 1, bytes: 1 }] }
+    const draft = new UtilityDraft(document, vi.fn())
+    draft.markExternalConflict('Keep this conflict')
+    vi.mocked(readDocumentSlot).mockRejectedValueOnce(new UtilityRequestError('Offline', 503))
+    await expect(draft.session.readSlot('input')).rejects.toThrow('Offline')
+    expect(draft.phase).toBe('conflict')
+    request.mockResolvedValueOnce({ document: { ...document, version: 2 } })
+    await draft.session.reconcileVaultDeletion?.('removed-key')
+    expect(draft.phase).toBe('conflict')
+    expect(draft.error).toBe('Keep this conflict')
+    expect(await draft.flush()).toBe(false)
   })
 
   it.each([400, 401, 403, 404, 413, 422])('saves corrected key preferences after a definitive HTTP %s rejection', async status => {
