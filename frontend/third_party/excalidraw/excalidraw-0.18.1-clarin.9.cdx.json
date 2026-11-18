@@ -8730,7 +8730,7 @@
         "npm:sass@1.51.0:85a19da53832c094",
         "npm:tunnel-rat@0.1.2:951e551e690f8737"
       ],
-      "ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.9:7ad091d851f0df63"
+      "ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.9:b2be1189eee34a6b"
     },
     {
       "dependsOn": [],
@@ -10253,11 +10253,11 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.9:7ad091d851f0df63",
+      "bom-ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.9:b2be1189eee34a6b",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "7AD091D851F0DF638AFD111497E998E6BFB5283E9A909F026CF8FF52A5E43877"
+          "content": "B2BE1189EEE34A6B3F96FA4858134B1388459B7EDBDDBDFDEB3CEEE8587C35D5"
         }
       ],
       "licenses": [
@@ -10273,7 +10273,7 @@
         },
         {
           "name": "clarin:source:sha256",
-          "value": "7ad091d851f0df638afd111497e998e6bfb5283e9a909f026cf8ff52a5e43877"
+          "value": "b2be1189eee34a6b3f96fa4858134b1388459b7edbddbdfdeb3ceee8587c35d5"
         },
         {
           "name": "clarin:upstream:tag",

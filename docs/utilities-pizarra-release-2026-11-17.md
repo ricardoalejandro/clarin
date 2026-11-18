@@ -14,6 +14,13 @@ lockfile y SBOM están en
 `frontend/third_party/excalidraw/supply-chain-2026-11-17.json`; el inventario
 CycloneDX y la evidencia de licencias se archivan junto a ese archivo.
 
+La huella usa los bytes LF canónicos ya guardados en Git. La copia inicial de
+Windows contenía CRLF en 987 archivos sin diferencias de código, por lo que la
+primera promoción se detuvo antes de reconstruir servicios. Tras normalizar esa
+copia se regeneraron SBOM y avisos y se compararon los 303 archivos del paquete
+de producción: sus bytes son idénticos a los de la versión probada. La huella
+canónica coincide ahora entre Windows y el servidor Linux.
+
 Los cambios del fork se limitan al formato por selección, su historial y
 portapapeles, medición y pintura, y regresiones relacionadas. Los formatos de
 marcas/párrafos anteriores y los datos desconocidos se conservan. Los nuevos
