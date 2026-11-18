@@ -48,6 +48,8 @@ import {
   getClarinSvgTextAnchor,
   getClarinVisualLineLayouts,
 } from "./clarinParagraphAlignment";
+import { getClarinCharacterStyle } from "../element/clarinCharacterStyle";
+import { appendClarinCharacterSvgText } from "./clarinCharacterRendering";
 
 const roughSVGDrawWithPrecision = (
   rsvg: RoughSVG,
@@ -632,7 +634,9 @@ const renderElementToSvg = (
           lineHeightPx,
         );
         const direction = isRTL(element.text) ? "rtl" : "ltr";
-        for (let i = 0; i < lines.length; i++) {
+        if (getClarinCharacterStyle(element)?.runs.length) {
+          appendClarinCharacterSvgText(svgRoot.ownerDocument!, node, element);
+        } else for (let i = 0; i < lines.length; i++) {
           const lineTextAlign =
             visualLineLayouts[i]?.textAlign || element.textAlign;
           const horizontalOffset =

@@ -10,6 +10,8 @@ import {
   getClarinTextFormat,
   getClarinVisualLines,
 } from "./clarinRichText";
+import { getClarinCharacterStyle } from "./clarinCharacterStyle";
+import { getClarinCharacterLineMetrics } from "./clarinCharacterLayout";
 
 export const measureText = (
   text: string,
@@ -32,6 +34,9 @@ export const getClarinTextWidth = (
   element: ExcalidrawTextElement,
   text = element.text,
 ) => {
+  if (getClarinCharacterStyle(element)?.runs.length) {
+    return getClarinCharacterLineMetrics(element, text).reduce((maximum, line) => Math.max(maximum, line.width), 0);
+  }
   const baseFont = getFontString(element);
   const visualLines = getClarinVisualLines({ ...element, text });
   return visualLines.reduce(
@@ -56,6 +61,13 @@ export const measureClarinText = (
   element: ExcalidrawTextElement,
   text = element.text,
 ) => {
+  if (getClarinCharacterStyle(element)?.runs.length) {
+    const lines = getClarinCharacterLineMetrics(element, text);
+    return {
+      width: lines.reduce((maximum, line) => Math.max(maximum, line.width), 0),
+      height: lines.reduce((height, line) => height + line.height, 0),
+    };
+  }
   if (!getClarinTextFormat(element)?.runs.length) {
     return measureText(text, getFontString(element), element.lineHeight);
   }
@@ -154,7 +166,7 @@ export const setCustomTextMetricsProvider = (provider: TextMetricsProvider) => {
 };
 
 export interface TextMetricsProvider {
-  getLineWidth(text: string, fontString: FontString): number;
+  getLineWidth(text: string, fontString: FontString, direction?: CanvasDirection): number;
 }
 
 class CanvasTextMetricsProvider implements TextMetricsProvider {
@@ -171,10 +183,17 @@ class CanvasTextMetricsProvider implements TextMetricsProvider {
    *
    * > The advance width is the distance between the glyph's initial pen position and the next glyph's initial pen position.
    */
-  public getLineWidth(text: string, fontString: FontString): number {
+  public getLineWidth(text: string, fontString: FontString, direction?: CanvasDirection): number {
     const context = this.canvas.getContext("2d")!;
     context.font = fontString;
-    const metrics = context.measureText(text);
+    const previousDirection = context.direction;
+    let metrics: TextMetrics;
+    try {
+      if (direction) context.direction = direction;
+      metrics = context.measureText(text);
+    } finally {
+      if (direction) context.direction = previousDirection;
+    }
     const advanceWidth = metrics.width;
 
     // since in test env the canvas measureText algo
@@ -188,12 +207,12 @@ class CanvasTextMetricsProvider implements TextMetricsProvider {
   }
 }
 
-export const getLineWidth = (text: string, font: FontString) => {
+export const getLineWidth = (text: string, font: FontString, direction?: CanvasDirection) => {
   if (!textMetricsProvider) {
     textMetricsProvider = new CanvasTextMetricsProvider();
   }
 
-  return textMetricsProvider.getLineWidth(text, font);
+  return textMetricsProvider.getLineWidth(text, font, direction);
 };
 
 export const getTextWidth = (text: string, font: FontString) => {

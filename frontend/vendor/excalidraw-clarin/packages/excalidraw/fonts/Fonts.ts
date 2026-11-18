@@ -36,6 +36,9 @@ import {
   selectClarinFontPreloadTargets,
   shouldResetClarinFontFace,
 } from "./clarinFontPreload";
+import { getClarinCharacterFontSegments } from "./clarinCharacterFonts";
+import { invalidateClarinCharacterShapingGeometry } from "../element/clarinCharacterShaping";
+import { invalidateClarinNativeBidiGeometry } from "../element/clarinCharacterBidi";
 
 export interface ClarinFontPreloadProgress {
   phase: "idle" | "loading" | "offline" | "complete" | "error";
@@ -292,6 +295,12 @@ export class Fonts {
       }
     }
 
+    // A loaded face can share its legacy signature with an earlier fallback or
+    // replacement. Never retain new inline geometry across that notification.
+    if (fontFaces.length) {
+      invalidateClarinCharacterShapingGeometry();
+      invalidateClarinNativeBidiGeometry();
+    }
     if (shouldBail) {
       return;
     }
@@ -587,6 +596,9 @@ export class Fonts {
       elements.reduce((families, element) => {
         if (isTextElement(element)) {
           families.add(element.fontFamily);
+          for (const segment of getClarinCharacterFontSegments(element)) {
+            families.add(segment.fontFamily);
+          }
         }
         return families;
       }, new Set<number>()),
@@ -607,12 +619,9 @@ export class Fonts {
       }
 
       // gather unique codepoints only when inlining fonts
-      for (const char of element.originalText) {
-        if (!charsPerFamily[element.fontFamily]) {
-          charsPerFamily[element.fontFamily] = new Set();
-        }
-
-        charsPerFamily[element.fontFamily].add(char);
+      for (const segment of getClarinCharacterFontSegments(element)) {
+        if (!charsPerFamily[segment.fontFamily]) charsPerFamily[segment.fontFamily] = new Set();
+        for (const char of segment.text) charsPerFamily[segment.fontFamily].add(char);
       }
     }
 

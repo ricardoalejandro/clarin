@@ -2,10 +2,12 @@ import { restore, serializeAsJSON } from '@excalidraw/excalidraw'
 import {
   CLARIN_PARAGRAPH_FORMAT_KEY,
   CLARIN_TEXT_FORMAT_KEY,
+  CLARIN_CHARACTER_STYLE_KEY,
   MAX_CLARIN_TEXT_RUNS_PER_SCENE,
   isClarinParagraphAlignment,
   validateClarinParagraphFormat,
   validateClarinTextFormat,
+  validateClarinCharacterStyle,
 } from '@excalidraw/excalidraw/clarin-rich-text'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { AppState, BinaryFiles } from '@excalidraw/excalidraw/types'
@@ -35,7 +37,8 @@ function withoutInvalidHistoricalClarinTextFormatting(element: unknown) {
   if (!record || !customData) return element
   const hasTextFormat = CLARIN_TEXT_FORMAT_KEY in customData
   const hasParagraphFormat = CLARIN_PARAGRAPH_FORMAT_KEY in customData
-  if (!hasTextFormat && !hasParagraphFormat) return element
+  const hasCharacterStyle = CLARIN_CHARACTER_STYLE_KEY in customData
+  if (!hasTextFormat && !hasParagraphFormat && !hasCharacterStyle) return element
   const originalText = typeof record.originalText === 'string'
     ? record.originalText
     : typeof record.text === 'string'
@@ -43,6 +46,11 @@ function withoutInvalidHistoricalClarinTextFormatting(element: unknown) {
       : null
   const nextCustomData = { ...customData }
   let changed = false
+  if (hasCharacterStyle && (record.type !== 'text' || originalText === null
+    || !validateClarinCharacterStyle(customData[CLARIN_CHARACTER_STYLE_KEY], originalText, typeof record.fontSize === 'number' ? record.fontSize : 0))) {
+    delete nextCustomData[CLARIN_CHARACTER_STYLE_KEY]
+    changed = true
+  }
   if (
     hasTextFormat
     && (
@@ -85,7 +93,8 @@ export function assertValidClarinRichTextScene(elements: readonly unknown[]) {
     if (!customData) continue
     const hasTextFormat = CLARIN_TEXT_FORMAT_KEY in customData
     const hasParagraphFormat = CLARIN_PARAGRAPH_FORMAT_KEY in customData
-    if (!hasTextFormat && !hasParagraphFormat) continue
+    const hasCharacterStyle = CLARIN_CHARACTER_STYLE_KEY in customData
+    if (!hasTextFormat && !hasParagraphFormat && !hasCharacterStyle) continue
     if (record?.type !== 'text' || typeof record.originalText !== 'string') {
       throw new Error('Formato de texto enriquecido inválido.')
     }
@@ -95,6 +104,13 @@ export function assertValidClarinRichTextScene(elements: readonly unknown[]) {
         throw new Error('Formato de texto enriquecido inválido.')
       }
       totalSegments += format.runs.length
+    }
+    if (hasCharacterStyle) {
+      const style = customData[CLARIN_CHARACTER_STYLE_KEY]
+      if (!validateClarinCharacterStyle(style, record.originalText, typeof record.fontSize === 'number' ? record.fontSize : 0)) {
+        throw new Error('Formato de caracteres inválido.')
+      }
+      totalSegments += style.runs.length
     }
     if (hasParagraphFormat) {
       const format = customData[CLARIN_PARAGRAPH_FORMAT_KEY]

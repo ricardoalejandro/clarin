@@ -4,13 +4,13 @@ This file indexes notices that must accompany third-party software distributed b
 
 ## `@excalidraw/excalidraw`
 
-- Distributed version: `0.18.1-clarin.8`
+- Distributed version: `0.18.1-clarin.9`
 - Vendored source SHA-256: `b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9`
 - Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
 
-The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.8/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
+The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.9/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
 
 | Family | Recorded upstream license |
 | --- | --- |
@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [November 5 baseline](frontend/third_party/excalidraw/supply-chain-2026-11-05-katex.json). The [CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `517e7e70e5fa6d6c0ff2fce77eaf647120317381ba956064ca441e4f95200e88`. It binds the vendored source to the exact upstream tag/commit and the documented Clarin patches.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.9` is defined by `frontend/package-lock.json` and the [November 5 baseline](frontend/third_party/excalidraw/supply-chain-2026-11-05-katex.json). The [CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.9.cdx.json) contains 248 components and has SHA-256 `517e7e70e5fa6d6c0ff2fce77eaf647120317381ba956064ca441e4f95200e88`. It binds the vendored source to the exact upstream tag/commit and the documented Clarin patches.
 
 Generate and verify it without contacting a third-party service:
 
@@ -39,7 +39,7 @@ node .codex/skills/clarin-excalidraw-development/scripts/generate-supply-chain-s
   --manifest frontend/package.json \
   --lockfile frontend/package-lock.json \
   --baseline frontend/third_party/excalidraw/supply-chain-2026-11-05-katex.json \
-  --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json \
+  --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.9.cdx.json \
   --output /tmp/clarin-excalidraw-engine.cdx.json
 ```
 
@@ -67,7 +67,7 @@ network destination.
 - Upstream source: <https://github.com/rocicorp/fractional-indexing/tree/v3.2.0>
 - License: CC0 1.0 Universal (`CC0-1.0`; no rights reserved)
 
-Excalidraw `0.18.1-clarin.8` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
+Excalidraw `0.18.1-clarin.9` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
 
 ## Fabric compatibility adapter
 

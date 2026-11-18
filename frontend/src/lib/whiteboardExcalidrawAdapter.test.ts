@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   CLARIN_PARAGRAPH_FORMAT_KEY,
   CLARIN_TEXT_FORMAT_KEY,
+  CLARIN_CHARACTER_STYLE_KEY,
+  createClarinCharacterStyle,
   createClarinParagraphFormat,
   createClarinTextFormat,
   hashClarinText,
@@ -134,6 +136,23 @@ function textElement(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Clarin Excalidraw format adapter', () => {
+  it('round trips character typography without changing legacy marks or opaque metadata', () => {
+    const text = 'Título\nCuerpo'
+    const style = createClarinCharacterStyle(text, [{ from: 0, to: 6, color: '#FF0000', fontFamily: 10001, fontScale: 1.5 }])
+    const element = textElement({ customData: { [CLARIN_CHARACTER_STYLE_KEY]: style, futureExtension: { keep: true } } })
+    expect(() => assertValidClarinRichTextScene([element])).not.toThrow()
+    const restored = restoreClarinWhiteboardScene({ type: 'excalidraw', version: 2, elements: [element], appState: {}, files: {} })
+    expect((restored.elements[0] as Record<string, unknown>).customData).toMatchObject({ [CLARIN_CHARACTER_STYLE_KEY]: style, futureExtension: { keep: true } })
+  })
+  it('rejects new corrupt character metadata and removes only that extension on historical restore', () => {
+    const element = textElement({ customData: {
+      [CLARIN_CHARACTER_STYLE_KEY]: { version: 1, textLength: 1, textHash: 0, runs: [] },
+      futureExtension: { keep: true },
+    } })
+    expect(() => assertValidClarinRichTextScene([element])).toThrow('caracteres')
+    const restored = restoreClarinWhiteboardScene({ type: 'excalidraw', version: 2, elements: [element], appState: {}, files: {} })
+    expect((restored.elements[0] as Record<string, unknown>).customData).toEqual({ futureExtension: { keep: true } })
+  })
   it('restores through the official migrator while retaining the Clarin envelope', () => {
     const restored = restoreClarinWhiteboardScene({
       type: 'excalidraw',
