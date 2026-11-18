@@ -2408,7 +2408,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.8',
+            editor_version: '0.18.1-clarin.9',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)
