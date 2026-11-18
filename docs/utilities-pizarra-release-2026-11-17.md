@@ -75,6 +75,10 @@ de integridad, licencias, compatibilidad o aislamiento impide desplegar.
 | Geometría y pintura reales | Tres motores aprobados: kerning, árabe, bidi, líneas, opacidad, giro y color/U/S por Highlights. Los píxeles de decoración cambiados acreditan pintura real, no sólo una declaración CSS. |
 | Producción y TypeScript | Compilación optimizada, TypeScript y 39 páginas aprobados; CSS en nueve artefactos aprobado; shell offline v5 de 802 recursos generado; verificación de 1.098 artefactos de Pizarra y branding aprobada. |
 | Utilitarios en navegador | 36 escenarios verificados en los tres motores: 33 aprobados en la ejecución completa y tres afectados de WebKit aprobados sobre el build definitivo; incluye bytes nativos, Ctrl/Cmd+S, recuperación, reapertura, acciones de filas, geometría y foco. |
+| Contrato tipográfico en la aplicación | Aprobado en Chromium, Firefox y WebKit: fragmento/cursor/objeto, cancelación de fuente, Deshacer/Rehacer, párrafos vacíos, guardado, reapertura y exportación sincronizada entre dos sesiones. |
+| Entrada táctil | El flujo completo de Chromium usa un toque real emulado. Firefox y WebKit aprobaron una comprobación adicional con herramienta de texto, toque del lienzo, selección y toque del control de color, guardando sólo el rango elegido. |
+| Colaboración y aislamiento de red | Aprobados los casos de ACK perdido, reconexión, revocación y límites de colaboración; análisis estricto de 297 URL de la traza sin infracciones. Branding aprobado en dos superficies, 98 acciones y 33 archivos estáticos, conservando seis avisos legales. |
+| Regresiones finales de la aplicación | Tres casos del contrato completo, 12 casos de edición/colaboración y dos casos táctiles adicionales aprobados; seis combinaciones específicas de Chromium no aplican a los otros motores. Se verificó además en Firefox que cerrar el selector conserva la fuente confirmada y sus tamaños parciales. |
 
 El build definitivo de Next se ejecutó en su modo CI automatizado y terminó con
 código cero, seguido por las mismas etapas restantes del pipeline. La revisión
@@ -113,4 +117,8 @@ Compose; se recrean únicamente los servicios actualizados y se repiten salud y
 versión. No se retrocede ni reescribe el almacenamiento de documentos/escenas.
 Las revisiones anteriores y la extensión opaca permiten la recuperación.
 
-Estado de promoción: pendiente de cerrar compilación y pruebas de aplicación.
+Estado de promoción: **GO manual, 18 de noviembre de 2026**. Identidad,
+licencias, alcance de avisos, compatibilidad, pruebas, conexiones y recuperación
+revisados. No se requiere excepción para una vulnerabilidad alta/crítica
+alcanzable. El despliegue se completa únicamente después de comprobar salud,
+versión pública y registros del sistema actualizado.
