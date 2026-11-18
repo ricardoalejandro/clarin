@@ -30,6 +30,10 @@ export interface ClarinRichTextEditorController {
     captureSelection: () => void;
     toggleMark: (mark: ClarinTextMark) => void;
     getMarkState: (mark: ClarinTextMark) => ClarinTextMarkState;
+    setCharacterStyle: (property: "color" | "fontFamily" | "fontSize", value: string | number) => void;
+    getCharacterStyleState: (property: "color" | "fontFamily" | "fontSize") => string | number | "mixed";
+    scaleFontSize: (factor: number) => void;
+    restoreSelection: () => void;
     setParagraphAlignment: (align: ExcalidrawTextElement["textAlign"]) => void;
     getParagraphAlignmentState: () => ExcalidrawTextElement["textAlign"] | "mixed";
 }

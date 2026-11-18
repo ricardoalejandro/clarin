@@ -66,6 +66,7 @@ import {
   getApproxMinLineWidth,
   getApproxMinLineHeight,
 } from "./textMeasurements";
+import { getClarinMinimumEffectiveFontSize } from "./clarinCharacterStyle";
 
 // Returns true when transform (resizing/rotation) happened
 export const transformElements = (
@@ -266,7 +267,8 @@ export const measureFontSizeFromWidth = (
     }
   }
   const nextFontSize = element.fontSize * (nextWidth / width);
-  if (nextFontSize < MIN_FONT_SIZE) {
+  if (nextFontSize < MIN_FONT_SIZE ||
+    getClarinMinimumEffectiveFontSize(element) * (nextFontSize / element.fontSize) < MIN_FONT_SIZE) {
     return null;
   }
 
@@ -929,7 +931,8 @@ export const resizeSingleElement = (
   ) {
     const fontSize =
       (nextWidth / latestElement.width) * boundTextElement.fontSize;
-    if (fontSize < MIN_FONT_SIZE) {
+    if (fontSize < MIN_FONT_SIZE ||
+      getClarinMinimumEffectiveFontSize(boundTextElement) * (fontSize / boundTextElement.fontSize) < MIN_FONT_SIZE) {
       return;
     }
     boundTextFont.fontSize = fontSize;
@@ -1485,7 +1488,8 @@ export const resizeMultipleElements = (
       if (boundTextElement) {
         if (keepAspectRatio) {
           const newFontSize = boundTextElement.fontSize * scale;
-          if (newFontSize < MIN_FONT_SIZE) {
+          if (newFontSize < MIN_FONT_SIZE ||
+            getClarinMinimumEffectiveFontSize(boundTextElement) * scale < MIN_FONT_SIZE) {
             return;
           }
           update.boundTextFontSize = newFontSize;

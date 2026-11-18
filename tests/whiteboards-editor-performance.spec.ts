@@ -33,13 +33,13 @@ for (const count of [1_000, 10_000, 50_000]) test(`perfil opt-in del editor comp
   const consoleErrors: string[] = []
   const workerURLs: string[] = []
   const record: Record<string, unknown> = {
-    count, engine: '0.18.1-clarin.8', browser: browser.version(), viewport: '1440x900',
+    count, engine: '0.18.1-clarin.9', browser: browser.version(), viewport: '1440x900',
     sampleCount: 1, shape: 'unfilled roughness-0 rectangles on a 100-column grid with one visible edit target; viewport culling applies',
     edit: 'Select perf-0 and move it one pixel right; cardinality stays fixed, including the 50,000-element canonical limit.',
     limitations: 'Guest editor; HTTP/WebSocket mocked locally; includes browser decoding, fonts, render, save debounce and mock ACK. No server/DB latency, images, rich text, FPS, or device-wide memory claim. Context cache starts empty; server is warm.',
   }
   const scene = () => ({ type: 'excalidraw', version: 2, source: 'clarin', elements, appState: { viewBackgroundColor: '#ffffff', scrollX: 0, scrollY: 0, zoom: { value: 1 } }, files: {} })
-  const sceneRecord = () => ({ board_id: boardID, sequence, editor_version: '0.18.1-clarin.8', scene_schema_version: 'excalidraw', scene: scene() })
+  const sceneRecord = () => ({ board_id: boardID, sequence, editor_version: '0.18.1-clarin.9', scene_schema_version: 'excalidraw', scene: scene() })
   const commit = (patch: Array<Record<string, any>>) => {
     if (editStartedAt && firstPatchAfterEditMs === null) firstPatchAfterEditMs = performance.now() - editStartedAt
     patches += 1

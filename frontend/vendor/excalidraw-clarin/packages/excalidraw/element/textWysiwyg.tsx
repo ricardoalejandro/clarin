@@ -66,6 +66,17 @@ import {
   type ClarinTextMark,
 } from "./clarinRichText";
 import {
+  createClarinCharacterStyle, getClarinCharacterStyle, getClarinCharacterStyleAtCaret,
+  getClarinEffectiveCharacterStyle, getClarinCharacterStylePoints,
+  setClarinCharacterStyle, replaceClarinCharacterStyleRange,
+  validateClarinCharacterStyle, isClarinCharacterColor, isClarinCharacterFontFamily,
+  validateClarinCharacterStyleBase, rebaseClarinCharacterStyle,
+  type ClarinCharacterStyle, type ClarinCharacterStyleValues,
+  type ClarinCharacterStyleElement, type ClarinCharacterStyleBase,
+} from "./clarinCharacterStyle";
+import { applyClarinTextColorHighlights, clearClarinTextColorHighlights, supportsClarinTextColorHighlights,
+  type ClarinTextColorPatch } from "./clarinTextColorHighlights";
+import {
   applyClarinParagraphTextEdit,
   MAX_CLARIN_PARAGRAPH_ENTRIES_PER_ELEMENT,
   createClarinParagraphFormat,
@@ -430,19 +441,44 @@ const renderEditableRichText = (
   paragraphFormat: ClarinParagraphFormat | null,
   textAlign: ExcalidrawTextElement["textAlign"],
   selection?: EditableSelection,
+  characterStyle: ClarinCharacterStyle | null = null,
+  baseStyle?: Pick<ExcalidrawTextElement, "strokeColor" | "fontFamily" | "fontSize" | "lineHeight">,
+  usePaintHighlights = true,
 ) => {
+  clearClarinTextColorHighlights(editable);
   const fragment = document.createDocumentFragment();
   const runs = format?.runs || [];
-  const append = (parent: HTMLElement, value: string, marks: number) => {
+  const highlightColors = Boolean(usePaintHighlights && baseStyle && characterStyle?.runs.length
+    && supportsClarinTextColorHighlights(editable));
+  const colorPatches: ClarinTextColorPatch[] = [];
+  let previousSpan: { parent: HTMLElement; span: HTMLSpanElement; node: Text; key: string; end: number } | undefined;
+  const append = (parent: HTMLElement, value: string, marks: number, offset: number) => {
     if (!value) {
       return;
     }
+    const style = baseStyle && characterStyle?.runs.length
+      ? getClarinEffectiveCharacterStyle({ ...baseStyle, originalText: text }, offset, characterStyle) : null;
+    const key = JSON.stringify([highlightColors ? marks & (CLARIN_TEXT_MARK.BOLD | CLARIN_TEXT_MARK.ITALIC) : marks, style?.fontFamily, style?.fontSize]);
+    if (highlightColors && previousSpan?.parent === parent && previousSpan.key === key && previousSpan.end === offset) {
+      const from = previousSpan.node.length;
+      previousSpan.node.appendData(value); previousSpan.end += value.length;
+      if (style) colorPatches.push({ node: previousSpan.node, from, to: from + value.length, color: style.color, marks });
+      return;
+    }
     const span = document.createElement("span");
-    span.textContent = value;
+    const node = document.createTextNode(value); span.appendChild(node);
     span.style.fontWeight = marks & CLARIN_TEXT_MARK.BOLD ? "700" : "400";
     span.style.fontStyle = marks & CLARIN_TEXT_MARK.ITALIC ? "italic" : "normal";
-    span.style.textDecoration = getClarinTextDecoration(marks) || "none";
+    span.style.textDecoration = highlightColors ? "none" : getClarinTextDecoration(marks) || "none";
+    if (baseStyle && style) {
+      span.style.color = highlightColors ? baseStyle.strokeColor : style.color;
+      span.style.fontSize = `${style.fontSize}px`;
+      span.style.fontFamily = getFontFamilyString({ fontFamily: style.fontFamily });
+      span.style.lineHeight = String(baseStyle.lineHeight);
+    }
     parent.appendChild(span);
+    previousSpan = { parent, span, node, key, end: offset + value.length };
+    if (highlightColors && style) colorPatches.push({ node, from: 0, to: value.length, color: style.color, marks });
   };
   const paragraphStarts = getClarinParagraphStarts(text);
   const paragraphAlignments = getEffectiveParagraphAlignmentMap(
@@ -466,18 +502,17 @@ const renderEditableRichText = (
       "var(--clarin-wysiwyg-font-size, inherit)";
     paragraph.style.textAlign =
       paragraphAlignments.get(paragraphStart) ?? textAlign;
-    let offset = paragraphStart;
-    for (const run of runs) {
-      if (run.to <= paragraphStart || paragraphEnd <= run.from) {
-        continue;
+    const points = new Set([paragraphStart, paragraphEnd]);
+    for (const run of [...runs, ...(characterStyle?.runs || [])]) {
+      if (run.from < paragraphEnd && paragraphStart < run.to) {
+        points.add(Math.max(paragraphStart, run.from)); points.add(Math.min(paragraphEnd, run.to));
       }
-      const runStart = Math.max(paragraphStart, run.from);
-      const runEnd = Math.min(paragraphEnd, run.to);
-      append(paragraph, text.slice(offset, runStart), 0);
-      append(paragraph, text.slice(runStart, runEnd), run.marks);
-      offset = runEnd;
     }
-    append(paragraph, text.slice(offset, paragraphEnd), 0);
+    const ordered = [...points].sort((a, b) => a - b);
+    for (let point = 0; point < ordered.length - 1; point++) {
+      const from = ordered[point]; const to = ordered[point + 1];
+      append(paragraph, text.slice(from, to), runs.find((run) => run.from <= from && from < run.to)?.marks || 0, from);
+    }
     if (!paragraph.textContent) {
       const emptyLine = document.createElement("br");
       emptyLine.setAttribute(CLARIN_EMPTY_PARAGRAPH_ATTRIBUTE, "true");
@@ -495,6 +530,10 @@ const renderEditableRichText = (
     }
   }
   editable.replaceChildren(fragment);
+  if (highlightColors && !applyClarinTextColorHighlights(editable, colorPatches)) {
+    renderEditableRichText(editable, text, format, paragraphFormat, textAlign, selection, characterStyle, baseStyle, false);
+    return;
+  }
   if (selection) {
     setEditableSelection(
       editable,
@@ -512,6 +551,8 @@ const createClarinRichTextClipboardSelection = ({
   textAlign,
   from,
   to,
+  characterStyle = null,
+  baseStyle,
 }: {
   sourceText: string;
   format: ClarinTextFormat | null;
@@ -519,6 +560,8 @@ const createClarinRichTextClipboardSelection = ({
   textAlign: ExcalidrawTextElement["textAlign"];
   from: number;
   to: number;
+  characterStyle?: ClarinCharacterStyle | null;
+  baseStyle?: ClarinCharacterStyleBase;
 }) => {
   const start = Math.max(0, Math.min(sourceText.length, Math.min(from, to)));
   const end = Math.max(start, Math.min(sourceText.length, Math.max(from, to)));
@@ -567,6 +610,13 @@ const createClarinRichTextClipboardSelection = ({
       : null,
     textAlign,
     formattedParagraphStarts,
+    ...(baseStyle && validateClarinCharacterStyleBase(baseStyle) ? {
+      baseStyle,
+      characterStyle: createClarinCharacterStyle(text, (characterStyle?.runs || []).flatMap((run) => {
+        const from = Math.max(start, run.from); const to = Math.min(end, run.to);
+        return from < to ? [{ ...run, from: from - start, to: to - start }] : [];
+      })),
+    } : {}),
   };
 };
 
@@ -575,6 +625,8 @@ type ParsedClarinRichTextClipboard = {
   paragraphFormat: ClarinParagraphFormat | null;
   textAlign: ExcalidrawTextElement["textAlign"] | null;
   formattedParagraphStarts: readonly number[];
+  characterStyle?: ClarinCharacterStyle | null;
+  baseStyle?: ClarinCharacterStyleBase;
 };
 
 const getEffectiveParagraphAlignmentMap = (
@@ -659,6 +711,8 @@ const parseClarinRichTextClipboard = (
       paragraphFormat?: unknown;
       textAlign?: unknown;
       formattedParagraphStarts?: unknown;
+      characterStyle?: unknown;
+      baseStyle?: unknown;
     };
     if (
       parsed.version !== 1 ||
@@ -667,6 +721,9 @@ const parseClarinRichTextClipboard = (
     ) {
       return null;
     }
+    const characterPayload = validateClarinCharacterStyleBase(parsed.baseStyle)
+      && validateClarinCharacterStyle(parsed.characterStyle, text, parsed.baseStyle.fontSize)
+      ? { characterStyle: parsed.characterStyle, baseStyle: parsed.baseStyle } : {};
     if (
       isClarinParagraphAlignment(parsed.textAlign) &&
       (parsed.paragraphFormat === null ||
@@ -692,6 +749,7 @@ const parseClarinRichTextClipboard = (
           paragraphFormat: parsed.paragraphFormat,
           textAlign: parsed.textAlign,
           formattedParagraphStarts,
+          ...characterPayload,
         };
       }
     }
@@ -701,6 +759,7 @@ const parseClarinRichTextClipboard = (
       paragraphFormat: null,
       textAlign: null,
       formattedParagraphStarts: [],
+      ...characterPayload,
     };
   } catch {
     return null;
@@ -820,6 +879,7 @@ export const textWysiwyg = ({
     clarinTextFormat: ClarinTextFormat | null,
     clarinParagraphFormat: ClarinParagraphFormat | null,
     textAlign: ExcalidrawTextElement["textAlign"],
+    clarinCharacterStyle: ClarinCharacterStyle | null,
   ) => void;
   onSubmit: (data: {
     viaKeyboard: boolean;
@@ -827,6 +887,7 @@ export const textWysiwyg = ({
     clarinTextFormat: ClarinTextFormat | null;
     clarinParagraphFormat: ClarinParagraphFormat | null;
     textAlign: ExcalidrawTextElement["textAlign"];
+    clarinCharacterStyle: ClarinCharacterStyle | null;
   }) => void;
   getViewportCoords: (x: number, y: number) => [number, number];
   element: ExcalidrawTextElement;
@@ -1060,12 +1121,26 @@ export const textWysiwyg = ({
     boxSizing: "content-box",
   });
   let currentFormat = getClarinTextFormat(element);
+  let currentCharacterStyle = getClarinCharacterStyle(element);
   let currentParagraphFormat = getClarinParagraphFormat(element);
   let currentTextAlign = element.textAlign;
   let lastValue = element.originalText;
   let pendingMarks = getClarinMarksAtCaret(currentFormat, lastValue.length);
   let pendingMarksExplicit = false;
   let pendingMarksOffset: number | null = null;
+  let pendingCharacterStyle = getClarinCharacterStyleAtCaret(currentCharacterStyle, lastValue, lastValue.length);
+  let pendingCharacterStyleExplicit = false;
+  let pendingCharacterStyleOffset: number | null = null;
+  let characterFocusFrame: number | null = null;
+  const currentBaseStyle = () => app.scene.getElement<ExcalidrawTextElement>(id) ?? element;
+  const clipboardBaseStyle = (): ClarinCharacterStyleBase => {
+    const base = currentBaseStyle();
+    return { color: base.strokeColor.toUpperCase(), fontSize: base.fontSize, fontFamily: base.fontFamily };
+  };
+  const renderCurrentEditable = (selection?: EditableSelection) => renderEditableRichText(
+    editable, lastValue, currentFormat, currentParagraphFormat, currentTextAlign,
+    selection, currentCharacterStyle, currentBaseStyle(),
+  );
   let isComposing = false;
   let lastSelection: EditableSelection = createEditableSelection(lastValue.length);
   let commandSelection: EditableSelection | null = null;
@@ -1078,6 +1153,10 @@ export const textWysiwyg = ({
     pendingMarksOffset: number | null;
     paragraphFormat: ClarinParagraphFormat | null;
     textAlign: ExcalidrawTextElement["textAlign"];
+    characterStyle: ClarinCharacterStyle | null;
+    pendingCharacterStyle: ClarinCharacterStyleValues;
+    pendingCharacterStyleExplicit: boolean;
+    pendingCharacterStyleOffset: number | null;
   } | null = null;
   const getCurrentSelection = () =>
     getEditableSelection(editable) ?? lastSelection;
@@ -1090,6 +1169,10 @@ export const textWysiwyg = ({
     pendingMarks: number;
     pendingMarksExplicit: boolean;
     pendingMarksOffset: number | null;
+    characterStyle: ClarinCharacterStyle | null;
+    pendingCharacterStyle: ClarinCharacterStyleValues;
+    pendingCharacterStyleExplicit: boolean;
+    pendingCharacterStyleOffset: number | null;
   };
   const undoStack: EditorHistoryEntry[] = [];
   const redoStack: EditorHistoryEntry[] = [];
@@ -1116,6 +1199,10 @@ export const textWysiwyg = ({
     pendingMarks,
     pendingMarksExplicit,
     pendingMarksOffset,
+    characterStyle: currentCharacterStyle ? { ...currentCharacterStyle, runs: currentCharacterStyle.runs.map((run) => ({ ...run })) } : null,
+    pendingCharacterStyle: { ...pendingCharacterStyle },
+    pendingCharacterStyleExplicit,
+    pendingCharacterStyleOffset,
   });
   const pushHistory = (selection?: EditableSelection) => {
     undoStack.push(historyEntry(selection));
@@ -1124,13 +1211,24 @@ export const textWysiwyg = ({
     }
     redoStack.length = 0;
   };
-  renderEditableRichText(
-    editable,
-    lastValue,
-    currentFormat,
-    currentParagraphFormat,
-    currentTextAlign,
-  );
+  const restoreStateEntry = (entry: EditorHistoryEntry) => {
+    lastValue = entry.text; currentFormat = entry.format; currentParagraphFormat = entry.paragraphFormat;
+    currentTextAlign = entry.textAlign; currentCharacterStyle = entry.characterStyle;
+    pendingMarks = entry.pendingMarks; pendingMarksExplicit = entry.pendingMarksExplicit; pendingMarksOffset = entry.pendingMarksOffset;
+    pendingCharacterStyle = entry.pendingCharacterStyle; pendingCharacterStyleExplicit = entry.pendingCharacterStyleExplicit;
+    pendingCharacterStyleOffset = entry.pendingCharacterStyleOffset; lastSelection = entry.selection;
+  };
+  const rejectTextMutation = (previous: EditorHistoryEntry, error: unknown) => {
+    restoreStateEntry(previous);
+    renderCurrentEditable(previous.selection);
+    app.setState({ errorMessage: error instanceof Error ? error.message : "No se pudo aplicar el cambio al texto." });
+  };
+  const recordHistoryEntry = (entry: EditorHistoryEntry) => {
+    undoStack.push(entry);
+    if (undoStack.length > 200) undoStack.shift();
+    redoStack.length = 0;
+  };
+  renderCurrentEditable();
   updateWysiwygStyle();
 
   const emitChange = () => {
@@ -1141,6 +1239,7 @@ export const textWysiwyg = ({
         ? currentParagraphFormat
         : null,
       currentTextAlign,
+      currentCharacterStyle?.runs.length ? currentCharacterStyle : null,
     );
   };
 
@@ -1153,6 +1252,7 @@ export const textWysiwyg = ({
     insertedTextAlign?: ExcalidrawTextElement["textAlign"] | null;
     insertedFormattedParagraphStarts?: readonly number[];
     insertedMarks?: number;
+    insertedCharacterStyle?: ClarinCharacterStyle | null;
   };
 
   const applyTextReplacementToState = ({
@@ -1164,6 +1264,7 @@ export const textWysiwyg = ({
     insertedTextAlign = null,
     insertedFormattedParagraphStarts = [],
     insertedMarks = pendingMarks,
+    insertedCharacterStyle = null,
   }: TextReplacement) => {
     const normalizedInsertedText = normalizeText(insertedText);
     const insertionStart = Math.max(0, Math.min(lastValue.length, Math.min(from, to)));
@@ -1181,6 +1282,11 @@ export const textWysiwyg = ({
       insertedText: normalizedInsertedText,
       insertedMarks,
       insertedFormat,
+    });
+    currentCharacterStyle = replaceClarinCharacterStyleRange({
+      format: currentCharacterStyle, text: lastValue, from, to,
+      insertedText: normalizedInsertedText, insertedStyle: pendingCharacterStyle,
+      insertedFormat: insertedCharacterStyle,
     });
     currentFormat = result.format;
     lastValue = result.text;
@@ -1210,6 +1316,7 @@ export const textWysiwyg = ({
     selection,
     historySelection,
     captureHistory = true,
+    insertedCharacterStyle = null,
   }: {
     from: number;
     to: number;
@@ -1221,13 +1328,11 @@ export const textWysiwyg = ({
     selection?: EditableSelection;
     historySelection?: EditableSelection;
     captureHistory?: boolean;
+    insertedCharacterStyle?: ClarinCharacterStyle | null;
   }) => {
-    if (captureHistory) {
-      pushHistory(
-        historySelection ?? createEditableSelection(from, to),
-      );
-    }
-    const insertedLength = applyTextReplacementToState({
+    const previous = historyEntry(historySelection ?? createEditableSelection(from, to));
+    let insertedLength: number;
+    try { insertedLength = applyTextReplacementToState({
       from,
       to,
       insertedText,
@@ -1235,18 +1340,13 @@ export const textWysiwyg = ({
       insertedParagraphFormat,
       insertedTextAlign,
       insertedFormattedParagraphStarts,
-    });
+      insertedCharacterStyle,
+    }); } catch (error) { rejectTextMutation(previous, error); return; }
+    if (captureHistory) recordHistoryEntry(previous);
     const caret = Math.min(from, to) + insertedLength;
     const nextSelection = selection || createEditableSelection(caret);
     lastSelection = nextSelection;
-    renderEditableRichText(
-      editable,
-      lastValue,
-      currentFormat,
-      currentParagraphFormat,
-      currentTextAlign,
-      nextSelection,
-    );
+    renderCurrentEditable(nextSelection);
     emitChange();
     publishClarinRichTextState();
   };
@@ -1258,21 +1358,15 @@ export const textWysiwyg = ({
     if (!replacements.length) {
       return;
     }
-    pushHistory(getCurrentSelection());
-    for (const replacement of [...replacements].sort(
-      (left, right) => right.from - left.from || right.to - left.to,
-    )) {
-      applyTextReplacementToState(replacement);
-    }
+    const previous = historyEntry(getCurrentSelection());
+    try {
+      for (const replacement of [...replacements].sort(
+        (left, right) => right.from - left.from || right.to - left.to,
+      )) applyTextReplacementToState(replacement);
+    } catch (error) { rejectTextMutation(previous, error); return; }
+    recordHistoryEntry(previous);
     lastSelection = nextSelection;
-    renderEditableRichText(
-      editable,
-      lastValue,
-      currentFormat,
-      currentParagraphFormat,
-      currentTextAlign,
-      nextSelection,
-    );
+    renderCurrentEditable(nextSelection);
     emitChange();
     publishClarinRichTextState();
   };
@@ -1283,6 +1377,7 @@ export const textWysiwyg = ({
     insertedParagraphFormat: ClarinParagraphFormat | null = null,
     insertedTextAlign: ExcalidrawTextElement["textAlign"] | null = null,
     insertedFormattedParagraphStarts: readonly number[] = [],
+    insertedCharacterStyle: ClarinCharacterStyle | null = null,
   ) => {
     const selection = getCurrentSelection();
     const [from, to] = selection;
@@ -1294,6 +1389,7 @@ export const textWysiwyg = ({
       insertedParagraphFormat,
       insertedTextAlign,
       insertedFormattedParagraphStarts,
+      insertedCharacterStyle,
       historySelection: selection,
     });
   };
@@ -1310,6 +1406,8 @@ export const textWysiwyg = ({
       textAlign: currentTextAlign,
       from,
       to,
+      characterStyle: currentCharacterStyle,
+      baseStyle: clipboardBaseStyle(),
     });
   };
 
@@ -1412,6 +1510,7 @@ export const textWysiwyg = ({
       let insertedParagraphFormat: ClarinParagraphFormat | null = null;
       let insertedTextAlign: ExcalidrawTextElement["textAlign"] | null = null;
       let insertedFormattedParagraphStarts: readonly number[] = [];
+      let insertedCharacterStyle: ClarinCharacterStyle | null = null;
       const privateValue = event.clipboardData?.getData(
         CLARIN_RICH_TEXT_CLIPBOARD_TYPE,
       );
@@ -1422,6 +1521,11 @@ export const textWysiwyg = ({
           insertedParagraphFormat = parsed.paragraphFormat;
           insertedTextAlign = parsed.textAlign;
           insertedFormattedParagraphStarts = parsed.formattedParagraphStarts;
+          if (parsed.baseStyle) {
+            try { insertedCharacterStyle = rebaseClarinCharacterStyle(
+              data, parsed.characterStyle ?? null, parsed.baseStyle, clipboardBaseStyle(),
+            ); } catch (error) { rejectTextMutation(historyEntry(), error); return; }
+          }
         }
       }
       replaceSelection(
@@ -1430,6 +1534,7 @@ export const textWysiwyg = ({
         insertedParagraphFormat,
         insertedTextAlign,
         insertedFormattedParagraphStarts,
+        insertedCharacterStyle,
       );
     };
     editable.onbeforeinput = (event) => {
@@ -1481,6 +1586,10 @@ export const textWysiwyg = ({
         pendingMarksOffset,
         paragraphFormat: currentParagraphFormat,
         textAlign: currentTextAlign,
+        characterStyle: currentCharacterStyle,
+        pendingCharacterStyle: { ...pendingCharacterStyle },
+        pendingCharacterStyleExplicit,
+        pendingCharacterStyleOffset,
       };
     };
     editable.oncompositionend = () => {
@@ -1501,6 +1610,10 @@ export const textWysiwyg = ({
         pendingMarks = start.pendingMarks;
         pendingMarksExplicit = start.pendingMarksExplicit;
         pendingMarksOffset = start.pendingMarksOffset;
+        currentCharacterStyle = start.characterStyle;
+        pendingCharacterStyle = start.pendingCharacterStyle;
+        pendingCharacterStyleExplicit = start.pendingCharacterStyleExplicit;
+        pendingCharacterStyleOffset = start.pendingCharacterStyleOffset;
         const suffixLength = start.text.length - start.selection[1];
         const insertedTo = Math.max(
           start.selection[0],
@@ -1522,14 +1635,7 @@ export const textWysiwyg = ({
           captureHistory: false,
         });
       } else {
-        renderEditableRichText(
-          editable,
-          lastValue,
-          currentFormat,
-          currentParagraphFormat,
-          currentTextAlign,
-          domSelection ?? start?.selection ?? lastSelection,
-        );
+        renderCurrentEditable(domSelection ?? start?.selection ?? lastSelection);
       }
     };
     editable.oninput = () => {
@@ -1569,14 +1675,48 @@ export const textWysiwyg = ({
     commandSelection = null;
     return selection;
   };
+  const readCharacterState = (property: "color" | "fontFamily" | "fontSize"): string | number => {
+    const [from, to] = commandSelection ?? getCurrentSelection();
+    const base = currentBaseStyle();
+    const elementStyle = { ...base, originalText: lastValue };
+    if (from === to) {
+      return property === "color" ? pendingCharacterStyle.color ?? base.strokeColor.toUpperCase()
+        : property === "fontFamily" ? pendingCharacterStyle.fontFamily ?? base.fontFamily
+        : base.fontSize * (pendingCharacterStyle.fontScale ?? 1);
+    }
+    const points = new Set([from, to]);
+    for (const run of currentCharacterStyle?.runs || []) if (run.from < to && from < run.to) {
+      points.add(Math.max(from, run.from)); points.add(Math.min(to, run.to));
+    }
+    const values = [...points].filter((point) => point < to).map((point) =>
+      getClarinEffectiveCharacterStyle(elementStyle, point, currentCharacterStyle)[property]);
+    return values.every((value) => value === values[0]) ? values[0] : "mixed";
+  };
+  const restoreCharacterSelection = (selection: EditableSelection) => {
+    lastSelection = selection;
+    editable.focus({ preventScroll: true });
+    renderCurrentEditable(selection);
+    if (characterFocusFrame !== null) cancelAnimationFrame(characterFocusFrame);
+    // Radix closes the picker after the action returns. Restore after its
+    // focus scope has unmounted, rather than letting it retake editor focus.
+    if (app.state.openPopup) characterFocusFrame = requestAnimationFrame(() => {
+      characterFocusFrame = null;
+      if (!isDestroyed) { editable.focus({ preventScroll: true }); setEditableSelection(editable, selection[0], selection[1], getEditableSelectionDirection(selection)); }
+    });
+  };
 
   const richTextController = {
     elementId: id,
     captureSelection: () => {
+      temporarilyDisableSubmit();
       const selection = getEditableSelection(editable);
       if (selection) {
         lastSelection = selection;
         commandSelection = selection;
+        if (selection[0] === selection[1] && (!pendingCharacterStyleExplicit || pendingCharacterStyleOffset !== selection[0])) {
+          pendingCharacterStyle = getClarinCharacterStyleAtCaret(currentCharacterStyle, lastValue, selection[0]);
+          pendingCharacterStyleExplicit = false; pendingCharacterStyleOffset = null;
+        }
       }
     },
     toggleMark: (mark: ClarinTextMark) => {
@@ -1597,14 +1737,7 @@ export const textWysiwyg = ({
           to,
           mark,
         );
-        renderEditableRichText(
-          editable,
-          lastValue,
-          currentFormat,
-          currentParagraphFormat,
-          currentTextAlign,
-          selection,
-        );
+        renderCurrentEditable(selection);
         emitChange();
       }
       publishClarinRichTextState();
@@ -1615,6 +1748,64 @@ export const textWysiwyg = ({
         return pendingMarks & mark ? ("on" as const) : ("off" as const);
       }
       return getClarinMarkState(currentFormat, lastValue, from, to, mark);
+    },
+    getCharacterStyleState: readCharacterState,
+    restoreSelection: () => restoreCharacterSelection(consumeCommandSelection()),
+    setCharacterStyle: (property: "color" | "fontFamily" | "fontSize", value: string | number) => {
+      const normalized = property === "color" && typeof value === "string" ? value.toUpperCase() : value;
+      if ((property === "color" && !isClarinCharacterColor(normalized))
+        || (property === "fontFamily" && !isClarinCharacterFontFamily(normalized))
+        || (property === "fontSize" && (typeof normalized !== "number" || !Number.isFinite(normalized) || normalized < 1))) return;
+      const unchanged = readCharacterState(property) === normalized;
+      const selection = consumeCommandSelection();
+      if (unchanged) { restoreCharacterSelection(selection); return; }
+      const base = currentBaseStyle();
+      const patch: ClarinCharacterStyleValues = property === "color"
+        ? { color: normalized === base.strokeColor.toUpperCase() ? undefined : normalized as string }
+        : property === "fontFamily" ? { fontFamily: normalized === base.fontFamily ? undefined : normalized as number }
+        : { fontScale: (normalized as number) / base.fontSize };
+      let next = currentCharacterStyle;
+      if (selection[0] !== selection[1]) {
+        try { next = setClarinCharacterStyle(currentCharacterStyle, lastValue, selection[0], selection[1], patch); }
+        catch (error) { app.setState({ errorMessage: error instanceof Error ? error.message : "No se pudo aplicar el formato." }); return; }
+      }
+      pushHistory(selection);
+      if (selection[0] === selection[1]) {
+        pendingCharacterStyle = { ...pendingCharacterStyle, ...patch };
+        pendingCharacterStyleExplicit = true;
+        pendingCharacterStyleOffset = selection[0];
+      } else {
+        currentCharacterStyle = next;
+        pendingCharacterStyleExplicit = false; pendingCharacterStyleOffset = null;
+        emitChange();
+      }
+      restoreCharacterSelection(selection);
+      publishClarinRichTextState();
+    },
+    scaleFontSize: (factor: number) => {
+      if (!Number.isFinite(factor) || factor <= 0) return;
+      const selection = consumeCommandSelection();
+      const [from, to] = selection;
+      const base = currentBaseStyle();
+      if (from === to) {
+        const size = Math.max(1, Math.round(base.fontSize * (pendingCharacterStyle.fontScale ?? 1) * factor));
+        commandSelection = selection;
+        richTextController.setCharacterStyle("fontSize", size);
+        return;
+      }
+      const elementStyle = { ...base, originalText: lastValue, customData: { clarinCharacterStyle: currentCharacterStyle } };
+      const points = getClarinCharacterStylePoints(elementStyle, from, to);
+      let next = currentCharacterStyle;
+      try {
+        for (let index = 0; index < points.length - 1; index++) {
+          const size = getClarinEffectiveCharacterStyle(elementStyle, points[index], currentCharacterStyle).fontSize;
+          next = setClarinCharacterStyle(next, lastValue, points[index], points[index + 1], { fontScale: Math.max(1, Math.round(size * factor)) / base.fontSize });
+        }
+      } catch (error) { rejectTextMutation(historyEntry(selection), error); return; }
+      if (JSON.stringify(next?.runs) !== JSON.stringify(currentCharacterStyle?.runs)) {
+        pushHistory(selection); currentCharacterStyle = next; emitChange();
+      }
+      restoreCharacterSelection(selection); publishClarinRichTextState();
     },
     setParagraphAlignment: (align: ExcalidrawTextElement["textAlign"]) => {
       const selection = consumeCommandSelection();
@@ -1641,14 +1832,7 @@ export const textWysiwyg = ({
       });
       currentParagraphFormat = result.format;
       currentTextAlign = result.textAlign;
-      renderEditableRichText(
-        editable,
-        lastValue,
-        currentFormat,
-        currentParagraphFormat,
-        currentTextAlign,
-        selection,
-      );
+      renderCurrentEditable(selection);
       emitChange();
       publishClarinRichTextState();
     },
@@ -1687,9 +1871,14 @@ export const textWysiwyg = ({
           pendingMarksExplicit = false;
           pendingMarksOffset = null;
         }
+        if (!pendingCharacterStyleExplicit || pendingCharacterStyleOffset !== from) {
+          pendingCharacterStyle = getClarinCharacterStyleAtCaret(currentCharacterStyle, lastValue, from);
+          pendingCharacterStyleExplicit = false; pendingCharacterStyleOffset = null;
+        }
       } else {
         pendingMarksExplicit = false;
         pendingMarksOffset = null;
+        pendingCharacterStyleExplicit = false; pendingCharacterStyleOffset = null;
       }
       publishClarinRichTextState();
     }
@@ -1711,16 +1900,13 @@ export const textWysiwyg = ({
     pendingMarks = entry.pendingMarks;
     pendingMarksExplicit = entry.pendingMarksExplicit;
     pendingMarksOffset = entry.pendingMarksOffset;
+    currentCharacterStyle = entry.characterStyle;
+    pendingCharacterStyle = entry.pendingCharacterStyle;
+    pendingCharacterStyleExplicit = entry.pendingCharacterStyleExplicit;
+    pendingCharacterStyleOffset = entry.pendingCharacterStyleOffset;
     commandSelection = null;
     lastSelection = entry.selection;
-    renderEditableRichText(
-      editable,
-      lastValue,
-      currentFormat,
-      currentParagraphFormat,
-      currentTextAlign,
-      entry.selection,
-    );
+    renderCurrentEditable(entry.selection);
     emitChange();
     publishClarinRichTextState();
   };
@@ -1978,10 +2164,12 @@ export const textWysiwyg = ({
         ? currentParagraphFormat
         : null,
       textAlign: currentTextAlign,
+      clarinCharacterStyle: currentCharacterStyle?.runs.length ? currentCharacterStyle : null,
     });
   };
 
   const cleanup = () => {
+    clearClarinTextColorHighlights(editable);
     // remove events to ensure they don't late-fire
     editable.onblur = null;
     editable.onbeforeinput = null;
@@ -1995,6 +2183,7 @@ export const textWysiwyg = ({
     editable.onpointerdown = null;
     document.removeEventListener("selectionchange", onDocumentSelectionChange);
     clearActiveClarinRichTextEditor(richTextController);
+    if (characterFocusFrame !== null) { cancelAnimationFrame(characterFocusFrame); characterFocusFrame = null; }
 
     if (bindBlurTimeout !== null) {
       window.clearTimeout(bindBlurTimeout);
