@@ -52,11 +52,11 @@ async function typeEditorLines(page: Page, text: string) {
   }
 }
 
-async function pressEditorShortcut(page: Page, key: string) {
+async function pressEditorShortcut(page: Page, key: string, macKey = key) {
   // Monaco follows the emulated browser OS; Playwright's ControlOrMeta follows
   // the runner host, which differs for Desktop Safari on a Windows runner.
   const modifier = await page.evaluate(() => /Macintosh|iPhone|iPad|iPod/.test(navigator.userAgent) ? 'Meta' : 'Control')
-  await page.keyboard.press(`${modifier}+${key}`)
+  await page.keyboard.press(`${modifier}+${modifier === 'Meta' ? macKey : key}`)
 }
 
 test('keeps independent same-tool tabs, saves, renames, searches, reopens and deletes documents', async ({ page }, testInfo) => {
@@ -114,11 +114,11 @@ test('saves real Monaco TXT and SQL with Ctrl+S, preserves modes on reload and e
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(1600)
   await choices.getByRole('option', { name: /^Texto plano/ }).click()
   const text = 'Texto libre, Pe\u00f1a y \ud83d\ude00\nSegunda l\u00ednea.'
+  await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
+  const id = library.getWorkspace().active_id!
   await editor.getByRole('textbox').focus()
   await typeEditorLines(page, text)
   await pressEditorShortcut(page, 's')
-  await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
-  const id = library.getWorkspace().active_id!
   await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString(), { timeout: 1500 }).toBe(text)
   expect(downloads).toEqual([])
   await expect(page.getByRole('button', { name: 'Formatear', exact: true })).toBeDisabled()
@@ -158,13 +158,19 @@ test('Ctrl+S saves the whole chunked text document and the active document while
   await expect(editorA).toBeVisible({ timeout: 30_000 })
   await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'large.txt', mimeType: 'text/plain', buffer: Buffer.from('x'.repeat(100_100)) })
   await expect(page.getByRole('button', { name: 'Tramo siguiente', exact: true })).toBeVisible()
-  await editorA.getByRole('textbox').focus()
-  await page.keyboard.press('Home')
-  await page.keyboard.insertText('chunk-save:')
-  await pressEditorShortcut(page, 's')
   await expect.poll(() => library.getWorkspace().active_id).not.toBeNull()
   const id = library.getWorkspace().active_id!
-  await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString()).toBe('chunk-save:' + 'x'.repeat(100_100))
+  const chunkInput = editorA.getByRole('textbox')
+  await chunkInput.focus()
+  await pressEditorShortcut(page, 'Home', 'ArrowUp')
+  // Position the native caret explicitly: WebKit's emulated Mac key gesture
+  // leaves the native textarea caret at context offset500 on a Windows runner.
+  await chunkInput.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0))
+  await chunkInput.pressSequentially('chunk-save:')
+  await expect(chunkInput).toHaveValue(/^chunk-save:/)
+  await expect(editorA.locator('.view-lines')).toContainText('chunk-save:')
+  await pressEditorShortcut(page, 's')
+  await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString(), { timeout: 1500 }).toBe('chunk-save:' + 'x'.repeat(100_100))
   await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'small.txt', mimeType: 'text/plain', buffer: Buffer.from('first') })
   await clickEditorAction(page, 'Mostrar segundo panel')
   const editorB = page.getByTestId('document-editor-b')
