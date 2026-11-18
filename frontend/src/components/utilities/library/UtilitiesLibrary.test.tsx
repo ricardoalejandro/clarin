@@ -527,6 +527,44 @@ describe('utility library orchestration', () => {
     expect(window.document.querySelectorAll('[data-utility-workspace-header]')).toHaveLength(1)
   })
 
+  it('gives only the focused library overlay one Escape owner ahead of underlying global panels', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, right: 900, bottom: 650, width: 900, height: 650, x: 0, y: 0, toJSON: () => ({}) }))
+    const underlyingEscape = vi.fn()
+    window.document.addEventListener('keydown', underlyingEscape)
+    const outside = window.document.createElement('button')
+    outside.textContent = 'Underlying panel'
+    window.document.body.append(outside)
+    try {
+      render(<UtilitiesLibrary />)
+      await waitFor(() => expect(screen.getByRole('textbox', { name: 'Test document source' })).toHaveValue('saved'))
+      for (const focus of ['search', 'header']) {
+        fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
+        const target = focus === 'search' ? screen.getByRole('textbox', { name: 'Buscar documentos por nombre o contenido' }) : screen.getByRole('button', { name: 'Cerrar biblioteca' })
+        target.focus()
+        expect(fireEvent.keyDown(target, { key: 'Escape' })).toBe(false)
+        expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
+        expect(underlyingEscape).not.toHaveBeenCalled()
+        expect(screen.getByRole('button', { name: 'Abrir biblioteca' })).toHaveFocus()
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
+      outside.focus()
+      expect(fireEvent.keyDown(outside, { key: 'Escape' })).toBe(true)
+      expect(underlyingEscape).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBeInTheDocument()
+      underlyingEscape.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: 'Acciones de Saved QR' }))
+      const renameAction = screen.getByRole('menuitem', { name: 'Renombrar documento' })
+      renameAction.focus()
+      fireEvent.keyDown(renameAction, { key: 'Escape' })
+      expect(screen.queryByRole('menu', { name: 'Acciones de Saved QR' })).not.toBeInTheDocument()
+      expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBeInTheDocument()
+      expect(underlyingEscape).not.toHaveBeenCalled()
+    } finally {
+      window.document.removeEventListener('keydown', underlyingEscape)
+      outside.remove()
+    }
+  })
+
   it('opens complete save details and filters through portals while Escape keeps the underlying library available', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
     render(<UtilitiesLibrary />)
@@ -538,7 +576,8 @@ describe('utility library orchestration', () => {
     fireEvent.keyDown(window.document, { key: 'Escape' })
     expect(status).toHaveFocus()
     fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Filtrar documentos' }))
+    const filter = screen.getByRole('button', { name: 'Filtrar documentos' })
+    filter.focus(); fireEvent.click(filter)
     expect(screen.getByRole('dialog', { name: 'Filtros de documentos' }).parentElement).toBe(window.document.body)
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrar por tipo' }), { target: { value: 'json' } })
     await waitFor(() => expect(request.mock.calls.some(([path]) => path.includes('type=json'))).toBe(true))

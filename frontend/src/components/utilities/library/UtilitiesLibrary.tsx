@@ -202,9 +202,18 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     const restored = libraryFocusRestored.current
     libraryFocusRestored.current = false
     const frame = requestAnimationFrame(() => { if (!restored) librarySurface.current?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true }) })
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !dialogRef.current) { event.preventDefault(); setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true }) } }
-    document.addEventListener('keydown', escape)
-    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape) }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || dialogRef.current) return
+      const target = event.target === document ? document.activeElement : event.target as Node | null
+      if (!target || (!librarySurface.current?.contains(target) && !libraryTrigger.current?.contains(target))) return
+      // A nested portaled menu or picker owns the first Escape, even while its
+      // focus transfer is pending. The library then owns its own focused Escape.
+      if (librarySurface.current?.querySelector('[aria-haspopup][aria-expanded="true"]')) return
+      event.preventDefault(); event.stopImmediatePropagation()
+      setLibraryOpen(false); libraryTrigger.current?.focus({ preventScroll: true })
+    }
+    document.addEventListener('keydown', escape, true)
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape, true) }
   }, [overlay])
   useEffect(() => { setFilterAnchor(null) }, [wide, libraryOpen])
   useLayoutEffect(() => {
