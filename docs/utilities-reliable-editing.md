@@ -25,6 +25,9 @@ Los errores de conexión, autorización y conflicto conservan su significado. Un
 | Suite completa Go en Linux | Todos los paquetes pasaron, incluido `cmd/storage-ui-qa`, con Go `1.27.2 linux/amd64`, backend montado sólo para lectura y caché temporal. |
 | `TestUtilitiesPostgresReadCheckpointIntegration` | Pasó en 8,53 s: aislamiento por cuenta/propietario, conflicto PostgreSQL `55P03` durante una lectura compartida, checkpoint posterior coherente y liberación del bloqueo al cancelar. Objetos simulados en memoria; PostgreSQL e inventarios reales. |
 | `TestUtilitiesPostgresAndMinIOIntegration` | Pasaron sus 12 casos en 9,44 s con PostgreSQL y MinIO reales: CAS/reintentos, carrera de checkpoint, búsqueda, metadatos/pestañas, vault y copias, limpieza física de versiones, cuotas, concurrencia y originales no UTF-8. |
+| Frontend | 43 archivos / 319 pruebas aprobadas; cola/API 68 pruebas aprobadas; después de los ajustes de Escape y Safari, las suites afectadas de biblioteca y selector aprobaron 27 y 3 pruebas respectivamente. |
+| Interfaz de producción | 36 escenarios verificados en Chromium, Firefox y WebKit. Tras una interrupción del entorno y ajustes de entrada sintética, 33 pasaron en la ejecución completa y los tres afectados de WebKit pasaron sobre el artefacto final. Se mantuvieron las aserciones de bytes completos, reapertura, descarga y foco. |
+| Compilación | Next de producción y TypeScript aprobados; verificaciones finales de CSS, shell offline y recursos también aprobadas. |
 
 Las dos verificaciones de integración ejecutaron las migraciones dos veces sobre una base desechable. Después de la limpieza de los fixtures quedaron cero cuentas, documentos, contenidos, cambios y objetos de Utilitarios en esa base. Los contenedores y su red se eliminaron comprobando nombres exactos y etiquetas de QA.
 
