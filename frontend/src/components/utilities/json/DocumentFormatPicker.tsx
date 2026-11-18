@@ -31,7 +31,7 @@ export function DocumentFormatPicker({ value, disabled, className, width, onChan
     <button ref={trigger} type="button" role="combobox" aria-label="Formato del documento" aria-haspopup="listbox" aria-expanded={open}
       aria-controls={open ? id : undefined} aria-description={`Formato actual: ${documentFormat(value).label}`} disabled={disabled} className={`${className} inline-flex items-center justify-between gap-1`} style={{ width, paddingInline: 6 }} title={documentFormat(value).label}
       onKeyDown={event => { if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setFocused(value); setQuery(''); settleQuery(''); setOpen(true) } }}
-      onClick={() => { setFocused(value); setQuery(''); settleQuery(''); setOpen(current => !current) }}>
+      onClick={event => { event.currentTarget.focus({ preventScroll: true }); setFocused(value); setQuery(''); settleQuery(''); setOpen(current => !current) }}>
       <span>{documentFormat(value).shortLabel}</span><ChevronDown size={13} aria-hidden className="shrink-0" />
     </button>
     {open && <EditorPopover anchor={trigger.current} width={320} label="Elegir formato del documento" onClose={() => setOpen(false)}>

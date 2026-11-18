@@ -42,3 +42,16 @@ it('supports keyboard selection and Escape without changing the document mode', 
   expect(change).toHaveBeenCalledTimes(1)
   expect(trigger).toHaveFocus()
 })
+
+it('restores the trigger on Escape when a pointer click does not focus buttons', () => {
+  const change = vi.fn()
+  render(<><textarea aria-label="Previous editor" /><DocumentFormatPicker value="plaintext" width={72} onChange={change} /></>)
+  screen.getByRole('textbox', { name: 'Previous editor' }).focus()
+  const trigger = screen.getByRole('combobox', { name: 'Formato del documento' })
+  // fireEvent.click preserves the previous focus, as Safari pointer clicks do.
+  fireEvent.click(trigger)
+  fireEvent.keyDown(screen.getByRole('combobox', { name: 'Buscar formato' }), { key: 'Escape' })
+  expect(screen.queryByRole('dialog', { name: 'Elegir formato del documento' })).not.toBeInTheDocument()
+  expect(trigger).toHaveFocus()
+  expect(change).not.toHaveBeenCalled()
+})
