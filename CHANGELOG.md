@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-11-18
+
+### Build 1 — Guardado fiable y formato de texto por selección
+
+- Utilitarios guarda con Ctrl+S, Cmd+S y Guardar, además del autoguardado; conserva el borrador ante errores y permite confirmar una copia antes de recuperar la versión guardada.
+- El Editor de texto y código admite TXT, Markdown, CSV, LOG, YAML, INI, HTML, CSS, JavaScript, TypeScript y SQL, junto a JSON, XML y JSON con comentarios.
+- Documentos permite renombrar y eliminar desde cada fila, sin abrir el fichero; Escape conserva el foco y los paneles de trabajo.
+- Pizarra aplica color, fuente y tamaño al fragmento, al texto futuro o al objeto completo según la selección, conservando historial, portapapeles y formatos anteriores.
+- El motor local de Pizarra 0.18.1-clarin.9 comparte medidas entre edición y exportación, con validación de rangos y preservación de revisiones anteriores.
+
 ## 2026-11-15
 
 ### Build 1 — Más espacio en Utilitarios
