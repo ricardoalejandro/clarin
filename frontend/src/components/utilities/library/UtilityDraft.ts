@@ -59,6 +59,7 @@ export class UtilityDraft {
   private pendingSlots = new Map<string, PendingSlot>()
   private readonly controller = new AbortController()
   private readers = new Map<string, Promise<Blob | null>>()
+  private beforeSave = new Set<() => void>()
   private beforeDeactivate = new Set<() => void>()
   readonly session: UtilityDocumentSession
 
@@ -87,6 +88,7 @@ export class UtilityDraft {
         return this.blob(this.value(slot.source))
       },
       slotNames: () => [...new Set([...this.document.slots.map(slot => slot.slot), ...this.slots.keys()])],
+      registerBeforeSave: callback => { this.beforeSave.add(callback); return () => { this.beforeSave.delete(callback) } },
       registerBeforeDeactivate: callback => { this.beforeDeactivate.add(callback); return () => { this.beforeDeactivate.delete(callback) } },
       reportDisplayStatus: status => {
         if (this.disposed || JSON.stringify(this.displayStatus) === JSON.stringify(status)) return
@@ -320,6 +322,17 @@ export class UtilityDraft {
   }
 
   private accept(document: UtilityDocument) { this.document = { ...document, config: this.document.config }; this.notify() }
+  prepareSave() {
+    if (this.disposed || this.deleted) return false
+    if (!this.beforeSave.size) return true
+    try {
+      for (const callback of this.beforeSave) callback()
+      return true
+    } catch {
+      if (this.writeConflict || this.configConflicts.size) return false
+      this.phase = 'error'; this.error = 'No se pudo preparar el guardado. Tu borrador sigue abierto para reintentar.'; this.notify(); return false
+    }
+  }
   freezeSources() {
     if (this.disposed) return false
     try {
@@ -352,7 +365,7 @@ export class UtilityDraft {
     try {
       for (const callback of this.beforeDeactivate) { try { callback() } catch { /* Resource teardown must continue even when one worker fails. */ } }
     } finally {
-      this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined; this.uncertainMutation = undefined; this.stateListeners.clear(); this.vaultPending.clear(); this.vaultReconciled.clear()
+      this.beforeSave.clear(); this.beforeDeactivate.clear(); this.controller.abort(); this.slots.clear(); this.readers.clear(); this.pendingSlots.clear(); this.pendingConfig = undefined; this.uncertainMutation = undefined; this.stateListeners.clear(); this.vaultPending.clear(); this.vaultReconciled.clear()
     }
   }
 }

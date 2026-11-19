@@ -6,7 +6,7 @@ import { libraryRequest, readDocumentSlot, UtilityRequestError, type UtilityDocu
 
 const router = vi.hoisted(() => ({ push: vi.fn() }))
 const realtime = vi.hoisted(() => ({ listener: undefined as ((message: unknown) => void) | undefined }))
-const editorBehavior = vi.hoisted(() => ({ modelBacked: false, dirtyOnDeactivate: false, setState: undefined as ((state: Record<string, unknown>) => void) | undefined }))
+const editorBehavior = vi.hoisted(() => ({ modelBacked: false, dirtyOnDeactivate: false, setState: undefined as ((state: Record<string, unknown>) => void) | undefined, scheduleView: undefined as (() => void) | undefined }))
 vi.mock('next/navigation', () => ({ useRouter: () => router }))
 vi.mock('@/lib/authScope', () => ({ getAuthScope: () => 'test-scope', subscribeAuthScope: () => () => {} }))
 vi.mock('@/lib/api', () => ({ api: vi.fn(), apiBlob: vi.fn(), subscribeWebSocket: (listener: (message: unknown) => void) => { realtime.listener = listener; return () => { realtime.listener = undefined } }, getOnlineSessionTiming: () => null, subscribeOnlineSessionNotice: () => () => {} }))
@@ -18,6 +18,13 @@ vi.mock('../UtilityWorkspace', async () => {
     const [source, setSource] = useUtilityDocumentText('source'), session = useUtilityDocument(), model = useRef(source)
     model.current = source
     useEffect(() => { editorBehavior.setState = session?.setState; return () => { editorBehavior.setState = undefined } }, [session])
+    useEffect(() => {
+      let viewTimer: ReturnType<typeof setTimeout> | undefined
+      const capture = () => { clearTimeout(viewTimer); viewTimer = undefined; session?.setState({ rememberedView: true }) }
+      const release = session?.registerBeforeSave?.(() => { if (viewTimer !== undefined) capture() })
+      editorBehavior.scheduleView = () => { clearTimeout(viewTimer); viewTimer = setTimeout(capture, 250) }
+      return () => { clearTimeout(viewTimer); release?.(); editorBehavior.scheduleView = undefined }
+    }, [session])
     useEffect(() => session?.registerBeforeDeactivate?.(() => { if (editorBehavior.dirtyOnDeactivate) session.setState({ rememberedView: true }) }), [session])
     useEffect(() => () => { model.current = '' }, [])
     return <textarea aria-label="Test document source" value={source} onChange={event => {
@@ -29,7 +36,7 @@ vi.mock('../UtilityWorkspace', async () => {
 const request = vi.mocked(libraryRequest)
 let document: UtilityDocument
 beforeEach(() => {
-  vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob); editorBehavior.modelBacked = false; editorBehavior.dirtyOnDeactivate = false; editorBehavior.setState = undefined
+  vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob); editorBehavior.modelBacked = false; editorBehavior.dirtyOnDeactivate = false; editorBehavior.setState = undefined; editorBehavior.scheduleView = undefined
   document = { id: 'document-a', type: 'qr', title: 'Saved QR', folder_id: null, favorite: false, version: 1, config: {}, slots: [{ slot: 'source', bytes: 5, version: 1 }], created_at: '2026-11-14', updated_at: '2026-11-14' }
   vi.mocked(readDocumentSlot).mockResolvedValue({ blob: new Blob(['saved'], { type: 'text/plain' }), version: 1 })
   request.mockImplementation(async (path, options): Promise<any> => {
@@ -60,13 +67,23 @@ describe('utility library orchestration', () => {
     const source = await screen.findByRole('textbox', { name: 'Test document source' })
     await waitFor(() => expect(source).toHaveValue('saved'))
     fireEvent.change(source, { target: { value: 'save now' } })
+    const input = source as HTMLTextAreaElement
+    input.focus(); input.setSelectionRange(2, 4); input.scrollTop = 18
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    const statusWidth = status.style.width
     expect(fireEvent.keyDown(source, { key: 's', ctrlKey: true })).toBe(false)
     await waitFor(() => expect(request.mock.calls.filter(([path, options]) => path.endsWith('/content/source') && options?.method === 'PUT')).toHaveLength(1))
     expect(fireEvent.keyDown(source, { key: 's', metaKey: true })).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Guardar documento' }))
     expect(request.mock.calls.filter(([path, options]) => path.endsWith('/content/source') && options?.method === 'PUT')).toHaveLength(1)
     await act(async () => { finish({ document: { ...document, slots: [{ slot: 'source', bytes: 8, version: 2 }] }, content: { slot: 'source', bytes: 8, version: 2 } }); await Promise.resolve() })
-    await screen.findByText('Documento guardado.')
+    const confirmation = await screen.findByText('Documento guardado.')
+    expect(confirmation.closest('[data-utility-workspace-header]')).not.toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cerrar confirmación' })).not.toBeInTheDocument()
+    expect(status.style.width).toBe(statusWidth)
+    expect(input).toHaveFocus()
+    expect(input.selectionStart).toBe(2); expect(input.selectionEnd).toBe(4)
+    expect(input.scrollTop).toBe(18)
     fireEvent.click(screen.getByRole('button', { name: 'Guardar documento' }))
     expect(request.mock.calls.filter(([path, options]) => path.endsWith('/content/source') && options?.method === 'PUT')).toHaveLength(1)
     const outside = window.document.createElement('textarea'); window.document.body.appendChild(outside)
@@ -75,6 +92,139 @@ describe('utility library orchestration', () => {
     expect(source).toHaveValue('save now')
     fireEvent.change(source, { target: { value: 'new pending edit' } })
     expect(screen.queryByText('Documento guardado.')).not.toBeInTheDocument()
+  })
+
+  it('restarts the two-second header confirmation on repeated saves and releases its timer on unmount', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, right: 1200, bottom: 650, width: 1200, height: 650, x: 0, y: 0, toJSON: () => ({}) }))
+    const { unmount } = render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    expect(status).toHaveStyle({ width: '160px' })
+    vi.useFakeTimers()
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1999) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { fireEvent.keyDown(source, { key: 's', metaKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1999) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(status).toHaveAttribute('title', 'Guardado')
+    expect(status).toHaveStyle({ width: '160px' })
+    expect(request.mock.calls.some(([, options]) => options?.method === 'PUT' || options?.method === 'PATCH')).toBe(false)
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('publishes a pending view before the explicit save so its delayed capture cannot erase the confirmation', async () => {
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    vi.useFakeTimers()
+    editorBehavior.scheduleView?.()
+    expect(document.config).not.toHaveProperty('rememberedView')
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    expect(document.config).toHaveProperty('rememberedView', true)
+    const patch = request.mock.calls.find(([path, options]) => path === '/documents/document-a' && options?.method === 'PATCH')!
+    expect(JSON.parse(patch[1]!.body as string).config).toEqual({ rememberedView: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1749) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(status).toHaveAttribute('title', 'Guardado')
+    expect(request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && options?.method === 'PATCH')).toHaveLength(1)
+  })
+
+  it('retries an unloaded document before preparing view preferences for a manual save', async () => {
+    vi.mocked(readDocumentSlot).mockRejectedValueOnce(new UtilityRequestError('No se pudo leer el contenido.', 503))
+    render(<UtilitiesLibrary />)
+    await screen.findByRole('button', { name: 'Reintentar' })
+    const readsBefore = request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && !options?.method).length
+    vi.useFakeTimers()
+    editorBehavior.scheduleView?.()
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Test document source' }), { key: 's', ctrlKey: true })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByRole('textbox', { name: 'Test document source' })).toHaveValue('saved')
+    expect(request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && !options?.method)).toHaveLength(readsBefore + 1)
+    expect(request.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false)
+    expect(document.config).not.toHaveProperty('rememberedView')
+  })
+
+  it('clears the confirmation when changing documents and cannot revive it when returning', async () => {
+    const original = request.getMockImplementation()!
+    const second = { ...document, id: 'document-b', title: 'Saved B' }
+    request.mockImplementation((path, options): Promise<any> => {
+      if (path === '/workspace' && options?.method !== 'PUT') return Promise.resolve({ workspace: { open_ids: ['document-a', 'document-b'], active_id: 'document-a', version: 1 } })
+      if (path === '/documents/document-b') return Promise.resolve({ document: second })
+      return original(path, options)
+    })
+    vi.mocked(readDocumentSlot).mockImplementation(async id => ({ blob: new Blob([id === 'document-a' ? 'saved A' : 'saved B'], { type: 'text/plain' }), version: 1 }))
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved A'))
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    expect(status).toHaveStyle({ width: 'var(--utility-control-size)' })
+    vi.useFakeTimers()
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    for (const [title, text] of [['Saved B', 'saved B'], ['Saved QR', 'saved A'], ['Saved B', 'saved B']]) {
+      await act(async () => { fireEvent.click(screen.getByRole('tab', { name: title })); await vi.advanceTimersByTimeAsync(0) })
+      expect(screen.getByRole('textbox', { name: 'Test document source' })).toHaveValue(text)
+      expect(status).toHaveAttribute('title', 'Guardado')
+    }
+    await act(async () => { fireEvent.keyDown(screen.getByRole('textbox', { name: 'Test document source' }), { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    expect(status).toHaveAttribute('title', 'Guardado')
+    expect(status).toHaveStyle({ width: 'var(--utility-control-size)' })
+  })
+
+  it('keeps the general document notice independent from manual save confirmations and their expiry', async () => {
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    act(() => realtime.listener?.({ event: 'utility_updated', data: { kind: 'deleted', id: 'already-closed-document' } }))
+    const notice = await screen.findByText('El documento fue eliminado en otra sesión.')
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    await waitFor(() => expect(status).toHaveAttribute('title', 'Guardado'))
+    vi.useFakeTimers()
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    expect(notice).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(status).toHaveAttribute('title', 'Guardado')
+    expect(notice).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar confirmación' }))
+    expect(notice).not.toBeInTheDocument()
+  })
+
+  it.each([{ code: 409, label: 'Conflicto de versión' }, { code: 503, label: 'No se pudo guardar' }])('does not retain a success confirmation after an edited draft fails with $code', async ({ code, label }) => {
+    const original = request.getMockImplementation()!
+    request.mockImplementation((path, options): Promise<any> => path.endsWith('/content/source') && options?.method === 'PUT'
+      ? Promise.reject(new UtilityRequestError('El guardado falló', code)) : original(path, options))
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    fireEvent.keyDown(source, { key: 's', ctrlKey: true })
+    await screen.findByText('Documento guardado.')
+    fireEvent.change(source, { target: { value: 'preserve this draft' } })
+    expect(screen.queryByText('Documento guardado.')).not.toBeInTheDocument()
+    fireEvent.keyDown(source, { key: 's', ctrlKey: true })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Estado del guardado' })).toHaveAttribute('title', label))
+    expect(screen.queryByText('Documento guardado.')).not.toBeInTheDocument()
+    expect(source).toHaveValue('preserve this draft')
+    expect(screen.getByRole('button', { name: 'Guardar una copia' })).toBeInTheDocument()
   })
 
   it('renames a closed library row without opening it or reading its content', async () => {

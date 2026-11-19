@@ -18,7 +18,7 @@ export function libraryDrawerBounds(rect: { left: number; top: number; right: nu
   return { left, top, width, height, panelWidth: Math.min(LIBRARY_SIDEBAR_WIDTH, width) }
 }
 
-export function librarySaveStatus(phase: string | undefined, workspace: string, loading: boolean, indexing: boolean, transitioning: boolean) {
+export function librarySaveStatus(phase: string | undefined, workspace: string, loading: boolean, indexing: boolean, transitioning: boolean, confirmed = false) {
   if (phase === 'conflict') return { label: 'Conflicto de versión', tone: 'error' }
   if (phase === 'error') return { label: 'No se pudo guardar', tone: 'error' }
   if (workspace === 'error') return { label: 'Pestañas sin guardar', tone: 'error' }
@@ -26,6 +26,7 @@ export function librarySaveStatus(phase: string | undefined, workspace: string, 
   if (phase === 'dirty') return { label: 'Cambios pendientes', tone: 'pending' }
   if (loading || transitioning) return { label: 'Abriendo documento…', tone: 'pending' }
   if (workspace === 'saving') return { label: 'Guardando pestañas…', tone: 'pending' }
+  if (confirmed) return { label: 'Documento guardado.', tone: 'saved' }
   return { label: indexing ? 'Guardado · Indexando' : 'Guardado', tone: 'saved' }
 }
 
