@@ -34,3 +34,18 @@ it('keeps save failures ahead of background phases and never calls pending tabs 
   expect(librarySaveStatus('saved', 'error', false, false, false).tone).toBe('error')
   expect(librarySaveStatus('saved', 'saved', false, true, false)).toEqual({ label: 'Guardado · Indexando', tone: 'saved' })
 })
+
+it('shows a manual confirmation only after every blocking save phase has finished', () => {
+  expect(librarySaveStatus('saved', 'saved', false, false, false, true)).toEqual({ label: 'Documento guardado.', tone: 'saved' })
+  expect(librarySaveStatus('saved', 'saved', false, true, false, true).label).toBe('Documento guardado.')
+  for (const phase of ['conflict', 'error', 'saving', 'dirty']) {
+    expect(librarySaveStatus(phase, 'saved', false, false, false, true))
+      .toEqual(librarySaveStatus(phase, 'saved', false, false, false))
+  }
+  for (const workspace of ['error', 'saving']) {
+    expect(librarySaveStatus('saved', workspace, false, false, false, true))
+      .toEqual(librarySaveStatus('saved', workspace, false, false, false))
+  }
+  expect(librarySaveStatus('saved', 'saved', true, false, false, true).label).toBe('Abriendo documento…')
+  expect(librarySaveStatus('saved', 'saved', false, false, true, true).label).toBe('Abriendo documento…')
+})

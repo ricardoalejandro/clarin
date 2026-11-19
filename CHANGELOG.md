@@ -1,5 +1,12 @@
 # Changelog — Clarin CRM
 
+## 2026-11-19
+
+### Build 1 — Confirmación de guardado sin saltos
+
+- Utilitarios confirma el guardado en el indicador de la cabecera, conservando la posición y el tamaño del editor, las pestañas y la selección.
+- Los errores y la recuperación de borradores mantienen sus avisos y acciones.
+
 ## 2026-11-18
 
 ### Build 1 — Guardado fiable y formato de texto por selección

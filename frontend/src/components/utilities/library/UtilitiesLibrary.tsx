@@ -101,6 +101,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const editorSurface = useRef<HTMLDivElement>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [saveConfirmation, setSaveConfirmation] = useState<{ documentId: string } | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
   const dialogRef = useRef(dialog)
   dialogRef.current = dialog
@@ -134,6 +135,11 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const firstDirty = useRef<number | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearSaveConfirmation = useCallback(() => {
+    if (saveNoticeTimer.current) clearTimeout(saveNoticeTimer.current)
+    saveNoticeTimer.current = null
+    setSaveConfirmation(null)
+  }, [])
   const workspaceQueue = useRef<Promise<void>>(Promise.resolve())
   const workspacePending = useRef(0)
   const workspaceFailed = useRef(false)
@@ -146,9 +152,12 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const overlayRef = useRef(overlay)
   overlayRef.current = overlay
   const closeTransientLibrary = () => { if (overlayRef.current) setLibraryOpen(false) }
-  const saveStatus = librarySaveStatus(active?.phase, workspacePhase, !ready || Boolean(active?.loading), Boolean(indexingIds), transitioning)
+  const confirmedActiveSave = saveConfirmation?.documentId === workspace.active_id
+  const saveStatus = librarySaveStatus(active?.phase, workspacePhase, !ready || Boolean(active?.loading), Boolean(indexingIds), transitioning, confirmedActiveSave)
   const saveCommand = useRef<() => void>(() => {})
   saveCommand.current = () => { void saveActive() }
+
+  useLayoutEffect(() => { clearSaveConfirmation() }, [workspace.active_id, clearSaveConfirmation])
 
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
@@ -234,13 +243,13 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   const refreshDrafts = useCallback(() => {
     if (!mounted.current) return
     const activeId = workspaceRef.current.active_id
-    if (activeId && sessions.current.get(activeId)?.dirty) setNotice(current => current === 'Documento guardado.' ? '' : current)
+    if (activeId && sessions.current.get(activeId)?.dirty) clearSaveConfirmation()
     setPage(current => ({ ...current, documents: current.documents.map(document => {
       const draft = sessions.current.get(document.id)
       return draft && draft.document.version >= document.version ? { ...draft.document, snippet: document.snippet } : document
     }) }))
     redraw(value => value + 1)
-  }, [])
+  }, [clearSaveConfirmation])
   const makeDraft = useCallback((document: UtilityDocument) => {
     let draft = sessions.current.get(document.id)
     if (!draft) { draft = new UtilityDraft(document, refreshDrafts); sessions.current.set(document.id, draft) }
@@ -304,6 +313,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       mounted.current = false; controller.abort()
       if (timer.current) clearTimeout(timer.current)
       if (saveNoticeTimer.current) clearTimeout(saveNoticeTimer.current)
+      saveNoticeTimer.current = null
       sessions.current.forEach(draft => draft.dispose()); sessions.current.clear()
     }
   }, [makeDraft])
@@ -587,10 +597,16 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   }
 
   function announceSaved(matchingError?: string) {
+    const documentId = workspaceRef.current.active_id
+    if (!documentId) return
     setError(current => matchingError === undefined || current === matchingError ? '' : current)
-    setNotice('Documento guardado.')
+    const confirmation = { documentId }
+    setSaveConfirmation(confirmation)
     if (saveNoticeTimer.current) clearTimeout(saveNoticeTimer.current)
-    saveNoticeTimer.current = setTimeout(() => { if (mounted.current) setNotice(current => current === 'Documento guardado.' ? '' : current) }, 2000)
+    saveNoticeTimer.current = setTimeout(() => {
+      saveNoticeTimer.current = null
+      if (mounted.current) setSaveConfirmation(current => current === confirmation ? null : current)
+    }, 2000)
   }
 
   async function changeMetadata(document: UtilityDocument, changes: Record<string, unknown>) {
@@ -813,7 +829,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
       </div>
       <UtilityActionMenu label="Nuevo documento" actions={newActions} className={`${button} shrink-0`} icon={Plus} />
       <button type="button" className={`${button} shrink-0`} aria-label="Guardar documento" aria-keyshortcuts="Control+S Meta+S" title="Guardar documento (Ctrl+S / ⌘S)" disabled={!activeDocument || !ready || busy || Boolean(active?.loading)} onClick={() => void saveActive()}><Save size={15} aria-hidden /><span className={compact ? 'sr-only' : ''}>Guardar</span></button>
-      <button type="button" className={`${button} min-w-0 shrink-0 ${saveStatus.tone === 'error' ? 'text-rose-700' : saveStatus.tone === 'pending' ? 'text-amber-700' : 'text-slate-500'}`} aria-label="Estado del guardado" title={saveStatus.label} aria-haspopup="dialog" aria-expanded={Boolean(statusAnchor)} onClick={event => { const target = event.currentTarget; setStatusAnchor(current => current ? null : target) }}>{saveStatus.tone === 'pending' ? <Loader2 size={14} className={active?.phase === 'dirty' ? '' : 'motion-safe:animate-spin'} aria-hidden /> : <Check size={14} aria-hidden />}<span role="status" className={compact ? 'sr-only' : 'max-w-40 truncate text-[11px]'}>{saveStatus.label}</span></button>
+      <button type="button" style={{ width: compact ? 'var(--utility-control-size)' : 160 }} className={`${button} min-w-0 shrink-0 ${saveStatus.tone === 'error' ? 'text-rose-700' : saveStatus.tone === 'pending' ? 'text-amber-700' : confirmedActiveSave ? 'text-emerald-700' : 'text-slate-500'}`} aria-label="Estado del guardado" title={saveStatus.label} aria-haspopup="dialog" aria-expanded={Boolean(statusAnchor)} onClick={event => { const target = event.currentTarget; setStatusAnchor(current => current ? null : target) }}>{saveStatus.tone === 'pending' ? <Loader2 size={14} className={active?.phase === 'dirty' ? '' : 'motion-safe:animate-spin'} aria-hidden /> : <Check size={14} aria-hidden />}<span role="status" className={compact ? 'sr-only' : 'min-w-0 flex-1 truncate text-[11px]'}>{saveStatus.label}</span></button>
       {activeDocument && <UtilityActionMenu key={activeDocument.id} label="Acciones del documento" actions={documentActions} className={`${button} shrink-0`} />}
     </header>
     <div className="flex min-h-0 min-w-0 flex-1">

@@ -59,6 +59,94 @@ async function pressEditorShortcut(page: Page, key: string, macKey = key) {
   await page.keyboard.press(`${modifier}+${modifier === 'Meta' ? macKey : key}`)
 }
 
+async function saveViewportState(page: Page) {
+  // Observe the real editor surface and Monaco's rendered scroll position. The
+  // hidden textarea also exposes the active native selection without adding
+  // test-only hooks to the production editor.
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  return page.evaluate(() => {
+    const rectangle = (element: Element | null) => {
+      if (!element) return null
+      const { x, y, width, height } = element.getBoundingClientRect()
+      return { x, y, width, height }
+    }
+    const focused = document.activeElement
+    return {
+      header: rectangle(document.querySelector('[data-utility-workspace-header]')),
+      status: rectangle(document.querySelector('[aria-label="Estado del guardado"]')),
+      workspace: rectangle(document.getElementById('utility-active-document')),
+      editors: [...document.querySelectorAll('[data-testid^="document-editor-"]')].map(element => ({
+        id: element.getAttribute('data-testid'),
+        bounds: rectangle(element),
+        lines: [...element.querySelectorAll('.view-lines')].map(lines => ({
+          bounds: rectangle(lines),
+          transform: (lines as HTMLElement).style.transform,
+        })),
+        scroll: [...element.querySelectorAll('.monaco-scrollable-element')].map(scroll => ({ left: scroll.scrollLeft, top: scroll.scrollTop })),
+      })),
+      focus: { tag: focused?.tagName, label: focused?.getAttribute('aria-label') },
+      selection: focused instanceof HTMLTextAreaElement ? {
+        value: focused.value,
+        start: focused.selectionStart,
+        end: focused.selectionEnd,
+        direction: focused.selectionDirection,
+      } : null,
+      pageScroll: { left: scrollX, top: scrollY },
+    }
+  })
+}
+
+async function expectStableSaveConfirmation(page: Page, save: () => Promise<void>) {
+  const status = page.getByRole('button', { name: 'Estado del guardado', exact: true })
+  const before = await saveViewportState(page)
+  expect(before.header?.height).toBe(44)
+  await save()
+  await expect(status).toHaveAttribute('title', 'Documento guardado.')
+  await expect(status.getByRole('status')).toHaveText('Documento guardado.')
+  await expect(page.getByText('Documento guardado.', { exact: true })).toHaveCount(1)
+  const during = await saveViewportState(page)
+  expect(during).toEqual(before)
+  await expect(status).toHaveAttribute('title', 'Guardado', { timeout: 5000 })
+  const after = await saveViewportState(page)
+  expect(after).toEqual(before)
+  return { before, during, after }
+}
+
+for (const width of [1600, 375, 320]) test(`save confirmation preserves editor geometry, selection and scroll at ${width}px`, async ({ page }, testInfo) => {
+  const library = await setup(page)
+  await page.routeWebSocket('**/*', socket => socket.close())
+  await page.setViewportSize({ width, height: width === 320 ? 740 : 900 })
+  await page.goto(`${baseURL}/dashboard/utilities/json`)
+  const editor = page.getByTestId('document-editor-a')
+  await expect(editor).toBeVisible({ timeout: 30_000 })
+  const source = Array.from({ length: 120 }, (_, index) => `Linea ${index + 1}: contenido de prueba final`).join('\n')
+  await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'geometria.txt', mimeType: 'text/plain', buffer: Buffer.from(source) })
+  const status = page.getByRole('button', { name: 'Estado del guardado', exact: true })
+  await expect(status).toHaveAttribute('title', 'Guardado', { timeout: 15_000 })
+
+  const save = page.getByRole('button', { name: 'Guardar documento', exact: true })
+  await save.focus()
+  const buttonResult = await expectStableSaveConfirmation(page, () => save.click())
+  await expect(save).toBeFocused()
+
+  const input = editor.getByRole('textbox')
+  await input.focus()
+  await pressEditorShortcut(page, 'End', 'ArrowDown')
+  await page.keyboard.press('Shift+ArrowLeft')
+  await page.keyboard.press('Shift+ArrowLeft')
+  const shortcutResult = await expectStableSaveConfirmation(page, () => pressEditorShortcut(page, 's'))
+  await expect(input).toBeFocused()
+  expect(shortcutResult.before.selection?.end).toBeGreaterThan(shortcutResult.before.selection?.start ?? 0)
+
+  // Typing after the confirmation must still replace the selected characters
+  // at the scrolled reading position, rather than moving the caret elsewhere.
+  await page.keyboard.insertText('OK')
+  const id = library.getWorkspace().active_id!
+  await pressEditorShortcut(page, 's')
+  await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString()).toBe(source.slice(0, -2) + 'OK')
+  await testInfo.attach('save-confirmation-geometry.json', { body: JSON.stringify({ width, button: buttonResult, shortcut: shortcutResult }, null, 2), contentType: 'application/json' })
+})
+
 test('keeps independent same-tool tabs, saves, renames, searches, reopens and deletes documents', async ({ page }, testInfo) => {
   const library = await setup(page)
   await page.goto(`${baseURL}/dashboard/utilities`)
@@ -151,8 +239,9 @@ test('saves real Monaco TXT and SQL with Ctrl+S, preserves modes on reload and e
   await page.screenshot({ path: testInfo.outputPath('editor-text-and-code-375.png') })
 })
 
-test('Ctrl+S saves the whole chunked text document and the active document while comparison has focus', async ({ page }) => {
+test('save confirmation stays in place for chunked text and comparison while Ctrl+S saves the whole document', async ({ page }) => {
   const library = await setup(page)
+  await page.routeWebSocket('**/*', socket => socket.close())
   await page.goto(`${baseURL}/dashboard/utilities/json`)
   const editorA = page.getByTestId('document-editor-a')
   await expect(editorA).toBeVisible({ timeout: 30_000 })
@@ -169,7 +258,7 @@ test('Ctrl+S saves the whole chunked text document and the active document while
   await chunkInput.pressSequentially('chunk-save:')
   await expect(chunkInput).toHaveValue(/^chunk-save:/)
   await expect(editorA.locator('.view-lines')).toContainText('chunk-save:')
-  await pressEditorShortcut(page, 's')
+  await expectStableSaveConfirmation(page, () => pressEditorShortcut(page, 's'))
   await expect.poll(() => library.contents.get(`${id}/panel-a`)?.toString(), { timeout: 1500 }).toBe('chunk-save:' + 'x'.repeat(100_100))
   await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'small.txt', mimeType: 'text/plain', buffer: Buffer.from('first') })
   await clickEditorAction(page, 'Mostrar segundo panel')
@@ -180,7 +269,7 @@ test('Ctrl+S saves the whole chunked text document and the active document while
   const diff = page.getByTestId('document-editor-diff')
   await expect(diff).toBeVisible()
   await diff.getByRole('textbox').last().focus()
-  await pressEditorShortcut(page, 's')
+  await expectStableSaveConfirmation(page, () => pressEditorShortcut(page, 's'))
   await expect.poll(() => library.contents.get(`${id}/panel-b`)?.toString(), { timeout: 1500 }).toBe('second')
   expect(library.contents.get(`${id}/panel-a`)?.toString()).toBe('first')
 })
