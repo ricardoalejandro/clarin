@@ -571,6 +571,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     if (!active || !activeDocument) return
     if (active.dirty || active.pendingMutation) {
       const draft = active, attemptedError = draft.error
+      if (!draft.prepareSave()) return
       const saved = await draft.flush()
       if (saved && mounted.current && workspaceRef.current.active_id === draft.document.id) announceSaved(attemptedError)
       return
@@ -589,6 +590,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
     if (!active || !ready || busy || active.loading || transitioning) return
     if (active.phase === 'error' && !active.dirty) { await retryActive(); return }
     const draft = active
+    if (!draft.prepareSave()) return
     if (timer.current) clearTimeout(timer.current)
     firstDirty.current = null
     const saved = await draft.flush()

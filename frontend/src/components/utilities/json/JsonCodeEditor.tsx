@@ -7,6 +7,7 @@ import { acceptsEditorZoom, documentRevealSelection, documentWrapOptions, tramRa
 import { registerLargeJsonSyntax } from './largeJsonSyntax'
 import { DocumentFoldingSession, registerDocumentFolding } from './documentFoldingController'
 import { FOLD_MAX_REGIONS, type DocumentFoldingStatus } from './documentFolding'
+import { useUtilityDocument } from '../library/UtilityDocumentContext'
 
 globalThis.MonacoEnvironment = {
   getWorker(_moduleId, label) {
@@ -109,6 +110,7 @@ interface Props {
 }
 
 export function DocumentCodeEditor(props: Props) {
+  const registerBeforeSave = useUtilityDocument()?.registerBeforeSave
   const { id, model, label, font, wrap, visible, reduced, chunk, revision } = props
   const host = useRef<HTMLDivElement>(null)
   const instance = useRef<editor.IStandaloneCodeEditor>(null)
@@ -136,6 +138,7 @@ export function DocumentCodeEditor(props: Props) {
     let viewTimer: ReturnType<typeof setTimeout> | undefined
     const capture = () => { clearTimeout(viewTimer); viewTimer = undefined; if (view.getModel()) latest.current.onViewState?.(view.saveViewState()) }
     const remember = () => { clearTimeout(viewTimer); viewTimer = setTimeout(capture, 250) }
+    const releaseBeforeSave = registerBeforeSave?.(() => { if (viewTimer !== undefined) capture() })
     flushView.current = capture
     const scroll = view.onDidScrollChange(remember)
     const cursor = view.onDidChangeCursorSelection(remember)
@@ -163,6 +166,7 @@ export function DocumentCodeEditor(props: Props) {
     element.addEventListener('paste', paste, true)
     latest.current.onReady(view)
     return () => {
+      releaseBeforeSave?.()
       capture()
       flushView.current = null
       foldSession.dispose()
@@ -185,7 +189,7 @@ export function DocumentCodeEditor(props: Props) {
       preview.current = null
       previewRange.current = null
     }
-  }, [label, model])
+  }, [label, model, registerBeforeSave])
 
   useLayoutEffect(() => {
     const view = instance.current

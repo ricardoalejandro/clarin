@@ -86,7 +86,7 @@ async function saveViewportState(page: Page) {
       })),
       focus: { tag: focused?.tagName, label: focused?.getAttribute('aria-label') },
       selection: focused instanceof HTMLTextAreaElement ? {
-        value: focused.value,
+        length: focused.value.length,
         start: focused.selectionStart,
         end: focused.selectionEnd,
         direction: focused.selectionDirection,
@@ -100,16 +100,42 @@ async function expectStableSaveConfirmation(page: Page, save: () => Promise<void
   const status = page.getByRole('button', { name: 'Estado del guardado', exact: true })
   const before = await saveViewportState(page)
   expect(before.header?.height).toBe(44)
-  await save()
-  await expect(status).toHaveAttribute('title', 'Documento guardado.')
-  await expect(status.getByRole('status')).toHaveText('Documento guardado.')
-  await expect(page.getByText('Documento guardado.', { exact: true })).toHaveCount(1)
-  const during = await saveViewportState(page)
-  expect(during).toEqual(before)
-  await expect(status).toHaveAttribute('title', 'Guardado', { timeout: 5000 })
-  const after = await saveViewportState(page)
-  expect(after).toEqual(before)
-  return { before, during, after }
+  await page.evaluate(() => {
+    const target = document.querySelector('[aria-label="Estado del guardado"]')!
+    const start = performance.now()
+    const events = [{ atMs: 0, title: target.getAttribute('title') }]
+    const observer = new MutationObserver(() => events.push({ atMs: Math.round(performance.now() - start), title: target.getAttribute('title') }))
+    observer.observe(target, { attributes: true, attributeFilter: ['title'] })
+    Object.assign(window, { utilitySaveProbe: { events, observer } })
+  })
+  try {
+    await save()
+    await expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await expect(status.getByRole('status')).toHaveText('Documento guardado.')
+    await expect(page.getByText('Documento guardado.', { exact: true })).toHaveCount(1)
+    const during = await saveViewportState(page)
+    expect(during).toEqual(before)
+    await expect(status).toHaveAttribute('title', 'Guardado', { timeout: 5000 })
+    const after = await saveViewportState(page)
+    expect(after).toEqual(before)
+    const titles = await page.evaluate(() => (window as unknown as { utilitySaveProbe: { events: { atMs: number; title: string | null }[] } }).utilitySaveProbe.events)
+    const confirmationIndex = titles.findIndex(event => event.title === 'Documento guardado.')
+    const ended = titles.slice(confirmationIndex + 1).find(event => event.title !== 'Documento guardado.')
+    expect(confirmationIndex).toBeGreaterThanOrEqual(0)
+    expect(ended).toBeDefined()
+    expect(ended!.atMs - titles[confirmationIndex].atMs).toBeGreaterThanOrEqual(1900)
+    return { before, during, after, titles }
+  } catch (error) {
+    const titles = await page.evaluate(() => (window as unknown as { utilitySaveProbe: { events: unknown[] } }).utilitySaveProbe.events)
+    console.log('Save confirmation diagnostic:', JSON.stringify({ titles }))
+    throw error
+  } finally {
+    await page.evaluate(() => {
+      const probe = (window as unknown as { utilitySaveProbe?: { observer: MutationObserver } }).utilitySaveProbe
+      probe?.observer.disconnect()
+      delete (window as unknown as { utilitySaveProbe?: unknown }).utilitySaveProbe
+    })
+  }
 }
 
 for (const width of [1600, 375, 320]) test(`save confirmation preserves editor geometry, selection and scroll at ${width}px`, async ({ page }, testInfo) => {
@@ -129,7 +155,10 @@ for (const width of [1600, 375, 320]) test(`save confirmation preserves editor g
 
   const save = page.getByRole('button', { name: 'Guardar documento', exact: true })
   await save.focus()
-  const buttonResult = await expectStableSaveConfirmation(page, () => save.click())
+  // Safari intentionally blurs buttons on a pointer click. Activate the focused
+  // visible action with Enter so this assertion isolates the announcement's
+  // focus neutrality, rather than the browser's native pointer focus policy.
+  const buttonResult = await expectStableSaveConfirmation(page, () => save.press('Enter'))
   await expect(save).toBeFocused()
 
   const input = editor.getByRole('textbox')

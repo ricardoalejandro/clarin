@@ -10,6 +10,53 @@ beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob) })
 afterEach(() => vi.unstubAllGlobals())
 
 describe('utility autosave session', () => {
+  it('publishes editor state only when explicitly prepared, unregisters it and never deactivates the editor', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    const capture = vi.fn(() => draft.session.setState({ 'json.views': { a: { scrollTop: 12 }, b: { scrollTop: 24 } } }))
+    const deactivate = vi.fn()
+    const release = draft.session.registerBeforeSave!(capture)
+    draft.session.registerBeforeDeactivate!(deactivate)
+    expect(await draft.flush()).toBe(true)
+    expect(capture).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
+    expect(draft.prepareSave()).toBe(true)
+    request.mockResolvedValueOnce({ document: { ...base(), version: 2 } })
+    expect(await draft.flush()).toBe(true)
+    expect(JSON.parse(request.mock.calls[0][1]!.body as string).config['json.views']).toEqual({ a: { scrollTop: 12 }, b: { scrollTop: 24 } })
+    expect(capture).toHaveBeenCalledOnce()
+    expect(deactivate).not.toHaveBeenCalled()
+    release()
+    expect(draft.prepareSave()).toBe(true)
+    expect(capture).toHaveBeenCalledOnce()
+    draft.dispose()
+    expect(draft.prepareSave()).toBe(false)
+    expect(capture).toHaveBeenCalledOnce()
+  })
+
+  it('preserves the draft and reports an explicit preparation failure instead of sending an incomplete save', () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.session.setSlot('panel-a', 'must remain available')
+    draft.session.registerBeforeSave!(() => { throw new Error('view unavailable') })
+    expect(draft.prepareSave()).toBe(false)
+    expect(draft.phase).toBe('error')
+    expect(draft.error).toContain('No se pudo preparar el guardado')
+    expect(draft.dirty).toBe(true)
+    expect(draft.session.getSlot('panel-a')).toBeDefined()
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('leaves conflict authority to flush when there is no editor and preserves a sticky conflict on preparation failure', async () => {
+    const draft = new UtilityDraft(base(), vi.fn())
+    draft.markExternalConflict('Keep the canonical conflict')
+    expect(draft.prepareSave()).toBe(true)
+    expect(await draft.flush()).toBe(false)
+    draft.session.registerBeforeSave!(() => { throw new Error('view unavailable') })
+    expect(draft.prepareSave()).toBe(false)
+    expect(draft.phase).toBe('conflict')
+    expect(draft.error).toBe('Keep the canonical conflict')
+    expect(request).not.toHaveBeenCalled()
+  })
+
   it('reports a per-document display mode without dirtying or persisting it', async () => {
     const notify = vi.fn(), draft = new UtilityDraft(base(), notify), neighbor = new UtilityDraft({ ...base(), id: 'b' }, vi.fn())
     const status = { lightPanels: ['a'], chunkedPanels: [] }

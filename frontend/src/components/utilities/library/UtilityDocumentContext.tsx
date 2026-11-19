@@ -17,6 +17,8 @@ export interface UtilityDocumentSession {
   setSlot: (name: string, value: UtilitySlotSource) => void
   getSlot: (name: string) => Blob | undefined
   slotNames?: () => string[]
+  /** Publishes pending editor state synchronously without deactivating the editor. */
+  registerBeforeSave?: (callback: () => void) => () => void
   registerBeforeDeactivate?: (callback: () => void) => () => void
   reportDisplayStatus?: (status: UtilityDisplayStatus) => void
   reconcileVaultDeletion?: (keyId: string) => Promise<boolean>

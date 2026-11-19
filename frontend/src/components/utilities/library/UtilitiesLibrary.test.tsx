@@ -6,7 +6,7 @@ import { libraryRequest, readDocumentSlot, UtilityRequestError, type UtilityDocu
 
 const router = vi.hoisted(() => ({ push: vi.fn() }))
 const realtime = vi.hoisted(() => ({ listener: undefined as ((message: unknown) => void) | undefined }))
-const editorBehavior = vi.hoisted(() => ({ modelBacked: false, dirtyOnDeactivate: false, setState: undefined as ((state: Record<string, unknown>) => void) | undefined }))
+const editorBehavior = vi.hoisted(() => ({ modelBacked: false, dirtyOnDeactivate: false, setState: undefined as ((state: Record<string, unknown>) => void) | undefined, scheduleView: undefined as (() => void) | undefined }))
 vi.mock('next/navigation', () => ({ useRouter: () => router }))
 vi.mock('@/lib/authScope', () => ({ getAuthScope: () => 'test-scope', subscribeAuthScope: () => () => {} }))
 vi.mock('@/lib/api', () => ({ api: vi.fn(), apiBlob: vi.fn(), subscribeWebSocket: (listener: (message: unknown) => void) => { realtime.listener = listener; return () => { realtime.listener = undefined } }, getOnlineSessionTiming: () => null, subscribeOnlineSessionNotice: () => () => {} }))
@@ -18,6 +18,13 @@ vi.mock('../UtilityWorkspace', async () => {
     const [source, setSource] = useUtilityDocumentText('source'), session = useUtilityDocument(), model = useRef(source)
     model.current = source
     useEffect(() => { editorBehavior.setState = session?.setState; return () => { editorBehavior.setState = undefined } }, [session])
+    useEffect(() => {
+      let viewTimer: ReturnType<typeof setTimeout> | undefined
+      const capture = () => { clearTimeout(viewTimer); viewTimer = undefined; session?.setState({ rememberedView: true }) }
+      const release = session?.registerBeforeSave?.(() => { if (viewTimer !== undefined) capture() })
+      editorBehavior.scheduleView = () => { clearTimeout(viewTimer); viewTimer = setTimeout(capture, 250) }
+      return () => { clearTimeout(viewTimer); release?.(); editorBehavior.scheduleView = undefined }
+    }, [session])
     useEffect(() => session?.registerBeforeDeactivate?.(() => { if (editorBehavior.dirtyOnDeactivate) session.setState({ rememberedView: true }) }), [session])
     useEffect(() => () => { model.current = '' }, [])
     return <textarea aria-label="Test document source" value={source} onChange={event => {
@@ -29,7 +36,7 @@ vi.mock('../UtilityWorkspace', async () => {
 const request = vi.mocked(libraryRequest)
 let document: UtilityDocument
 beforeEach(() => {
-  vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob); editorBehavior.modelBacked = false; editorBehavior.dirtyOnDeactivate = false; editorBehavior.setState = undefined
+  vi.clearAllMocks(); vi.stubGlobal('Blob', NodeBlob); editorBehavior.modelBacked = false; editorBehavior.dirtyOnDeactivate = false; editorBehavior.setState = undefined; editorBehavior.scheduleView = undefined
   document = { id: 'document-a', type: 'qr', title: 'Saved QR', folder_id: null, favorite: false, version: 1, config: {}, slots: [{ slot: 'source', bytes: 5, version: 1 }], created_at: '2026-11-14', updated_at: '2026-11-14' }
   vi.mocked(readDocumentSlot).mockResolvedValue({ blob: new Blob(['saved'], { type: 'text/plain' }), version: 1 })
   request.mockImplementation(async (path, options): Promise<any> => {
@@ -111,6 +118,45 @@ describe('utility library orchestration', () => {
     expect(vi.getTimerCount()).toBeGreaterThan(0)
     unmount()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('publishes a pending view before the explicit save so its delayed capture cannot erase the confirmation', async () => {
+    render(<UtilitiesLibrary />)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' })
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    vi.useFakeTimers()
+    editorBehavior.scheduleView?.()
+    expect(document.config).not.toHaveProperty('rememberedView')
+    await act(async () => { fireEvent.keyDown(source, { key: 's', ctrlKey: true }); await vi.advanceTimersByTimeAsync(0) })
+    const status = screen.getByRole('button', { name: 'Estado del guardado' })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    expect(document.config).toHaveProperty('rememberedView', true)
+    const patch = request.mock.calls.find(([path, options]) => path === '/documents/document-a' && options?.method === 'PATCH')!
+    expect(JSON.parse(patch[1]!.body as string).config).toEqual({ rememberedView: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1749) })
+    expect(status).toHaveAttribute('title', 'Documento guardado.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(status).toHaveAttribute('title', 'Guardado')
+    expect(request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && options?.method === 'PATCH')).toHaveLength(1)
+  })
+
+  it('retries an unloaded document before preparing view preferences for a manual save', async () => {
+    vi.mocked(readDocumentSlot).mockRejectedValueOnce(new UtilityRequestError('No se pudo leer el contenido.', 503))
+    render(<UtilitiesLibrary />)
+    await screen.findByRole('button', { name: 'Reintentar' })
+    const readsBefore = request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && !options?.method).length
+    vi.useFakeTimers()
+    editorBehavior.scheduleView?.()
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Test document source' }), { key: 's', ctrlKey: true })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByRole('textbox', { name: 'Test document source' })).toHaveValue('saved')
+    expect(request.mock.calls.filter(([path, options]) => path === '/documents/document-a' && !options?.method)).toHaveLength(readsBefore + 1)
+    expect(request.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false)
+    expect(document.config).not.toHaveProperty('rememberedView')
   })
 
   it('clears the confirmation when changing documents and cannot revive it when returning', async () => {
