@@ -121,6 +121,9 @@ for (const width of [1600, 375, 320]) test(`save confirmation preserves editor g
   await expect(editor).toBeVisible({ timeout: 30_000 })
   const source = Array.from({ length: 120 }, (_, index) => `Linea ${index + 1}: contenido de prueba final`).join('\n')
   await page.getByLabel('Abrir archivo local').setInputFiles({ name: 'geometria.txt', mimeType: 'text/plain', buffer: Buffer.from(source) })
+  // Import decoding is asynchronous; the resting label can still belong to
+  // the empty document until the imported bytes reach the real mock server.
+  await expect.poll(() => library.contents.get(`${library.getWorkspace().active_id}/panel-a`)?.toString(), { timeout: 15_000 }).toBe(source)
   const status = page.getByRole('button', { name: 'Estado del guardado', exact: true })
   await expect(status).toHaveAttribute('title', 'Guardado', { timeout: 15_000 })
 
