@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Blob as NodeBlob } from 'node:buffer'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { DashboardFocusEnterButton, DashboardFocusProvider, DashboardFocusRestoreBar, DashboardFocusSidebar } from '@/components/dashboard-focus/DashboardFocus'
 import { UtilitiesLibrary } from './UtilitiesLibrary'
 import { libraryRequest, readDocumentSlot, UtilityRequestError, type UtilityDocument } from './libraryApi'
 
@@ -58,6 +59,54 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('utility library orchestration', () => {
+  it('keeps dashboard restoration separate from the document library inside the same header', async () => {
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+      matches: query === '(min-width: 1024px)',
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })))
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, right: 1200, bottom: 650, width: 1200, height: 650, x: 0, y: 0, toJSON: () => ({}) }))
+    render(<DashboardFocusProvider scopeKey="account:user:/dashboard/utilities/json" enabled>
+      <DashboardFocusSidebar><DashboardFocusEnterButton /></DashboardFocusSidebar>
+      <DashboardFocusRestoreBar />
+      <UtilitiesLibrary />
+    </DashboardFocusProvider>)
+    const source = await screen.findByRole('textbox', { name: 'Test document source' }) as HTMLTextAreaElement
+    await waitFor(() => expect(source).toHaveValue('saved'))
+    source.setSelectionRange(1, 4)
+    source.scrollTop = 23
+    const header = window.document.querySelector('[data-utility-workspace-header]')!
+    const enter = screen.getByRole('button', { name: 'Ocultar menú', exact: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca', exact: true }))
+    const documents = screen.getByRole('complementary', { name: 'Mis documentos' })
+    fireEvent.click(enter)
+
+    const restore = screen.getByRole('button', { name: 'Mostrar menú', exact: true })
+    const closeLibrary = screen.getByRole('button', { name: 'Cerrar biblioteca', exact: true })
+    expect(header).toContainElement(restore)
+    expect(header).toContainElement(closeLibrary)
+    expect(restore).not.toBe(closeLibrary)
+    expect(restore).toHaveAttribute('aria-controls', 'dashboard-primary-navigation')
+    expect(closeLibrary).toHaveAttribute('aria-expanded', 'true')
+    expect(window.document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
+    expect(restore).toHaveFocus()
+    fireEvent.click(restore)
+
+    expect(enter).toHaveFocus()
+    expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBe(documents)
+    expect(screen.getByRole('button', { name: 'Cerrar biblioteca', exact: true })).toBe(closeLibrary)
+    expect(screen.getByRole('textbox', { name: 'Test document source' })).toBe(source)
+    expect(source).toHaveValue('saved')
+    expect(source.selectionStart).toBe(1)
+    expect(source.selectionEnd).toBe(4)
+    expect(source.scrollTop).toBe(23)
+    fireEvent.click(closeLibrary)
+    expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Ocultar menú', exact: true })).toBe(enter)
+    expect(screen.queryByRole('button', { name: 'Mostrar menú', exact: true })).not.toBeInTheDocument()
+  })
+
   it('uses one save command for Ctrl/Cmd+S and the visible button without opening browser save or duplicating an in-flight write', async () => {
     const original = request.getMockImplementation()!
     let finish!: (result: unknown) => void

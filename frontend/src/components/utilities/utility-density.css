@@ -19,6 +19,10 @@
   flex-shrink: 0;
 }
 
+.utility-density-scope[data-library-compact="true"] .utility-restore-label {
+  display: none;
+}
+
 .utility-field:where(:not(textarea)) {
   min-height: var(--utility-control-size);
 }

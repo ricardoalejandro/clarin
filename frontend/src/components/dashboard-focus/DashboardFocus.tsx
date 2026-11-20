@@ -12,6 +12,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { ArrowLeft, Maximize2 } from 'lucide-react'
 import {
   DASHBOARD_FOCUS_ARIA_SHORTCUTS,
@@ -29,6 +30,8 @@ interface DashboardFocusContextValue {
   specializedOwnerActive: boolean
   sidebarRef: RefObject<HTMLElement | null>
   restoreBarRef: RefObject<HTMLDivElement | null>
+  restoreSlot: HTMLDivElement | null
+  setRestoreSlot: (element: HTMLDivElement | null) => void
   toggle: () => void
   restore: () => void
   registerSpecializedOwner: (token: symbol) => () => void
@@ -50,6 +53,7 @@ export function DashboardFocusProvider({ scopeKey, enabled, children }: {
   const [specializedOwnerActive, setSpecializedOwnerActive] = useState(false)
   const sidebarRef = useRef<HTMLElement | null>(null)
   const restoreBarRef = useRef<HTMLDivElement | null>(null)
+  const [restoreSlot, setRestoreSlotElement] = useState<HTMLDivElement | null>(null)
   const specializedOwnersRef = useRef(new Set<symbol>())
   const pointerIDsRef = useRef(new Set<number>())
   const nativeDragRef = useRef(false)
@@ -61,6 +65,13 @@ export function DashboardFocusProvider({ scopeKey, enabled, children }: {
   const hidden = available && !specializedOwnerActive && state.scopeKey === scopeKey && state.hidden
   const currentRef = useRef({ available, hidden })
   currentRef.current = { available, hidden }
+
+  const setRestoreSlot = useCallback((element: HTMLDivElement | null) => {
+    if (restoreBarRef.current?.contains(document.activeElement)) {
+      focusAfterCommitRef.current = 'restore-bar'
+    }
+    setRestoreSlotElement(element)
+  }, [])
 
   useLayoutEffect(() => {
     const media = window.matchMedia(DASHBOARD_FOCUS_MEDIA_QUERY)
@@ -127,7 +138,7 @@ export function DashboardFocusProvider({ scopeKey, enabled, children }: {
       target?.focus({ preventScroll: true })
       invokerRef.current = null
     }
-  }, [hidden])
+  }, [hidden, restoreSlot])
 
   useEffect(() => {
     const onPageLifecycle = () => clear()
@@ -178,8 +189,8 @@ export function DashboardFocusProvider({ scopeKey, enabled, children }: {
   }, [toggle])
 
   const context = useMemo(() => ({
-    hidden, available, specializedOwnerActive, sidebarRef, restoreBarRef, toggle, restore, registerSpecializedOwner,
-  }), [available, hidden, registerSpecializedOwner, restore, specializedOwnerActive, toggle])
+    hidden, available, specializedOwnerActive, sidebarRef, restoreBarRef, restoreSlot, setRestoreSlot, toggle, restore, registerSpecializedOwner,
+  }), [available, hidden, registerSpecializedOwner, restore, restoreSlot, setRestoreSlot, specializedOwnerActive, toggle])
 
   return <DashboardFocusContext.Provider value={context}>{children}</DashboardFocusContext.Provider>
 }
@@ -223,18 +234,34 @@ export function DashboardFocusEnterButton({ className = '' }: { className?: stri
   ><Maximize2 className="h-[18px] w-[18px]" aria-hidden="true" /></button>
 }
 
+export function DashboardFocusRestoreSlot() {
+  const focus = useDashboardFocus()
+  return focus ? <div ref={focus.setRestoreSlot} className="contents" /> : null
+}
+
 export function DashboardFocusRestoreBar() {
   const focus = useDashboardFocus()
   if (!focus?.hidden) return null
-  return <div ref={focus.restoreBarRef} data-dashboard-focus-restore-bar className="flex h-11 min-h-11 shrink-0 items-center border-b border-slate-200/80 bg-white px-2">
+  const slot = focus.restoreSlot
+  const control = <div ref={focus.restoreBarRef} data-dashboard-focus-restore-bar className={slot
+    ? 'relative flex h-full shrink-0 items-center border-r border-slate-200 pr-1'
+    : 'flex h-11 min-h-11 shrink-0 items-center border-b border-slate-200/80 bg-white px-2'}>
     <button
       type="button"
       onClick={focus.restore}
+      aria-label="Mostrar menú"
       aria-controls={DASHBOARD_FOCUS_SIDEBAR_ID}
       aria-expanded={false}
       aria-keyshortcuts={DASHBOARD_FOCUS_ARIA_SHORTCUTS}
-      className="inline-flex h-11 items-center gap-2 rounded-lg px-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 motion-reduce:transition-none"
-    ><ArrowLeft className="h-4 w-4" aria-hidden="true" /><span>Mostrar menú</span><kbd className="ml-2 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">{DASHBOARD_FOCUS_SHORTCUT_LABEL}</kbd></button>
+      className={`group inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg px-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 motion-reduce:transition-none ${slot ? 'utility-control' : 'h-11'}`}
+    >
+      <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span className={slot ? 'utility-restore-label' : undefined}>Mostrar menú</span>
+      {slot
+        ? <span aria-hidden="true" className="pointer-events-none invisible absolute left-0 top-full z-20 rounded bg-slate-800 px-2 py-1 text-xs font-medium text-white shadow group-hover:visible group-focus-visible:visible">Mostrar menú · <kbd>{DASHBOARD_FOCUS_SHORTCUT_LABEL}</kbd></span>
+        : <kbd className="ml-2 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">{DASHBOARD_FOCUS_SHORTCUT_LABEL}</kbd>}
+    </button>
     <span role="status" aria-live="polite" className="sr-only">Menú oculto. Puedes mostrarlo con el botón Mostrar menú o con {DASHBOARD_FOCUS_SHORTCUT_LABEL}.</span>
   </div>
+  return slot ? createPortal(control, slot) : control
 }

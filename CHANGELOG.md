@@ -1,5 +1,11 @@
 # Changelog — Clarin CRM
 
+## 2026-11-20
+
+### Build 1 — Más espacio para el lienzo de Utilitarios
+
+- Al ocultar el menú lateral, «Mostrar menú» comparte la cabecera con las pestañas y el guardado. El lienzo recupera 44 px de altura.
+
 ## 2026-11-19
 
 ### Build 1 — Confirmación de guardado sin saltos
