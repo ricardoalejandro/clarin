@@ -142,12 +142,12 @@ describe('DashboardFocus', () => {
     enter.focus()
 
     expect(shortcut(enter)).toBe(false)
-    const restore = screen.getByRole('button', { name: 'Mostrar menú', exact: true })
+    const restore = screen.getByRole('button', { name: 'Mostrar menú' })
     expect(restore).toHaveFocus()
     expect(header).toContainElement(restore)
     expect(header).toContainElement(document.querySelector('[data-dashboard-focus-restore-bar]') as HTMLElement)
     expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Mostrar menú', exact: true })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Mostrar menú' })).toHaveLength(1)
     expect(restore).toHaveAttribute('aria-controls', 'dashboard-primary-navigation')
     expect(restore).toHaveAttribute('aria-expanded', 'false')
 
@@ -168,7 +168,7 @@ describe('DashboardFocus', () => {
     draft.scrollLeft = 19
     act(() => rendered.focus().toggle())
 
-    expect(screen.getByTestId('utility-header')).toContainElement(screen.getByRole('button', { name: 'Mostrar menú', exact: true }))
+    expect(screen.getByTestId('utility-header')).toContainElement(screen.getByRole('button', { name: 'Mostrar menú' }))
     expect(draft).toHaveFocus()
     act(() => rendered.focus().restore())
     expect(screen.getByRole('textbox', { name: 'Message draft' })).toBe(draft)
@@ -185,22 +185,22 @@ describe('DashboardFocus', () => {
     const enter = screen.getByRole('button', { name: 'Ocultar menú' })
     fireEvent.click(enter)
     const header = screen.getByTestId('utility-header')
-    expect(header).toContainElement(screen.getByRole('button', { name: 'Mostrar menú', exact: true }))
+    expect(header).toContainElement(screen.getByRole('button', { name: 'Mostrar menú' }))
 
     rendered.update({ restoreSlot: false })
-    let restore = screen.getByRole('button', { name: 'Mostrar menú', exact: true })
+    let restore = screen.getByRole('button', { name: 'Mostrar menú' })
     expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
     expect(header).not.toContainElement(restore)
     expect(restore).toHaveFocus()
 
     rendered.update({ restoreSlot: true })
-    restore = screen.getByRole('button', { name: 'Mostrar menú', exact: true })
+    restore = screen.getByRole('button', { name: 'Mostrar menú' })
     expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
     expect(header).toContainElement(restore)
     expect(restore).toHaveFocus()
     fireEvent.click(restore)
     expect(enter).toHaveFocus()
-    expect(screen.queryByRole('button', { name: 'Mostrar menú', exact: true })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Mostrar menú' })).not.toBeInTheDocument()
   })
 
   it('restores without stealing an existing content focus', () => {

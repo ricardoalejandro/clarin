@@ -77,13 +77,13 @@ describe('utility library orchestration', () => {
     source.setSelectionRange(1, 4)
     source.scrollTop = 23
     const header = window.document.querySelector('[data-utility-workspace-header]')!
-    const enter = screen.getByRole('button', { name: 'Ocultar menú', exact: true })
-    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca', exact: true }))
+    const enter = screen.getByRole('button', { name: 'Ocultar menú' })
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir biblioteca' }))
     const documents = screen.getByRole('complementary', { name: 'Mis documentos' })
     fireEvent.click(enter)
 
-    const restore = screen.getByRole('button', { name: 'Mostrar menú', exact: true })
-    const closeLibrary = screen.getByRole('button', { name: 'Cerrar biblioteca', exact: true })
+    const restore = screen.getByRole('button', { name: 'Mostrar menú' })
+    const closeLibrary = screen.getByRole('button', { name: 'Cerrar biblioteca' })
     expect(header).toContainElement(restore)
     expect(header).toContainElement(closeLibrary)
     expect(restore).not.toBe(closeLibrary)
@@ -95,7 +95,7 @@ describe('utility library orchestration', () => {
 
     expect(enter).toHaveFocus()
     expect(screen.getByRole('complementary', { name: 'Mis documentos' })).toBe(documents)
-    expect(screen.getByRole('button', { name: 'Cerrar biblioteca', exact: true })).toBe(closeLibrary)
+    expect(screen.getByRole('button', { name: 'Cerrar biblioteca' })).toBe(closeLibrary)
     expect(screen.getByRole('textbox', { name: 'Test document source' })).toBe(source)
     expect(source).toHaveValue('saved')
     expect(source.selectionStart).toBe(1)
@@ -103,8 +103,8 @@ describe('utility library orchestration', () => {
     expect(source.scrollTop).toBe(23)
     fireEvent.click(closeLibrary)
     expect(screen.queryByRole('complementary', { name: 'Mis documentos' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Ocultar menú', exact: true })).toBe(enter)
-    expect(screen.queryByRole('button', { name: 'Mostrar menú', exact: true })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Ocultar menú' })).toBe(enter)
+    expect(screen.queryByRole('button', { name: 'Mostrar menú' })).not.toBeInTheDocument()
   })
 
   it('uses one save command for Ctrl/Cmd+S and the visible button without opening browser save or duplicating an in-flight write', async () => {

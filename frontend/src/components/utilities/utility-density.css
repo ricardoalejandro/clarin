@@ -19,7 +19,7 @@
   flex-shrink: 0;
 }
 
-.utility-density-scope[data-library-compact="true"] .utility-restore-label {
+.utility-restore-label {
   display: none;
 }
 
@@ -77,6 +77,7 @@
 }
 
 @container utilities-workspace (min-width: 820px) {
+  .utility-restore-label { display: inline; }
   .utility-crypto-tabs { display: flex; }
   .utility-crypto-select { display: none; }
 }
