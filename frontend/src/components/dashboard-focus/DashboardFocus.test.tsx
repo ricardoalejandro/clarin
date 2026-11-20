@@ -5,6 +5,7 @@ import {
   DashboardFocusEnterButton,
   DashboardFocusProvider,
   DashboardFocusRestoreBar,
+  DashboardFocusRestoreSlot,
   DashboardFocusSidebar,
   useDashboardFocus,
   useDashboardSpecializedFocusOwner,
@@ -23,7 +24,15 @@ function SpecializedOwner() {
   return <div>Specialized editor</div>
 }
 
-function fixture(initial = { scopeKey: 'account:user:/dashboard/chats', enabled: true, specialized: false, strict: false }) {
+interface FixtureOptions {
+  scopeKey: string
+  enabled: boolean
+  specialized: boolean
+  strict: boolean
+  restoreSlot?: boolean
+}
+
+function fixture(initial: FixtureOptions = { scopeKey: 'account:user:/dashboard/chats', enabled: true, specialized: false, strict: false }) {
   let latest: ReturnType<typeof useDashboardFocus>
   const mounted = vi.fn()
   const unmounted = vi.fn()
@@ -32,12 +41,12 @@ function fixture(initial = { scopeKey: 'account:user:/dashboard/chats', enabled:
     return <textarea aria-label="Message draft" defaultValue="Unsent message" />
   }
   function Probe() { latest = useDashboardFocus(); return null }
-  function Surface({ scopeKey, enabled, specialized, strict }: typeof initial) {
+  function Surface({ scopeKey, enabled, specialized, strict, restoreSlot }: FixtureOptions) {
     const surface = <DashboardFocusProvider scopeKey={scopeKey} enabled={enabled}>
       <Probe />
       <DashboardFocusSidebar className="sidebar-test"><button>Collapse navigation</button><DashboardFocusEnterButton /><button>Navigation</button></DashboardFocusSidebar>
       <DashboardFocusRestoreBar />
-      <main><button>Workspace action</button><Content />{specialized && <SpecializedOwner />}</main>
+      <main><header data-testid="utility-header">{restoreSlot && <DashboardFocusRestoreSlot />}</header><button>Workspace action</button><Content />{specialized && <SpecializedOwner />}</main>
     </DashboardFocusProvider>
     return strict ? <StrictMode>{surface}</StrictMode> : surface
   }
@@ -124,6 +133,74 @@ describe('DashboardFocus', () => {
     fireEvent.click(restore)
     expect(screen.getByRole('button', { name: 'Ocultar menú' })).toBe(enter)
     expect(screen.getByRole('button', { name: 'Ocultar menú' })).toHaveFocus()
+  })
+
+  it('portals one restore control into the utility header and returns keyboard focus to its sidebar invoker', () => {
+    const rendered = fixture({ scopeKey: 'account:user:/dashboard/utilities/json', enabled: true, specialized: false, strict: false, restoreSlot: true })
+    const header = screen.getByTestId('utility-header')
+    const enter = screen.getByRole('button', { name: 'Ocultar menú' })
+    enter.focus()
+
+    expect(shortcut(enter)).toBe(false)
+    const restore = screen.getByRole('button', { name: 'Mostrar menú' })
+    expect(restore).toHaveFocus()
+    expect(header).toContainElement(restore)
+    expect(header).toContainElement(document.querySelector('[data-dashboard-focus-restore-bar]') as HTMLElement)
+    expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Mostrar menú' })).toHaveLength(1)
+    expect(restore).toHaveAttribute('aria-controls', 'dashboard-primary-navigation')
+    expect(restore).toHaveAttribute('aria-expanded', 'false')
+
+    expect(shortcut(restore, { ctrlKey: false, metaKey: true })).toBe(false)
+    expect(enter).toHaveFocus()
+    expect(header).toBeInTheDocument()
+    expect(document.querySelector('[data-dashboard-focus-restore-bar]')).not.toBeInTheDocument()
+    expect(rendered.mounted).toHaveBeenCalledTimes(1)
+    expect(rendered.unmounted).not.toHaveBeenCalled()
+  })
+
+  it('keeps editor focus, its selection and scroll while a header restore control is mounted or removed', () => {
+    const rendered = fixture({ scopeKey: 'account:user:/dashboard/utilities/json', enabled: true, specialized: false, strict: false, restoreSlot: true })
+    const draft = screen.getByRole('textbox', { name: 'Message draft' }) as HTMLTextAreaElement
+    draft.focus()
+    draft.setSelectionRange(2, 8)
+    draft.scrollTop = 37
+    draft.scrollLeft = 19
+    act(() => rendered.focus().toggle())
+
+    expect(screen.getByTestId('utility-header')).toContainElement(screen.getByRole('button', { name: 'Mostrar menú' }))
+    expect(draft).toHaveFocus()
+    act(() => rendered.focus().restore())
+    expect(screen.getByRole('textbox', { name: 'Message draft' })).toBe(draft)
+    expect(draft).toHaveFocus()
+    expect(draft.selectionStart).toBe(2)
+    expect(draft.selectionEnd).toBe(8)
+    expect(draft.scrollTop).toBe(37)
+    expect(draft.scrollLeft).toBe(19)
+    expect(rendered.unmounted).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('keeps one usable restore control when its header slot unmounts and remounts (StrictMode=%s)', strict => {
+    const rendered = fixture({ scopeKey: 'account:user:/dashboard/utilities/json', enabled: true, specialized: false, strict, restoreSlot: true })
+    const enter = screen.getByRole('button', { name: 'Ocultar menú' })
+    fireEvent.click(enter)
+    const header = screen.getByTestId('utility-header')
+    expect(header).toContainElement(screen.getByRole('button', { name: 'Mostrar menú' }))
+
+    rendered.update({ restoreSlot: false })
+    let restore = screen.getByRole('button', { name: 'Mostrar menú' })
+    expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
+    expect(header).not.toContainElement(restore)
+    expect(restore).toHaveFocus()
+
+    rendered.update({ restoreSlot: true })
+    restore = screen.getByRole('button', { name: 'Mostrar menú' })
+    expect(document.querySelectorAll('[data-dashboard-focus-restore-bar]')).toHaveLength(1)
+    expect(header).toContainElement(restore)
+    expect(restore).toHaveFocus()
+    fireEvent.click(restore)
+    expect(enter).toHaveFocus()
+    expect(screen.queryByRole('button', { name: 'Mostrar menú' })).not.toBeInTheDocument()
   })
 
   it('restores without stealing an existing content focus', () => {
@@ -269,7 +346,7 @@ describe('DashboardFocus', () => {
   })
 
   it('supports safe standalone specialized editors outside a dashboard provider', () => {
-    render(<><SpecializedOwner /><DashboardFocusEnterButton /><DashboardFocusRestoreBar /><DashboardFocusSidebar>Standalone</DashboardFocusSidebar></>)
+    render(<><SpecializedOwner /><DashboardFocusEnterButton /><DashboardFocusRestoreBar /><DashboardFocusRestoreSlot /><DashboardFocusSidebar>Standalone</DashboardFocusSidebar></>)
     expect(screen.getByText('Standalone')).not.toHaveAttribute('inert')
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
