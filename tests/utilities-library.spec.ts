@@ -250,6 +250,9 @@ test.describe('integrated dashboard focus header', () => {
     await restore.press('Tab')
     await expect(page.getByRole('button', { name: 'Abrir biblioteca', exact: true })).toBeFocused()
     await page.keyboard.press('Tab')
+    // Firefox includes a natively scrollable tab strip in sequential focus.
+    // Keep its existing extra stop and verify the next Tab reaches the tab.
+    if (await tabs.evaluate(element => element === document.activeElement)) await page.keyboard.press('Tab')
     const first = tabs.getByRole('tab').nth(0)
     await expect(first).toBeFocused()
     await first.press('Enter')
