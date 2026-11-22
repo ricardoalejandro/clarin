@@ -6,9 +6,13 @@ on:
       - 'codex/programas-intercambio-archivos'
   pull_request:
     paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'tests/**'
+      - 'backend/internal/programtransfer/**'
+      - 'backend/internal/**/program_transfer*'
+      - 'backend/pkg/database/program_transfer_migrations.go'
+      - 'frontend/src/app/dashboard/programs/**'
+      - 'frontend/src/components/programs/**'
+      - 'scripts/qa/program-transfer-postgres.ps1'
+      - 'tests/responsive-dashboard.spec.ts'
       - '.github/workflows/program-transfer-verification.yml'
   workflow_dispatch:
 
