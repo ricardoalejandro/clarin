@@ -10,6 +10,7 @@ import { getAuthScope, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
 import { useUtilitiesWorkspacePreferences } from '@/lib/utilitiesWorkspacePreferences'
 import EditorPopover from '@/components/documents/EditorPopover'
+import { DashboardFocusRestoreSlot } from '@/components/dashboard-focus/DashboardFocus'
 import { installEditorNavigationGuard } from '@/lib/fabric/editorNavigation'
 import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
 import { SessionTimingSummary } from '@/components/admin/SessionTimingSummary'
@@ -825,6 +826,7 @@ function LibrarySession({ initialTool }: { initialTool?: Utility['id'] }) {
   return <section ref={host} aria-label="Biblioteca personal de Utilitarios" data-library-layout={wide ? 'wide' : 'narrow'} data-library-compact={compact} className="utility-density-scope relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
     <h1 className="sr-only">Utilitarios</h1>
     <header data-utility-workspace-header className="flex h-11 min-h-11 min-w-0 shrink-0 items-center gap-0.5 border-b border-slate-200 bg-slate-50 px-1">
+      <DashboardFocusRestoreSlot />
       <button ref={libraryTrigger} type="button" disabled={busy} className={`${button} shrink-0 ${libraryOpen ? 'bg-emerald-50 text-emerald-800' : ''}`} aria-label={libraryOpen ? 'Cerrar biblioteca' : 'Abrir biblioteca'} aria-expanded={libraryOpen} title={libraryOpen ? 'Cerrar biblioteca' : 'Abrir biblioteca'} onClick={() => setLibraryOpen(!libraryOpen)}><Menu size={16} aria-hidden /></button>
       <div ref={tabsViewport} role="tablist" aria-label="Documentos abiertos" className="flex h-full min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden" style={{ containerType: 'inline-size', scrollbarWidth: 'none' }}>
         {workspace.open_ids.map(id => { const document = sessions.current.get(id)?.document ?? documents[id]; if (!document) return null; return <div key={id} data-utility-tab-id={id} style={{ maxWidth: 'min(240px, 100cqw)' }} className={`flex shrink-0 items-center border-r border-slate-200 ${id === workspace.active_id ? 'border-b-2 border-b-emerald-600 bg-white' : ''}`}><button role="tab" type="button" aria-selected={id === workspace.active_id} aria-controls="utility-active-document" title={document.title} style={{ minWidth: 0, flex: '1 1 0%' }} className={`${button} max-w-44 justify-start rounded-none`} disabled={busy} onDoubleClick={() => { if (id === workspace.active_id && !busy) setDialog({ kind: 'rename', document }) }} onClick={() => void openDocument(document)}><span className="truncate">{document.title}</span>{sessions.current.get(id)?.dirty && <span aria-label="Cambios pendientes" className="text-amber-600">●</span>}</button><DocumentModeIndicator status={sessions.current.get(id)?.displayStatus} /><button type="button" className={`${button} shrink-0 px-1`} aria-label={`Cerrar pestaña ${document.title}`} disabled={busy} onClick={() => void closeDocument(id)}><X size={13} aria-hidden /></button></div> })}

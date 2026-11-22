@@ -20,6 +20,13 @@ These instructions are the source of truth for Codex in this repository. Read th
 - When the user requests an exact historical appearance, find and compare the original implementation/asset before changing it.
 - Preserve unrelated dirty work and state assumptions or remaining provider/session limitations clearly.
 
+## CPU Budget On A Cloud VPS
+
+- Keep total VPS CPU below **60%** whenever development, tests, builds or deployment steps run on a cloud server. Apply this rule where the work executes, including a remote Docker builder invoked from a personal computer. Work executed entirely on a personal machine is exempt.
+- Measure the host's baseline before starting. Sample total CPU across all vCPUs on a 0–100% scale at least once per second from the start of the VPS work through final verification. Include image builds, export and loading. Use host measurements even when the build runs in a container.
+- Leave room for live traffic. Limit CPU and concurrency on the actual build workers before launching them. At or above 55% host CPU, defer new work and pause the task's CPU-intensive jobs. If a sample reaches 60% or monitoring becomes unavailable, stop the task's CPU-intensive work immediately. Resume with a smaller budget only after valid readings stay below 40% for one minute.
+- Scope automatic controls to the current task's processes. Apply changes to shared services only with explicit authorization. On completion, failure or cancellation, stop the temporary monitor, restore any temporary limits and report the measured peak, sampling interval and any threshold crossings.
+
 ## Mandatory Local Skill Routing
 
 Before changing any area below, read the matching local skill completely:
@@ -186,7 +193,7 @@ If a task touches multiple areas, read all matching skills before editing.
 ## Mandatory Deployment Rule
 
 - If the user asks to deploy, says "despliega", "aplica en producción", "aplícalo", "main", or otherwise makes clear the change must reach the running system, do not stop at tests or builds.
-- Deploy from `/root/proyect/clarin` with the repository deployment flow: `make deploy`.
+- Apply the [VPS CPU budget](#cpu-budget-on-a-cloud-vps) before running `make deploy` from `/root/proyect/clarin`.
 - A deployment is not complete until runtime verification has actually run:
   - `docker ps --filter name=clarin`
   - `docker exec clarin-backend wget -qO- http://127.0.0.1:8080/health`
