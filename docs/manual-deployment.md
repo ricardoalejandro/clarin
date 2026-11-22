@@ -32,6 +32,10 @@ git branch --show-current
 El checkout debe estar en `main`. Si hay cambios locales, revisarlos y
 conservarlos antes de continuar; no usar un reset para descartarlos.
 
+Antes de compilar en el servidor, activa la medición de CPU de todo el VPS y
+limita los procesos de compilación según la [regla de CPU de Clarín](../AGENTS.md#cpu-budget-on-a-cloud-vps).
+Mantén la medición hasta terminar las verificaciones del despliegue.
+
 ```bash
 git fetch origin main &&
 git merge --ff-only origin/main &&
