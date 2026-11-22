@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useId, useRef, useState, type ChangeEvent, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { ArrowRight, CheckCircle2, FileJson, Loader2, Search, Upload, X } from 'lucide-react'
@@ -22,13 +22,15 @@ const outline = 'min-h-11 rounded-xl border border-slate-200 bg-white px-3 py-2 
 type RequestFailure = { code?: string }
 type Destination = Pick<Program, 'id' | 'name' | 'description'>
 
-export function ProgramTransferDialog({ scope, inactive = false, onClose, onImported }: {
+export function ProgramTransferDialog({ scope, inactive = false, onClose, onImported, returnFocusRef }: {
   scope: string
   inactive?: boolean
   onClose: () => void
   onImported: (result: TransferResult) => void
+  returnFocusRef?: RefObject<HTMLElement | null>
 }) {
   const id = useId()
+  const opener = useRef<HTMLElement | null>(typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const panel = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const previewTitle = useRef<HTMLHeadingElement>(null)
@@ -129,6 +131,15 @@ export function ProgramTransferDialog({ scope, inactive = false, onClose, onImpo
     onClose()
   }
   useAccessibleDialog(!inactive, panel, close, fileInput)
+
+  useEffect(() => () => {
+    // Resuming after a responsive suspension starts another focus-trap
+    // session. Closing the import must still return to its original trigger.
+    queueMicrotask(() => {
+      const element = returnFocusRef?.current || opener.current
+      if (scope === getAuthScope() && element?.isConnected) element.focus({ preventScroll: true })
+    })
+  }, [scope, returnFocusRef])
 
   const resetPreview = () => {
     clearRequest()

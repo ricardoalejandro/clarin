@@ -43,6 +43,7 @@ export default function ProgramsPage() {
   const canTransfer = useProgramTransferAccess(transferScope, !isOffline);
   const { downloadingProgramId, download } = useProgramTransferDownload(transferScope);
   const [transferOpenScope, setTransferOpenScope] = useState<string | null>(null);
+  const transferTriggerRef = useRef<HTMLButtonElement | null>(null);
   const transferOpen = transferOpenScope === transferScope;
   const desktopActionsRef = useRef(desktopActions);
   desktopActionsRef.current = desktopActions;
@@ -809,7 +810,7 @@ export default function ProgramsPage() {
               <span className="hidden sm:inline">Carpeta</span>
             </button>
           )}
-          {canTransfer && <button type="button" aria-haspopup="dialog"
+          {canTransfer && <button ref={transferTriggerRef} type="button" aria-haspopup="dialog"
             onClick={() => { if (desktopActionsRef.current && requireOnline('Importar un programa')) setTransferOpenScope(transferScope); }}
             className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <Upload className="h-4 w-4" aria-hidden="true" /> Importar programa
@@ -1237,6 +1238,7 @@ export default function ProgramsPage() {
       )}
 
       {transferOpen && <ProgramTransferDialog key={transferScope} scope={transferScope} inactive={!desktopActions || isOffline}
+        returnFocusRef={transferTriggerRef}
         onClose={() => setTransferOpenScope(null)}
         onImported={() => { void fetchPrograms(); void fetchFolders(); void fetchDashboard(); }} />}
       <ProgramLifecycleDialog program={lifecycleSelection?.program || null} action={lifecycleSelection?.action || null} suspended={!desktopActions}

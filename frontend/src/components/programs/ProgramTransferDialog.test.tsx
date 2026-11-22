@@ -132,6 +132,27 @@ describe('Program transfer dialog', () => {
     expect(screen.getByRole('button', { name: 'Generar vista previa' })).toBeEnabled()
     expect(onClose).not.toHaveBeenCalled()
   })
+
+  it('restores the original opener after suspending and resuming the dialog', async () => {
+    const trigger = document.createElement('button')
+    const replacement = document.createElement('button')
+    const other = document.createElement('button')
+    document.body.append(trigger, replacement, other)
+    const returnFocusRef = { current: trigger }
+    trigger.focus()
+    const onClose = vi.fn()
+    const onImported = vi.fn()
+    const view = render(<ProgramTransferDialog scope={fixture.scope} onClose={onClose} onImported={onImported} returnFocusRef={returnFocusRef} />)
+    view.rerender(<ProgramTransferDialog scope={fixture.scope} inactive onClose={onClose} onImported={onImported} returnFocusRef={returnFocusRef} />)
+    trigger.remove()
+    returnFocusRef.current = replacement
+    other.focus()
+    view.rerender(<ProgramTransferDialog scope={fixture.scope} onClose={onClose} onImported={onImported} returnFocusRef={returnFocusRef} />)
+    await act(async () => view.unmount())
+    expect(replacement).toHaveFocus()
+    replacement.remove()
+    other.remove()
+  })
 })
 
 describe('Program transfer boundaries', () => {

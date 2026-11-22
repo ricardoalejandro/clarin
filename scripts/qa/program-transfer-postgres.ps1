@@ -1,11 +1,18 @@
 param(
     [string]$RuntimeRoot = '',
     [string]$ReuseRunRoot = '',
+    [string]$SourceRoot = '',
+    [switch]$ResetDatabases,
     [int]$Port = 0
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = $repoRoot }
+$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+if (($SourceRoot -ne $repoRoot -and -not $SourceRoot.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) -or -not (Test-Path -LiteralPath (Join-Path $SourceRoot 'backend/go.mod'))) {
+    throw 'The test source must be the repository or an isolated checkout beneath it.'
+}
 $qaRoot = Join-Path $repoRoot '.qa/program-transfer-postgres'
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
     $RuntimeRoot = Join-Path $qaRoot 'runtime'
@@ -111,6 +118,14 @@ try {
         # fresh random password, suppressing single-user SQL output entirely.
         "ALTER ROLE clarin_transfer_qa PASSWORD '$password';" | & (Join-Path $binaryRoot 'postgres.exe') --single -D $dataRoot -c log_min_error_statement=panic postgres 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Could not reset the disposable test role for reuse.' }
+        if ($ResetDatabases) {
+            # Only these two synthetic databases inside this stopped task-owned
+            # cluster are reset. This proves startup from an empty schema for
+            # an isolated release source without re-running native initdb.
+            $resetSql = "DROP DATABASE IF EXISTS program_survey_integrity_test;`nCREATE DATABASE program_survey_integrity_test;`nDROP DATABASE IF EXISTS program_transfer_http_test;`nCREATE DATABASE program_transfer_http_test;"
+            $resetOutput = $resetSql | & (Join-Path $binaryRoot 'postgres.exe') --single -D $dataRoot postgres 2>&1
+            if ($LASTEXITCODE -ne 0 -or ($resetOutput -match '\b(ERROR|FATAL|PANIC):')) { throw 'Could not reset the two synthetic test databases.' }
+        }
     }
     $serverOptions = "-h 127.0.0.1 -p $Port -c max_connections=20 -c shared_buffers=32MB"
     & (Join-Path $binaryRoot 'pg_ctl.exe') -D $dataRoot -l (Join-Path $runRoot 'postgres.log') -o $serverOptions -t 30 -w start
@@ -124,7 +139,8 @@ try {
     $env:GOCACHE = Join-Path $repoRoot '.tmp-go-build'
     $env:TEMP = $evidenceRoot
     $env:TMP = $evidenceRoot
-    Push-Location (Join-Path $repoRoot 'backend')
+    Write-Output "PROGRAM_TRANSFER_TEST_SOURCE=$SourceRoot"
+    Push-Location (Join-Path $SourceRoot 'backend')
     try {
         & go test -p 2 ./internal/repository -run '^TestProgramTransfer' -count=1 -v 2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'repository.log')
         if ($LASTEXITCODE -ne 0) { throw 'Program transfer PostgreSQL repository tests failed.' }
