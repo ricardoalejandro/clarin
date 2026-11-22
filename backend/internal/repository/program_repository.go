@@ -742,7 +742,7 @@ func (r *ProgramRepository) ListSessions(ctx context.Context, accountID, program
 			       OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
 		) att ON TRUE
 		LEFT JOIN LATERAL (
-			SELECT o.id, o.notes, o.created_by, creator.display_name AS created_by_name,
+			SELECT o.id, o.notes, o.created_by, COALESCE(creator.display_name,o.transfer_author_name) AS created_by_name,
 			       o.created_at, o.updated_at, o.updated_by, editor.display_name AS updated_by_name,
 			       o.is_pinned, o.pinned_at, o.pinned_by,
 			       COUNT(*) OVER ()::int AS observation_count,
@@ -1130,7 +1130,7 @@ func (r *ProgramRepository) GetSessionRoster(ctx context.Context, accountID, pro
 		JOIN contacts c ON c.account_id=p.account_id AND c.id=pp.contact_id
 		LEFT JOIN program_attendance pa ON pa.session_id=ps.id AND pa.participant_id=pp.id
 		LEFT JOIN LATERAL (
-			SELECT i.id, COALESCE(i.notes,'') notes, i.created_by, u.display_name created_by_name,
+			SELECT i.id, COALESCE(i.notes,'') notes, i.created_by, COALESCE(u.display_name,i.transfer_author_name) created_by_name,
 			       i.created_at, COALESCE(i.source_label,'') source_label,
 			       COUNT(*) OVER ()::int observation_count
 			FROM interactions i LEFT JOIN users u ON u.id=i.created_by
@@ -1179,7 +1179,7 @@ func (r *ProgramRepository) GetSessionRoster(ctx context.Context, accountID, pro
 
 func (r *ProgramRepository) ListSessionObservations(ctx context.Context, accountID, programID, sessionID, userID uuid.UUID, isAdmin bool) ([]*domain.ProgramSessionObservation, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT o.id,o.account_id,o.session_id,o.notes,o.created_by,creator.display_name,o.created_at,
+		SELECT o.id,o.account_id,o.session_id,o.notes,o.created_by,COALESCE(creator.display_name,o.transfer_author_name),o.created_at,
 		       o.updated_at,o.updated_by,editor.display_name,o.is_pinned,o.pinned_at,o.pinned_by
 		FROM program_session_observations o
 		JOIN program_sessions ps ON ps.account_id=o.account_id AND ps.id=o.session_id
@@ -1333,7 +1333,7 @@ const getAttendanceBySessionQuery = `
 	  ON c.id = pp.contact_id AND c.account_id = p.account_id
 	LEFT JOIN LATERAL (
 		SELECT i.id, COALESCE(i.notes, '') AS notes, i.created_by,
-		       u.display_name AS created_by_name, i.created_at,
+		       COALESCE(u.display_name,i.transfer_author_name) AS created_by_name, i.created_at,
 		       COALESCE(i.source_label, '') AS source_label,
 		       (COUNT(*) OVER ())::int AS observation_count
 		FROM interactions i
@@ -1441,7 +1441,7 @@ func (r *ProgramRepository) ListAttendanceObservations(ctx context.Context, acco
 		return nil, err
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT i.id, COALESCE(i.notes, ''), i.created_by, u.display_name,
+		SELECT i.id, COALESCE(i.notes, ''), i.created_by, COALESCE(u.display_name,i.transfer_author_name),
 		       i.created_at, COALESCE(i.source_label, '')
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
@@ -2561,7 +2561,7 @@ func (r *ProgramRepository) ListParticipantNotes(ctx context.Context, accountID,
 		SELECT pn.id, pn.account_id, pn.program_id, pn.participant_id, pn.contact_id, pn.session_id, pn.type, pn.note,
 		       pn.outcome, pn.follow_up_at, pn.created_by, pn.created_at, pn.updated_at,
 		       COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') AS participant_name,
-		       COALESCE(u.display_name, u.username, '') AS created_by_name
+		       COALESCE(u.display_name, u.username, pn.transfer_author_name, '') AS created_by_name
 		FROM program_participant_notes pn
 		JOIN contacts c ON c.id = pn.contact_id
 		LEFT JOIN users u ON u.id = pn.created_by

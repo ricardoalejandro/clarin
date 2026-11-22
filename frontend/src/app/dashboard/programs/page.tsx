@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, Info, AlertCircle, Settings2, BookOpenText, Loader2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, Info, AlertCircle, Settings2, BookOpenText, Loader2, Upload, Download } from 'lucide-react';
+import { api, subscribeWebSocket } from '@/lib/api';
+import { getAuthScope } from '@/lib/authScope';
 import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/types/program';
 import Link from 'next/link';
 import { es } from 'date-fns/locale';
@@ -19,6 +20,8 @@ import { programScopeUrls, PROGRAM_DELETE_CONFIRMATION, type ProgramStatusScope 
 import { useProgramWorkspacePolicy } from '@/components/programs/useProgramWorkspacePolicy';
 import { isDialogFocusableVisible, restoreDialogFocus } from '@/components/programs/useDialogTabTrap';
 import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu';
+import { ProgramTransferDialog } from '@/components/programs/ProgramTransferDialog';
+import { useProgramTransferAccess, useProgramTransferDownload, useProgramTransferScope } from '@/components/programs/useProgramTransfer';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -36,6 +39,11 @@ export default function ProgramsPage() {
   const { isOffline, requireOnline } = useClarinRuntime();
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
   const { mobile: mobileWorkspace, touch: touchWorkspace, desktopActions } = useProgramWorkspacePolicy(workspaceWidth);
+  const transferScope = useProgramTransferScope();
+  const canTransfer = useProgramTransferAccess(transferScope, !isOffline);
+  const { downloadingProgramId, download } = useProgramTransferDownload(transferScope);
+  const [transferOpenScope, setTransferOpenScope] = useState<string | null>(null);
+  const transferOpen = transferOpenScope === transferScope;
   const desktopActionsRef = useRef(desktopActions);
   desktopActionsRef.current = desktopActions;
   const mutationKeysRef = useRef(new Set<string>());
@@ -127,7 +135,7 @@ export default function ProgramsPage() {
     || (isCreateModalOpen && Boolean(newProgram.name.trim() || newProgram.description.trim() || newProgram.color !== COLORS[0]))
     || (showFolderModal && (folderForm.name !== (editFolder?.name || '') || folderForm.color !== (editFolder?.color || COLORS[0]) || folderForm.icon !== (editFolder?.icon || FOLDER_ICONS[0])))
     || (goalsOpen && (goalForm.attendance_goal_percent !== (dashboard?.attendance_goal_percent || 80) || goalForm.transfer_goal_percent !== (dashboard?.transfer_goal_percent || 70)));
-  const desktopWorkOpen = isCreateModalOpen || Boolean(editingProgram) || showFolderModal || goalsOpen || Boolean(confirmAction);
+  const desktopWorkOpen = isCreateModalOpen || Boolean(editingProgram) || showFolderModal || goalsOpen || Boolean(confirmAction) || transferOpen;
 
   const beginMutation = (key: string) => {
     if (!desktopActionsRef.current || mutationKeysRef.current.has(key)) return false;
@@ -185,6 +193,16 @@ export default function ProgramsPage() {
     void fetchDashboard();
     return () => dashboardRequestRef.current?.abort();
   }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (isOffline) return;
+    return subscribeWebSocket(message => {
+      if (transferScope !== getAuthScope() || !message || typeof message !== 'object' || (message as { event?: string }).event !== 'program_transfer_completed') return;
+      void fetchPrograms();
+      void fetchFolders();
+      void fetchDashboard();
+    });
+  }, [isOffline, transferScope, statusScope, dateFrom, dateTo]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -598,6 +616,18 @@ export default function ProgramsPage() {
           <button type="button" role="menuitem" onClick={(e) => openEditProgram(program, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
             <Edit2 className="h-4 w-4" /> Editar
           </button>
+          {canTransfer && program.type === 'course' && <button type="button" role="menuitem" disabled={Boolean(downloadingProgramId)}
+            onClick={event => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!desktopActionsRef.current || !requireOnline('Exportar un programa')) return;
+              setMenuID(null);
+              programMenuAnchorRef.current?.focus({ preventScroll: true });
+              void download(program.id, program.name, showToast);
+            }} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            {downloadingProgramId === program.id ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+            {downloadingProgramId === program.id ? 'Exportando programa…' : 'Exportar programa'}
+          </button>}
           {(program.status === 'archived' ? ['restore'] : [program.status === 'completed' ? 'reopen' : 'complete', 'archive']).map(value => {
             const action = value as ProgramLifecycleAction;
             return <button key={action} type="button" role="menuitem" onClick={event => { event.preventDefault(); event.stopPropagation(); if (!desktopActionsRef.current || !requireOnline('Cambiar el estado del programa')) return; setMenuID(null); setLifecycleSelection({ program, action }); }} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">{action === 'archive' || action === 'restore' ? <Archive className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}{programLifecycleAction(program, action).label}</button>;
@@ -759,7 +789,7 @@ export default function ProgramsPage() {
             <p className="text-xs text-slate-500">Grupos de clases, temarios y asistencia</p>
           </div>
         </div>
-        {desktopActions && <div className="flex items-center gap-2 sm:shrink-0">
+        {desktopActions && <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <Link
             href="/dashboard/programs/courses"
             onClick={event => { if (!desktopActionsRef.current || !requireOnline('Administrar el catálogo de cursos')) event.preventDefault(); }}
@@ -779,6 +809,11 @@ export default function ProgramsPage() {
               <span className="hidden sm:inline">Carpeta</span>
             </button>
           )}
+          {canTransfer && <button type="button" aria-haspopup="dialog"
+            onClick={() => { if (desktopActionsRef.current && requireOnline('Importar un programa')) setTransferOpenScope(transferScope); }}
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+            <Upload className="h-4 w-4" aria-hidden="true" /> Importar programa
+          </button>}
           <button
             onClick={() => { if (desktopActionsRef.current && requireOnline('Crear un grupo de clases')) setIsCreateModalOpen(true); }}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
@@ -789,6 +824,8 @@ export default function ProgramsPage() {
           </button>
         </div>}
       </div>
+
+      {downloadingProgramId && <p role="status" className="inline-flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> Preparando archivo de programa…</p>}
 
       {mobileWorkspace && desktopWorkOpen && <p role="status" className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">Tu administración está pausada. Puedes continuar en la vista de escritorio; tus cambios sin guardar se conservarán mientras permanezcas aquí.</p>}
 
@@ -1199,6 +1236,9 @@ export default function ProgramsPage() {
         </div>
       )}
 
+      {transferOpen && <ProgramTransferDialog key={transferScope} scope={transferScope} inactive={!desktopActions || isOffline}
+        onClose={() => setTransferOpenScope(null)}
+        onImported={() => { void fetchPrograms(); void fetchFolders(); void fetchDashboard(); }} />}
       <ProgramLifecycleDialog program={lifecycleSelection?.program || null} action={lifecycleSelection?.action || null} suspended={!desktopActions}
         onClose={() => setLifecycleSelection(null)}
         onCanonical={canonical => { setPrograms(current => current.map(item => item.id === canonical.id ? canonical : item)); void fetchPrograms(); }}

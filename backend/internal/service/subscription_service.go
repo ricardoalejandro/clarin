@@ -221,6 +221,22 @@ func (s *SubscriptionService) EnforceLimit(ctx context.Context, accountID uuid.U
 	return nil
 }
 
+// ResolveContactLimit obtains the canonical max_contacts entitlement before a
+// bulk write opens its transaction. An account-scoped overview from the
+// request's subscription check avoids fetching usage a second time. The
+// transaction must still count current usage on its own connection.
+func (s *SubscriptionService) ResolveContactLimit(ctx context.Context, accountID uuid.UUID, overview *domain.SubscriptionOverview) (int, error) {
+	if overview == nil || overview.Subscription == nil || overview.Subscription.AccountID != accountID {
+		var err error
+		overview, err = s.GetOverview(ctx, accountID)
+		if err != nil {
+			return 0, err
+		}
+	}
+	limit, _ := entitlementInt(overview.Entitlements, "max_contacts")
+	return max(0, limit), nil
+}
+
 func (s *SubscriptionService) CreateForAccount(ctx context.Context, accountID uuid.UUID, planCode, status string, trialDays int) error {
 	planCode, err := s.validPlanCode(ctx, planCode)
 	if err != nil {
