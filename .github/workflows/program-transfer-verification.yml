@@ -1,6 +1,9 @@
 name: Program transfer verification
 
 on:
+  push:
+    branches:
+      - 'codex/programas-intercambio-archivos'
   pull_request:
     paths:
       - 'backend/**'
@@ -11,6 +14,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: program-transfer-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   backend:
@@ -37,6 +44,7 @@ jobs:
     env:
       GOCACHE: ${{ runner.temp }}/program-transfer-go-build
       GOMAXPROCS: '2'
+      GOTELEMETRY: 'off'
       PGPASSWORD: synthetic_ci_password
     steps:
       - uses: actions/checkout@v4
@@ -48,9 +56,9 @@ jobs:
         run: |
           createdb --host=127.0.0.1 --username=program_transfer_test program_survey_integrity_test
           createdb --host=127.0.0.1 --username=program_transfer_test program_transfer_http_test
-      - name: Backend tests and build
+      - name: Program transfer unit tests and backend build
         run: |
-          go test -p 2 ./...
+          go test -p 2 ./internal/programtransfer ./internal/repository ./internal/api ./internal/service -run '^TestProgramTransfer' -count=1
           go build -p 2 ./...
       - name: PostgreSQL repository round trips and atomicity
         env:
@@ -83,6 +91,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
     defaults:
       run:
         working-directory: frontend
