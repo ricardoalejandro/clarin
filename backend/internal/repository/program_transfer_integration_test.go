@@ -380,3 +380,39 @@ func TestProgramTransferReusesSamePendingContactAcrossTwoPrograms(t *testing.T) 
 	}
 	transferTestCount(t, pool, 2, `SELECT count(*) FROM contacts WHERE account_id=$1`, destination.account)
 }
+
+func TestProgramTransferFusesChangedPrimaryPhoneWithoutOverwritingDestination(t *testing.T) {
+	pool := programSurveyIntegrityPool(t)
+	source, destination := integrityProgram(t, pool), integrityProgram(t, pool)
+	const oldPhone, newPhone = "51999001001", "51999001002"
+	integrityExec(t, pool, `UPDATE contacts SET phone=$3 WHERE account_id=$1 AND id=$2`, source.account, source.contact, oldPhone)
+	integrityParticipant(t, pool, source)
+	initial := programtransfer.Request{File: transferTestExport(t, pool, source.account, source.program)}
+	imported := transferTestApply(t, pool, destination, initial, transferTestPreview(t, pool, destination.account, initial), nil)
+	integrityExec(t, pool, `UPDATE contacts SET phone=$3 WHERE account_id=$1 AND id=$2`, source.account, source.contact, newPhone)
+	updated := programtransfer.Request{File: transferTestExport(t, pool, source.account, source.program)}
+	preview := transferTestPreview(t, pool, destination.account, updated)
+	if len(preview.Conflicts) != 0 || preview.Summary.Update != 1 {
+		t.Fatalf("a safe phone addition must be staged as one Contact update: %+v", preview)
+	}
+	if got := transferTestApply(t, pool, destination, updated, preview, nil); got != imported {
+		t.Fatal("phone update created another Program")
+	}
+	transferTestCount(t, pool, 1, `SELECT count(*) FROM program_participants pp JOIN contacts c ON c.id=pp.contact_id AND c.account_id=$1 WHERE pp.program_id=$2 AND c.phone=$3`, destination.account, imported, oldPhone)
+	transferTestCount(t, pool, 1, `SELECT count(*) FROM contact_phones cp JOIN contacts c ON c.id=cp.contact_id AND c.account_id=$1 JOIN program_participants pp ON pp.contact_id=c.id AND pp.program_id=$2 WHERE cp.phone=$3`, destination.account, imported, newPhone)
+	replay := transferTestPreview(t, pool, destination.account, updated)
+	if len(replay.Conflicts) != 0 || replay.Summary.Update != 0 || replay.Summary.Create != 0 {
+		t.Fatalf("replaying the changed phone must not duplicate or overwrite: %+v", replay)
+	}
+	transferTestApply(t, pool, destination, updated, replay, nil)
+	returned := programtransfer.Request{File: transferTestExport(t, pool, destination.account, imported)}
+	returnedPreview := transferTestPreview(t, pool, source.account, returned)
+	if len(returnedPreview.Conflicts) != 0 {
+		t.Fatalf("returning both phones should preserve source primary without conflict: %+v", returnedPreview)
+	}
+	if got := transferTestApply(t, pool, source, returned, returnedPreview, nil); got != source.program {
+		t.Fatal("return trip created another source Program")
+	}
+	transferTestCount(t, pool, 1, `SELECT count(*) FROM contacts WHERE account_id=$1 AND id=$2 AND phone=$3`, source.account, source.contact, newPhone)
+	transferTestCount(t, pool, 1, `SELECT count(*) FROM contact_phones cp JOIN contacts c ON c.id=cp.contact_id AND c.account_id=$1 WHERE c.id=$2 AND cp.phone=$3`, source.account, source.contact, oldPhone)
+}

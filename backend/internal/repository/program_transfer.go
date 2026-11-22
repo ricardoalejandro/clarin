@@ -745,6 +745,10 @@ func planProgramTransfer(snap transferSnapshot, req programtransfer.Request, dec
 		}
 		beforeConflicts := len(plan.Preview.Conflicts)
 		base := programtransfer.Current(target, index.links[key].Baseline)
+		incomingPrimaryExtra := ""
+		if row.Kind == "contact" {
+			incomingPrimaryExtra = transferCompatiblePrimaryExtra(target, row, base, index)
+		}
 		if row.Kind == "session" {
 			removed, localTopics, incomingTopics := transferSessionTopicRemoval(index, rows, row.ID, target.ID, mapped)
 			if removed {
@@ -787,20 +791,36 @@ func planProgramTransfer(snap transferSnapshot, req programtransfer.Request, dec
 			}
 			value, rev, conflict := programtransfer.MergeField(left, right, l, r)
 			localOnly := transferLocalOnly(row, field, target, index)
-			if row.Kind == "contact" && !(l.ID != r.ID && programtransfer.Descends(l, r)) {
-				if field == "additional_phones" {
-					value = transferMergePhones(left, right, programtransfer.String(target.Fields, "phone"), target.ID, index.phoneOwners)
-					if programtransfer.Fingerprint(left) != programtransfer.Fingerprint(right) && !programtransfer.Descends(l, r) {
+			if row.Kind == "contact" {
+				stale := l.ID != r.ID && programtransfer.Descends(l, r)
+				if field == "additional_phones" && (!stale || incomingPrimaryExtra != "") {
+					incomingPhones := right
+					if stale {
+						incomingPhones = nil
+					}
+					if incomingPrimaryExtra != "" {
+						entries, _ := incomingPhones.([]any)
+						incomingPhones = append(append([]any{}, entries...), map[string]any{"phone": incomingPrimaryExtra, "label": "mobile"})
+					}
+					value = transferMergePhones(left, incomingPhones, programtransfer.String(target.Fields, "phone"), target.ID, index.phoneOwners)
+					if phones, _ := value.([]any); len(phones) > 64 {
+						return plan, programtransfer.ErrTooLarge
+					}
+					if programtransfer.Fingerprint(value) != programtransfer.Fingerprint(left) || (!programtransfer.Descends(l, r) && programtransfer.Fingerprint(left) != programtransfer.Fingerprint(right)) {
 						rev = programtransfer.Extend(l, r)
 					}
 					conflict = false
-				} else if isTransferBlank(left) && !isTransferBlank(right) {
+				} else if field == "phone" && incomingPrimaryExtra != "" {
+					// A new compatible number is represented as an extra phone; keep
+					// the receiving account's deliberate primary without losing data.
+					value, rev, conflict = left, programtransfer.Extend(l, r), false
+				} else if !stale && isTransferBlank(left) && !isTransferBlank(right) {
 					if field == "phone" && transferForeignPhoneOwner(index, programtransfer.String(local.Fields, "phone"), target.ID) {
 						value, rev, conflict = left, programtransfer.Extend(l, r), false
 					} else {
 						value, rev, conflict = right, programtransfer.Extend(l, r), false
 					}
-				} else if isTransferBlank(right) {
+				} else if !stale && isTransferBlank(right) {
 					value = left
 					conflict = false
 					if !programtransfer.Descends(l, r) {
@@ -1121,6 +1141,22 @@ func transferForeignPhoneOwner(index transferIndex, raw, id string) bool {
 		}
 	}
 	return false
+}
+
+func transferCompatiblePrimaryExtra(target, incoming programtransfer.Record, base programtransfer.Baseline, index transferIndex) string {
+	primary, err := normalizeContactProfilePhone(programtransfer.String(target.Fields, "phone"))
+	if err != nil {
+		return ""
+	}
+	other, err := normalizeContactProfilePhone(programtransfer.String(incoming.Fields, "phone"))
+	if err != nil || primary == other || transferForeignPhoneOwner(index, other, target.ID) {
+		return ""
+	}
+	localRevision, incomingRevision := base["phone"].Revision, incoming.Revisions["phone"]
+	if localRevision.ID != incomingRevision.ID && programtransfer.Descends(localRevision, incomingRevision) {
+		return ""
+	}
+	return other
 }
 
 func transferMergePhones(left, right any, primary, id string, owners map[string][]string) any {

@@ -251,6 +251,64 @@ func TestProgramTransferPlanReusesAccountContactOriginWithoutBorrowingProgramBas
 	}
 }
 
+func TestProgramTransferPlanFusesIncomingPrimaryPhoneAndReplaysWithoutChange(t *testing.T) {
+	const primary, incomingPhone = "51912345678", "51987654321"
+	program := transferPlanRecord("program", map[string]any{"name": "Historia", "status": "active"})
+	contact := transferPlanRecord("contact", map[string]any{"name": "Rosa", "phone": primary, "email": nil, "additional_phones": []any{}})
+	incoming := contact
+	incoming.Fields = copyTransferFields(contact.Fields)
+	incoming.Fields["phone"] = "+51 987 654 321"
+	incoming.Revisions = make(map[string]programtransfer.Revision, len(contact.Revisions))
+	for field, rev := range contact.Revisions {
+		incoming.Revisions[field] = rev
+	}
+	incoming.Revisions["phone"] = programtransfer.Extend(contact.Revisions["phone"])
+	for _, foreignOwner := range []bool{false, true} {
+		t.Run(map[bool]string{false: "compatible new phone", true: "phone owned by another Contact"}[foreignOwner], func(t *testing.T) {
+			snap := transferSnapshot{Target: program.ID, Rows: []programtransfer.Record{program, contact}}
+			for _, row := range snap.Rows {
+				snap.Links = append(snap.Links, transferLink{Kind: row.Kind, PortableID: row.ID, LocalID: row.ID, Baseline: programtransfer.BaselineOf(row)})
+			}
+			if foreignOwner {
+				snap.Contacts = []programtransfer.Record{transferPlanRecord("contact", map[string]any{"name": "Otra persona", "phone": incomingPhone, "email": nil, "additional_phones": []any{}})}
+			}
+			req := programtransfer.Request{File: programtransfer.File{Records: []programtransfer.Record{program, incoming}}}
+			plan, err := planProgramTransfer(snap, req, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if foreignOwner {
+				if len(plan.Preview.Conflicts) != 1 || plan.Preview.Conflicts[0].Field != "phone" || plan.Preview.Summary.Update != 0 {
+					t.Fatalf("a phone already owned by another Contact must stay a review conflict: %+v", plan.Preview)
+				}
+				return
+			}
+			if len(plan.Preview.Conflicts) != 0 || plan.Preview.Summary.Update != 1 {
+				t.Fatalf("compatible incoming primary must be fused, not discarded: %+v", plan.Preview)
+			}
+			var merged programtransfer.Record
+			for _, change := range plan.Changes {
+				if change.Local.Kind == "contact" {
+					merged = change.Local
+				}
+			}
+			phones, _ := merged.Fields["additional_phones"].([]any)
+			if programtransfer.String(merged.Fields, "phone") != primary || len(phones) != 1 || programtransfer.String(phones[0].(map[string]any), "phone") != incomingPhone {
+				t.Fatal("fusion did not preserve the receiving primary plus the new normalized extra phone")
+			}
+			if merged.Revisions["additional_phones"].ID == contact.Revisions["additional_phones"].ID || !programtransfer.Descends(merged.Revisions["phone"], incoming.Revisions["phone"]) {
+				t.Fatal("changed phone collection needs a fresh revision and acknowledgment of the incoming phone")
+			}
+			snap.Rows[1] = merged
+			snap.Links[1].Baseline = programtransfer.BaselineOf(merged)
+			replay, err := planProgramTransfer(snap, req, nil)
+			if err != nil || len(replay.Preview.Conflicts) != 0 || replay.Preview.Summary.Update != 0 || replay.Preview.Summary.Create != 0 {
+				t.Fatalf("replay should neither add another phone nor reopen its decision: %+v, %v", replay.Preview, err)
+			}
+		})
+	}
+}
+
 type programTransferQuotaTestQuery func(string, []any) pgx.Row
 
 func (q programTransferQuotaTestQuery) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
