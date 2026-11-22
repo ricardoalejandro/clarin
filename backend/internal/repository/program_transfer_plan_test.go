@@ -74,6 +74,43 @@ func TestProgramTransferPlanEqualDatesDoNotImplySameSession(t *testing.T) {
 	}
 }
 
+func TestProgramTransferPlanReplaysConfirmedIdentityMappings(t *testing.T) {
+	for _, create := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit existing session", true: "previous create choice"}[create], func(t *testing.T) {
+			program := transferPlanRecord("program", map[string]any{"name": "Historia", "status": "active"})
+			local := transferPlanRecord("session", map[string]any{"date": "2026-10-01", "title": "Clase"})
+			incoming := transferPlanRecord("session", map[string]any{"date": "2026-10-01", "title": "Clase"})
+			snap := transferSnapshot{Target: program.ID, Rows: []programtransfer.Record{program, local}}
+			req := programtransfer.Request{File: programtransfer.File{Records: []programtransfer.Record{program, incoming}}, Mappings: map[string]string{incoming.ID: local.ID}}
+			if create {
+				req.Mappings[incoming.ID] = "create"
+			}
+			first, err := planProgramTransfer(snap, req, nil)
+			if err != nil || len(first.Preview.Conflicts) != 0 {
+				t.Fatalf("initial review failed: %+v, %v", first.Preview, err)
+			}
+			for _, change := range first.Changes {
+				if change.Local.Kind == "session" {
+					if create {
+						snap.Rows = append(snap.Rows, change.Local)
+					}
+					snap.Links = append(snap.Links,
+						transferLink{Kind: "session", PortableID: incoming.ID, LocalID: change.Local.ID},
+						transferLink{Kind: "session", PortableID: change.Local.ID, LocalID: change.Local.ID, Baseline: programtransfer.BaselineOf(change.Local)})
+				}
+			}
+			replay, err := planProgramTransfer(snap, req, nil)
+			if err != nil || len(replay.Preview.Conflicts) != 0 || replay.Preview.Summary.Create != 0 || replay.Preview.Summary.Update != 0 {
+				t.Fatalf("the same confirmed mapping must be an unchanged replay: %+v, %v", replay.Preview, err)
+			}
+			req.Mappings[incoming.ID] = uuid.NewString()
+			if _, err := planProgramTransfer(snap, req, nil); !errors.Is(err, programtransfer.ErrInvalid) {
+				t.Fatalf("a replay must not relink an established origin to another identity: %v", err)
+			}
+		})
+	}
+}
+
 func TestProgramTransferPlanDoesNotPromiseUnsupportedNoteReparenting(t *testing.T) {
 	for _, tc := range []struct {
 		kind, field string
@@ -313,6 +350,42 @@ type programTransferQuotaTestQuery func(string, []any) pgx.Row
 
 func (q programTransferQuotaTestQuery) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	return q(sql, args)
+}
+
+type programTransferTargetTestRow struct {
+	id  uuid.UUID
+	err error
+}
+
+func (r programTransferTargetTestRow) Scan(dest ...any) error {
+	if r.err == nil {
+		*dest[0].(*uuid.UUID) = r.id
+	}
+	return r.err
+}
+
+func TestProgramTransferTargetLockUsesScopedParentWithoutReopeningClosedPrograms(t *testing.T) {
+	account, program := uuid.New(), uuid.New()
+	if err := lockProgramTransferTarget(context.Background(), nil, account, ""); err != nil {
+		t.Fatalf("new Program imports have no existing parent to lock: %v", err)
+	}
+	for _, missing := range []bool{false, true} {
+		calls := 0
+		query := programTransferQuotaTestQuery(func(sql string, args []any) pgx.Row {
+			calls++
+			if sql != `SELECT id FROM programs WHERE account_id=$1 AND id=$2 AND type='course' FOR UPDATE` || len(args) != 2 || args[0] != account || args[1] != program {
+				t.Fatal("target locking must use the receiving account and concrete class Program")
+			}
+			if missing {
+				return programTransferTargetTestRow{err: pgx.ErrNoRows}
+			}
+			return programTransferTargetTestRow{id: program}
+		})
+		err := lockProgramTransferTarget(context.Background(), query, account, program.String())
+		if calls != 1 || (err != nil) != missing || (missing && !errors.Is(err, pgx.ErrNoRows)) {
+			t.Fatalf("parent lock result=%v, queries=%d", err, calls)
+		}
+	}
 }
 
 type programTransferQuotaTestRow func(*int64) error

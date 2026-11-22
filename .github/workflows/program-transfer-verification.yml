@@ -97,6 +97,7 @@ jobs:
     timeout-minutes: 40
     env:
       NEXT_TELEMETRY_DISABLED: '1'
+      TZ: 'UTC'
     defaults:
       run:
         working-directory: frontend

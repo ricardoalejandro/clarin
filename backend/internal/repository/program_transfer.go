@@ -155,6 +155,9 @@ func ConfirmProgramTransfer(ctx context.Context, db *pgxpool.Pool, accountID, ac
 	if err != nil {
 		return result, err
 	}
+	if err = lockProgramTransferTarget(ctx, tx, accountID, snap.Target); err != nil {
+		return result, err
+	}
 	if expectedDigest == "" || expectedDigest != transferDigest(snap, req.Request) {
 		return result, programtransfer.ErrStale
 	}
@@ -240,6 +243,22 @@ func closeProgramTransferConnection(conn *pgxpool.Conn) {
 
 type programTransferQuotaQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// Ordinary Program completion/archive serializes with child writes through the
+// parent row, not the Contact advisory lock. Hold that same lock even when this
+// import changes only children. A lifecycle change committed after our snapshot
+// causes SERIALIZABLE to reject this stale confirmation before any write.
+func lockProgramTransferTarget(ctx context.Context, tx programTransferQuotaQueryer, accountID uuid.UUID, target string) error {
+	if target == "" {
+		return nil
+	}
+	programID, err := uuid.Parse(target)
+	if err != nil || programID == uuid.Nil {
+		return programtransfer.ErrInvalid
+	}
+	var found uuid.UUID
+	return tx.QueryRow(ctx, `SELECT id FROM programs WHERE account_id=$1 AND id=$2 AND type='course' FOR UPDATE`, accountID, programID).Scan(&found)
 }
 
 func enforceProgramTransferContactQuota(ctx context.Context, tx programTransferQuotaQueryer, accountID uuid.UUID, quota ProgramTransferContactQuota, incoming int) error {
@@ -673,6 +692,14 @@ func planProgramTransfer(snap transferSnapshot, req programtransfer.Request, dec
 				return plan, err
 			}
 			if known {
+				if selection, explicit := req.Mappings[row.ID]; explicit {
+					// A retry can retain the first review's "create" or explicit
+					// destination. Once linked, both mean reuse this same identity.
+					if selection != "create" && selection != id {
+						return plan, programtransfer.ErrInvalid
+					}
+					usedMappings[row.ID] = true
+				}
 				target = index.rows[transferKey(row.Kind, id)]
 				if target.ID == "" {
 					// Do not resurrect a row previously removed in the receiving account.

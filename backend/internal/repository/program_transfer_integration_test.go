@@ -312,6 +312,16 @@ func TestProgramTransferMapsExistingSessionWithoutCollapsingSameDayClasses(t *te
 	transferTestCount(t, pool, 1, `SELECT count(*) FROM program_sessions WHERE id=$1 AND account_id=$2 AND program_id=$3 AND start_time='08:00'`, morningB, b.account, b.program)
 	transferTestCount(t, pool, 1, `SELECT count(*) FROM program_sessions WHERE id<>$1 AND account_id=$2 AND program_id=$3 AND start_time='20:00'`, morningB, b.account, b.program)
 	transferTestCount(t, pool, 2, `SELECT count(*) FROM program_sessions WHERE account_id=$1 AND program_id=$2`, b.account, b.program)
+	// Recovering after a lost successful response keeps the same explicit
+	// morning mapping and prior evening "create" choice in the request.
+	replay := transferTestPreview(t, pool, b.account, request)
+	if len(replay.Conflicts) != 0 || replay.Summary.Create != 0 || replay.Summary.Update != 0 {
+		t.Fatalf("the exact mapped request must replay without new writes: %+v", replay)
+	}
+	if id := transferTestApply(t, pool, b, request, replay, nil); id != b.program {
+		t.Fatal("mapped request replay created another Program")
+	}
+	transferTestCount(t, pool, 2, `SELECT count(*) FROM program_sessions WHERE account_id=$1 AND program_id=$2`, b.account, b.program)
 
 	// Both previous identifiers must survive re-export; an older B file does not
 	// create a third class or delete the evening class omitted from its snapshot.
@@ -415,4 +425,68 @@ func TestProgramTransferFusesChangedPrimaryPhoneWithoutOverwritingDestination(t 
 	}
 	transferTestCount(t, pool, 1, `SELECT count(*) FROM contacts WHERE account_id=$1 AND id=$2 AND phone=$3`, source.account, source.contact, newPhone)
 	transferTestCount(t, pool, 1, `SELECT count(*) FROM contact_phones cp JOIN contacts c ON c.id=cp.contact_id AND c.account_id=$1 WHERE c.id=$2 AND cp.phone=$3`, source.account, source.contact, oldPhone)
+}
+
+func TestProgramTransferRejectsConcurrentProgramCompletionBeforeChildWrites(t *testing.T) {
+	pool := programSurveyIntegrityPool(t)
+	source, destination := integrityProgram(t, pool), integrityProgram(t, pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	integrityExec(t, pool, `UPDATE programs SET name='Synthetic lifecycle classroom' WHERE id IN ($1,$2)`, source.program, destination.program)
+	integrityExec(t, pool, `INSERT INTO program_sessions(account_id,program_id,date,title) VALUES($1,$2,'2026-10-02','Synthetic imported class')`, source.account, source.program)
+	request := programtransfer.Request{File: transferTestExport(t, pool, source.account, source.program), TargetProgramID: destination.program.String()}
+	preview := transferTestPreview(t, pool, destination.account, request)
+	if len(preview.Conflicts) != 0 || preview.Summary.Create == 0 {
+		t.Fatalf("fixture must stage child creation without changing the parent: %+v", preview)
+	}
+	lifecycle, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.Rollback(context.Background())
+	var lifecyclePID int
+	if err := lifecycle.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&lifecyclePID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Exec(ctx, `UPDATE programs SET status='completed',updated_at=NOW() WHERE account_id=$1 AND id=$2`, destination.account, destination.program); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := make(chan error, 1)
+	go func() {
+		_, err := ConfirmProgramTransfer(ctx, pool, destination.account, destination.user, programtransfer.ConfirmRequest{Request: request}, preview.Digest, ProgramTransferContactQuota{})
+		confirmed <- err
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-confirmed:
+			t.Fatalf("import finished while the lifecycle transaction still owned the parent lock: %v", err)
+		case <-ctx.Done():
+			t.Fatal("import never reached the scoped Program lock")
+		case <-ticker.C:
+			var waiting bool
+			if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE $1::int=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock' AND a.query LIKE '%SELECT id FROM programs%FOR UPDATE%')`, lifecyclePID).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if !waiting {
+				continue
+			}
+		}
+		break
+	}
+	if err := lifecycle.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-confirmed:
+		if !errors.Is(err, programtransfer.ErrStale) {
+			t.Fatalf("a lifecycle change committed after the snapshot must invalidate confirmation: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("confirmation did not finish after the lifecycle lock was released")
+	}
+	transferTestCount(t, pool, 1, `SELECT count(*) FROM programs WHERE account_id=$1 AND id=$2 AND status='completed'`, destination.account, destination.program)
+	transferTestCount(t, pool, 0, `SELECT count(*) FROM program_sessions WHERE account_id=$1 AND program_id=$2`, destination.account, destination.program)
+	transferTestCount(t, pool, 0, `SELECT count(*) FROM program_transfer_imports WHERE account_id=$1 AND program_id=$2`, destination.account, destination.program)
 }
