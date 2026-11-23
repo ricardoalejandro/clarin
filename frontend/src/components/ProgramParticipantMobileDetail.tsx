@@ -119,7 +119,7 @@ export default function ProgramParticipantMobileDetail({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-5">
         <div className="flex items-center gap-3">
-          <ContactPhotoPreview url={contact.avatar_url} name={displayName} sizeClassName="h-14 w-14" />
+          <ContactPhotoPreview ownerKey={`contact:${contact.id}`} url={contact.avatar_url} name={displayName} sizeClassName="h-14 w-14" />
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-base font-bold text-slate-900">{displayName}</h3>
             <p className="truncate text-xs text-slate-500">{contact.phone || 'Sin teléfono registrado'}</p>

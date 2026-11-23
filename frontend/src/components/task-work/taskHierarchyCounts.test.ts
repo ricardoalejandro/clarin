@@ -141,6 +141,17 @@ describe('task hierarchy counts', () => {
     expect(shouldIgnoreTaskOperationEcho(undefined, true, true)).toBe(false)
   })
 
+  it.each(['container_removed', 'container_restored'])('never drops %s when WebSocket arrives before HTTP or its response is lost', action => {
+    expect(shouldIgnoreTaskOperationEcho('operation-1', true, false, action)).toBe(false)
+    expect(shouldIgnoreTaskOperationEcho('operation-1', true, true, action)).toBe(false)
+  })
+
+  it.each(['container_removed', 'container_restored'])('revalidates %s after HTTP already reconciled and preserves ordinary echo suppression', action => {
+    expect(shouldIgnoreTaskOperationEcho('operation-1', false, true, action)).toBe(false)
+    expect(shouldIgnoreTaskOperationEcho('operation-1', true, false, 'updated')).toBe(true)
+    expect(shouldIgnoreTaskOperationEcho('operation-1', false, true, 'updated')).toBe(true)
+  })
+
   it('reloads actor-scoped hierarchy for minimal task mutations but not comments', () => {
 	for (const action of ['created', 'updated', 'completed', 'moved', 'bulk_moved', 'bulk_deleted', 'environment_moved', 'restored']) {
 	  expect(shouldReloadHierarchyForMinimalTaskEvent({ action })).toBe(true)

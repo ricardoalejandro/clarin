@@ -73,3 +73,9 @@ describe('conversation viewport intent', () => {
     expect(container.scrollTop).toBe(200)
   })
 })
+
+
+it('preserves newer personal pin state while refreshing canonical messages and metadata', () => {
+  const current = { id: 'group', jid: 'group@g.us', name: 'Group', unread_count: 1, last_message: '', last_message_at: '', is_pinned: true, pinned_at: '2026-10-18T00:00:00Z', pin_version: 3 } as Chat
+  expect(mergeChatSnapshot(current, { ...current, is_pinned: false, pinned_at: null, pin_version: 2, unread_count: 2, last_message: 'Nuevo' })).toMatchObject({ is_pinned: true, pin_version: 3, unread_count: 2, last_message: 'Nuevo' })
+})

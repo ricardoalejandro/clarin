@@ -85,11 +85,17 @@ func (r *ChatRepository) OpenManualWhatsAppChat(ctx context.Context, accountID, 
 	if status != domain.DeviceStatusConnected {
 		return nil, ErrWhatsAppSenderUnavailable
 	}
+	if err = validateGroupParticipantChatGuard(ctx, tx, accountID, deviceID, jid, phone); err != nil {
+		return nil, err
+	}
 	selectedPhone := senderPhone(firstNonEmptyPlain(devicePhone, deviceJID))
 	// Read the current parent without taking a Chat lock. All Contact writes
 	// below are rolled back if the later canonical history/ownership check fails.
 	var linkedContactID *uuid.UUID
 	if err = tx.QueryRow(ctx, `SELECT contact_id FROM chats WHERE account_id=$1 AND channel_key='whatsapp_web' AND jid=$2`, accountID, jid).Scan(&linkedContactID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if err = validateGroupParticipantContactSelection(ctx, selectedContactID, linkedContactID); err != nil {
 		return nil, err
 	}
 	contactID := selectedContactID
@@ -105,10 +111,17 @@ func (r *ChatRepository) OpenManualWhatsAppChat(ctx context.Context, accountID, 
 		if err != nil {
 			return nil, err
 		}
+		if err = validateGroupParticipantContactSelection(ctx, contactID, nil); err != nil {
+			return nil, err
+		}
 		if contactID == nil {
 			var id uuid.UUID
-			if err = tx.QueryRow(ctx, `INSERT INTO contacts(account_id,device_id,jid,phone,name,push_name,is_group) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($5,''),FALSE) ON CONFLICT(account_id,jid) DO UPDATE SET updated_at=contacts.updated_at RETURNING id`, accountID, deviceID, jid, phone, name).Scan(&id); err != nil {
+			var created bool
+			if err = tx.QueryRow(ctx, `INSERT INTO contacts(account_id,device_id,jid,phone,name,push_name,is_group) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($5,''),FALSE) ON CONFLICT(account_id,jid) DO UPDATE SET updated_at=contacts.updated_at RETURNING id,(xmax=0)`, accountID, deviceID, jid, phone, name).Scan(&id, &created); err != nil {
 				return nil, err
+			}
+			if guard, ok := ctx.Value(groupParticipantChatGuardKey{}).(GroupParticipantChatGuard); ok && guard.ExpectedCanonicalContactID == nil && !created {
+				return nil, ErrGroupMemberIdentityChanged
 			}
 			contactID = &id
 		}

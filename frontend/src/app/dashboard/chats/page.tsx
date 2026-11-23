@@ -1,24 +1,40 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Search, Plus, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
+import { Search, Plus, Pin, PinOff, Users, RefreshCw, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { formatTime } from '@/utils/format'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
+import ChatKindSelector from '@/components/chat/ChatKindSelector'
+import ConversationMenu from '@/components/chat/ConversationMenu'
 import NewChatModal from '@/components/chat/NewChatModal'
+import { bindingRevision, chatDeletionIssue, continuityChatIds, continuityDeviceMatches, parseChatContinuityEvent, reconcileContinuityRows, remapContinuityIds, remapContinuityDeviceFilter, restrictedChatContinuity, verifiedChatContinuity, type ChatContinuityEvent } from '@/components/chat/chatContinuity'
+import { mergeChatSnapshot } from '@/components/chat/chatExperience'
 import ChatPanel from '@/components/chat/ChatPanel'
+import GroupDetailsPanel, { type GroupDetailsPanelHandle } from '@/components/chat/GroupDetailsPanel'
+import ChatDetailsSurface from '@/components/chat/ChatDetailsSurface'
+import GroupIdentityRecoveryNotice from '@/components/chat/GroupIdentityRecoveryNotice'
+import { useGroupIdentityRecovery } from '@/components/chat/useGroupIdentityRecovery'
+import { hasGroupMemberHistoryLayer } from '@/components/chat/groupParticipantIdentity'
+import { usePersonalChatPins } from '@/components/chat/usePersonalChatPins'
+import { applyChatPin } from '@/utils/chatPins'
+import { chatAvatar, chatPreview, isGroupChat } from '@/utils/chatGroups'
 import ContactPanel, { type ContactPanelHandle } from '@/components/chat/ContactPanel'
 import OwnStatusesCenter from '@/components/chat/OwnStatusesCenter'
 import { useChatHistoryLayer } from '@/components/chat/useChatHistoryLayer'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInboxPage, type InboxView } from '@/utils/chatInbox'
-import { getChatDisplayName, formatPhone, isPendingChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
+import { getChatDisplayName, formatPhone, isPendingChatIdentity, mergeReconciledChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
 import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
 import { reconcileChatDeviceFilters } from '@/components/chat/deviceFilters'
+import { chatReadError } from '@/components/chat/chatReadError'
 
 const LEFT_PANEL_DEFAULT = 360
 const LEFT_PANEL_MIN = 320
@@ -31,7 +47,7 @@ const PANEL_SEPARATOR_WIDTH = 8
 const WIDE_PANEL_SEPARATORS_WIDTH = PANEL_SEPARATOR_WIDTH * 2
 const COMPACT_WORKSPACE_MAX = LEFT_PANEL_MIN + CHAT_PANEL_MIN + PANEL_SEPARATOR_WIDTH
 const ROW_MENU_WIDTH = 208
-const ROW_MENU_HEIGHT = 208
+const ROW_MENU_HEIGHT = 260
 const VIEWPORT_MARGIN = 8
 const CHAT_LIST_RECONCILE_DELAY = 280
 const CHAT_EVENT_DEDUPE_WINDOW = 30_000
@@ -115,10 +131,22 @@ export default function ChatsPage() {
 
   // Filters & UI State
   const [filterDevices, setFilterDevices] = useState<string[]>([])
+  const [chatKind, setChatKind] = useState<'all' | 'direct' | 'group'>('all')
+  const [syncingGroups, setSyncingGroups] = useState(false)
   const [inboxView, setInboxViewState] = useState<InboxView>('all')
   const viewStorageRef = useRef('')
   const viewTouchedRef = useRef(false)
-  const setInboxView = (view: InboxView) => { viewTouchedRef.current = true; setInboxViewState(view); if (viewStorageRef.current) localStorage.setItem(viewStorageRef.current, view) }
+  const setInboxView = (view: InboxView) => {
+    const nextView = chatKind === 'group' && view === 'pending' ? 'all' : view
+    viewTouchedRef.current = true; setInboxViewState(nextView); if (viewStorageRef.current) localStorage.setItem(viewStorageRef.current, nextView)
+  }
+  const selectChatKind = (kind: 'all' | 'direct' | 'group') => {
+    setChatKind(kind)
+    if (kind === 'group') {
+      viewTouchedRef.current = true
+      if (inboxView === 'pending') setInboxView('all')
+    }
+  }
   useEffect(() => {
     const controller = new AbortController()
     void fetch('/api/me', { signal: controller.signal, headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }).then(response => response.json()).then(data => {
@@ -137,6 +165,16 @@ export default function ChatsPage() {
   const deletedChatIdsRef = useRef(new Set<string>())
   const inboxRevisionRef = useRef(0)
   const queueAnchorRef = useRef<{ id: string; waiting_since: string } | undefined>(undefined)
+  const pinReconcileRef = useRef<() => void>(() => {})
+  const pins = usePersonalChatPins((state, rollback) => {
+    const patch = (chat: Chat) => chat.id !== state.chat_id ? chat : rollback ? { ...chat, is_pinned: state.is_pinned, pinned_at: state.pinned_at, pin_version: state.pin_version } : applyChatPin(chat, state)
+    setChats(rows => orderInbox(rows.map(patch), inboxView))
+    setSelectedChat(chat => chat ? patch(chat) : chat)
+    inboxRevisionRef.current++; cursorRef.current = ''
+    chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort()
+    chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++; setLoadingMore(false)
+    pinReconcileRef.current()
+  })
   const cursorRef = useRef('')
   const chatsRef = useRef(chats)
   chatsRef.current = chats
@@ -159,7 +197,9 @@ export default function ChatsPage() {
   const [listSearchFocused, setListSearchFocused] = useState(false)
   const [listKeyboardOpen, setListKeyboardOpen] = useState(false)
   const rowMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
-  const toolbarMenuRef = useRef<HTMLDivElement>(null)
+  const toolbarMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  const filterTriggerRef = useRef<HTMLButtonElement>(null)
+  const [filterPosition, setFilterPosition] = useState({ top: 8, left: 8, width: 360, maxHeight: 700 })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const deleteDialogRef = useRef<HTMLDivElement>(null)
   const deleteCancelRef = useRef<HTMLButtonElement>(null)
@@ -172,17 +212,20 @@ export default function ChatsPage() {
   const [reactionCustomFrom, setReactionCustomFrom] = useState('')
   const [reactionCustomTo, setReactionCustomTo] = useState('')
   const [filterDraft, setFilterDraft] = useState({ view: 'all' as InboxView, reaction: false, from: 'client' as 'any' | 'client' | 'me', emojis: [] as string[], range: '30d' as 'any' | '1d' | '7d' | '30d' | 'custom', customFrom: '', customTo: '' })
+  const filterDates = useOperationalDateFields()
   const filterDialogRef = useRef<HTMLDivElement>(null)
   useAccessibleDialog(showMobileFilters, filterDialogRef, () => setShowMobileFilters(false))
   useChatHistoryLayer(showMobileFilters, '__clarinChatFilters', () => setShowMobileFilters(false))
   const openFilterDraft = () => {
+    filterDates.reset()
     setFilterDraft({ view: inboxView, reaction: filterHasReaction, from: reactionFromMe, emojis: [...reactionEmojis], range: reactionRange, customFrom: reactionCustomFrom, customTo: reactionCustomTo })
     searchInputRef.current?.blur(); setShowMobileFilters(true)
   }
   const applyFilterDraft = () => {
-    setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDraft.customFrom); setReactionCustomTo(filterDraft.customTo); setShowMobileFilters(false)
+    if (!filterDates.validate()) return
+    setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDates.value('from', filterDraft.customFrom)); setReactionCustomTo(filterDates.value('to', filterDraft.customTo)); setShowMobileFilters(false)
   }
-  const chatQueryKey = JSON.stringify([filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  const chatQueryKey = JSON.stringify([pins.scope, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
   const activeChatQueryKeyRef = useRef(chatQueryKey)
   activeChatQueryKeyRef.current = chatQueryKey
 
@@ -197,10 +240,58 @@ export default function ChatsPage() {
   const chatsRequestAbortRef = useRef<AbortController | null>(null)
   const chatsReconcileAbortRef = useRef<AbortController | null>(null)
   const devicesRequestSequenceRef = useRef(0)
+  const continuityAliasesRef = useRef(new Map<string, string>())
+  const continuitySeenRef = useRef(new Map<string, number>())
+  const continuityRequestsRef = useRef(new Map<string, AbortController>())
+  const continuityScopeRef = useRef(pins.scope)
+  if (continuityScopeRef.current !== pins.scope) {
+    continuityScopeRef.current = pins.scope
+    for (const request of continuityRequestsRef.current.values()) request.abort()
+    continuityRequestsRef.current.clear(); continuityAliasesRef.current.clear(); continuitySeenRef.current.clear()
+  }
+  useEffect(() => () => { for (const request of continuityRequestsRef.current.values()) request.abort() }, [])
   const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const processedMessageEventsRef = useRef(new Map<string, number>())
   const selectedChatIdRef = useRef<string | null>(null)
   const compactHistoryDepthRef = useRef(0)
+  const paginationQueryKeyRef = useRef(chatQueryKey)
+  const queryStartedAtRef = useRef(Date.now())
+  const preserveContinuityQueryRef = useRef(false)
+  const continuitySilentQueryRef = useRef('')
+
+  // A cursor and its rows belong to one filter/auth snapshot. Clear them before
+  // the new scope paints, so scrolling cannot cancel its first page with an old cursor.
+  useLayoutEffect(() => {
+    if (paginationQueryKeyRef.current === chatQueryKey) return
+    paginationQueryKeyRef.current = chatQueryKey
+    if (preserveContinuityQueryRef.current) {
+      preserveContinuityQueryRef.current = false; continuitySilentQueryRef.current = chatQueryKey
+      chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort()
+      chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++
+      cursorRef.current = ''; offsetRef.current = 0; setLoadingMore(false)
+      if (listAnchorRef.current) listAnchorRef.current.query = chatQueryKey
+      return
+    }
+    queryStartedAtRef.current = Date.now()
+    chatsRequestAbortRef.current?.abort()
+    chatsReconcileAbortRef.current?.abort()
+    chatsRequestAbortRef.current = null
+    chatsReconcileAbortRef.current = null
+    chatsRequestSequenceRef.current++
+    chatsReconcileSequenceRef.current++
+    cursorRef.current = ''
+    offsetRef.current = 0
+    queueAnchorRef.current = undefined
+    listAnchorRef.current = null
+    chatsRef.current = []
+    setChatRows([])
+    setHasMore(false)
+    setLoadingMore(false)
+    setTotalChats(0)
+    setChatListError('')
+    setLoading(true)
+    if (chatListRef.current) chatListRef.current.scrollTop = 0
+  }, [chatQueryKey])
 
   // Responsive, resizable workspace
   const [containerWidth, setContainerWidth] = useState(1440)
@@ -211,6 +302,24 @@ export default function ChatsPage() {
   // Contact info (3rd column)
   const [showContactInfo, setShowContactInfo] = useState(false)
   const contactPanelRef = useRef<ContactPanelHandle>(null)
+  const groupPanelRef = useRef<GroupDetailsPanelHandle>(null)
+  const participantCloseGuard = useRef<(() => boolean) | null>(null)
+  const bindParticipantCloseGuard = useCallback((guard: (() => boolean) | null) => { participantCloseGuard.current = guard }, [])
+  const participantScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const [participantPrivate, setParticipantPrivate] = useState<{ source: string; sourceDevice?: string; scope: string; chat: Chat } | null>(null)
+  const participantChat = participantPrivate?.source === selectedChat?.id && participantPrivate?.sourceDevice === selectedChat?.device_id && participantPrivate?.scope === participantScope && !isAuthIdentityChanging(participantScope) ? participantPrivate.chat : null
+  const changeParticipantChat = useCallback((chat: Chat | null) => {
+    setParticipantPrivate(chat && selectedChat && chat.device_id === selectedChat.device_id ? { source: selectedChat.id, sourceDevice: selectedChat.device_id, scope: getAuthScope(), chat } : null)
+  }, [selectedChat?.id, selectedChat?.device_id])
+  useEffect(() => {
+    setParticipantPrivate(current => current && (current.source !== selectedChat?.id || current.sourceDevice !== selectedChat?.device_id || current.scope !== participantScope) ? null : current)
+  }, [selectedChat?.id, selectedChat?.device_id, participantScope])
+  const navigateFromDetails = useCallback((navigate: () => void) => {
+    if (participantCloseGuard.current?.() === false) return false
+    if (isGroupChat(selectedChat) && groupPanelRef.current) return groupPanelRef.current.requestClose(navigate)
+    if (contactPanelRef.current?.canClose() === false) return false
+    navigate(); return true
+  }, [selectedChat])
 
   // Virtualizer for chat list
   const chatVirtualizer = useVirtualizer({
@@ -252,8 +361,7 @@ export default function ChatsPage() {
     }
   }, [compactSurface, selectedChat, setConversationActive])
   const chatListWidth = layoutMode === 'compact' ? containerWidth : leftPanelWidth
-  const showExpandedToolbar = chatListWidth >= 400
-  const activeMobileFilterCount = Number(filterUnread) + Number(filterHasReaction)
+  const activeMobileFilterCount = Number(filterHasReaction)
   const collapseMobileListToolbar = layoutMode === 'compact' && compactSurface === 'list' && listKeyboardOpen
 
   useEffect(() => {
@@ -299,8 +407,7 @@ export default function ChatsPage() {
     compactHistoryDepthRef.current = nextDepth
   }, [containerWidth])
 
-  const openChat = useCallback((chat: Chat, addHistory = true) => {
-    if (contactPanelRef.current?.canClose() === false) return false
+  const openChat = useCallback((chat: Chat, addHistory = true) => navigateFromDetails(() => {
     navigationGenerationRef.current++
     chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
@@ -308,8 +415,7 @@ export default function ChatsPage() {
     setCompactSurface('conversation')
     closeRowMenu()
     if (addHistory) pushCompactHistory('conversation', chat.id)
-    return true
-  }, [closeRowMenu, pushCompactHistory])
+  }), [closeRowMenu, pushCompactHistory, navigateFromDetails])
 
   const openContactInfo = useCallback((addHistory = true) => {
     if (!selectedChat) return
@@ -319,8 +425,7 @@ export default function ChatsPage() {
     if (addHistory) pushCompactHistory('details', selectedChat.id)
   }, [pushCompactHistory, selectedChat])
 
-  const openChatDetails = useCallback((chat: Chat) => {
-    if (contactPanelRef.current?.canClose() === false) return
+  const openChatDetails = useCallback((chat: Chat) => navigateFromDetails(() => {
     navigationGenerationRef.current++
     chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
@@ -331,7 +436,7 @@ export default function ChatsPage() {
       pushCompactHistory('conversation', chat.id)
       pushCompactHistory('details', chat.id)
     }
-  }, [closeRowMenu, layoutMode, pushCompactHistory])
+  }), [closeRowMenu, layoutMode, pushCompactHistory, navigateFromDetails])
 
   const returnFromCompactSurface = useCallback((surface: 'conversation' | 'details') => {
     navigationGenerationRef.current++
@@ -364,9 +469,10 @@ export default function ChatsPage() {
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
+      if (hasGroupMemberHistoryLayer(event.state)) return
       const generation = ++navigationGenerationRef.current
       const state = (event.state || {}) as CompactHistoryState
-      if (showContactInfo && state.clarinChatSurface !== 'details' && contactPanelRef.current?.canClose() === false) {
+      if (showContactInfo && state.clarinChatSurface !== 'details' && (isGroupChat(selectedChat) ? groupPanelRef.current : contactPanelRef.current)?.canClose() === false) {
         window.history.pushState({ ...window.history.state, clarinChatSurface: 'details', clarinChatId: selectedChat?.id, clarinChatDepth: compactHistoryDepthRef.current }, '')
         return
       }
@@ -397,6 +503,9 @@ export default function ChatsPage() {
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [layoutMode, showContactInfo, selectedChat?.id])
+
+  const closeDetails = useCallback(() => navigateFromDetails(() => returnFromCompactSurface('details')), [navigateFromDetails, returnFromCompactSurface])
+  const closeConversation = useCallback(() => navigateFromDetails(() => returnFromCompactSurface('conversation')), [navigateFromDetails, returnFromCompactSurface])
 
   const focusConversation = useCallback(() => {
     if (layoutMode !== 'wide') returnFromCompactSurface('details')
@@ -461,6 +570,19 @@ export default function ChatsPage() {
     if (layoutMode !== 'compact') setShowMobileFilters(false)
   }, [layoutMode])
 
+  useLayoutEffect(() => {
+    if (!showMobileFilters) return
+    const place = () => {
+      const rect = filterTriggerRef.current?.getBoundingClientRect(), panel = filterDialogRef.current
+      if (!rect || !panel) return
+      const viewport = window.visualViewport, left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0, width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight
+      const panelWidth = Math.min(380, width - 16), panelHeight = Math.min(panel.scrollHeight, height - 16)
+      setFilterPosition({ left: Math.max(left + 8, Math.min(rect.right - panelWidth, left + width - panelWidth - 8)), top: layoutMode === 'compact' ? Math.max(top + 8, top + height - panelHeight - 8) : Math.max(top + 8, Math.min(rect.bottom + 6, top + height - panelHeight - 8)), width: panelWidth, maxHeight: height - 16 })
+    }
+    place(); window.addEventListener('resize', place); window.addEventListener('scroll', place, true); window.visualViewport?.addEventListener('resize', place)
+    return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); window.visualViewport?.removeEventListener('resize', place) }
+  }, [showMobileFilters, filterDraft.reaction, filterDraft.range, layoutMode])
+
   const closeDeleteDialog = useCallback(() => {
     if (!deleting) setDeleteRequest(null)
   }, [deleting])
@@ -479,32 +601,52 @@ export default function ChatsPage() {
     }
   }, [closeRowMenu, openRowMenuId])
 
-  useEffect(() => {
-    if (!showToolbarMenu) return
-    const closeMenu = (event: PointerEvent) => {
-      if (!toolbarMenuRef.current?.contains(event.target as Node)) setShowToolbarMenu(false)
-    }
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setShowToolbarMenu(false)
-    }
-    document.addEventListener('pointerdown', closeMenu)
-    document.addEventListener('keydown', closeOnEscape)
-    return () => {
-      document.removeEventListener('pointerdown', closeMenu)
-      document.removeEventListener('keydown', closeOnEscape)
-    }
-  }, [showToolbarMenu])
-
-  useEffect(() => {
-    if (showExpandedToolbar) setShowToolbarMenu(false)
-  }, [showExpandedToolbar])
-
   // Auto-open logic
   const autoOpenProcessedRef = useRef(false)
+
+  function acceptContinuitySnapshot(snapshot: Chat, canonicalDevice?: Device | null, event?: ChatContinuityEvent) {
+    if (getAuthScope() !== pins.scope || isAuthIdentityChanging(pins.scope)) return false
+    const ids = continuityChatIds(snapshot)
+    const previous = [...chatCacheRef.current.values()].find(row => ids.has(row.id))
+      || { id: snapshot.id, jid: snapshot.jid, account_id: snapshot.account_id }
+    const verified = verifiedChatContinuity(snapshot, previous, event)
+    if (!(verified || restrictedChatContinuity(snapshot, previous, event)) || verified && event && !continuityDeviceMatches(snapshot, canonicalDevice)
+      || (continuitySeenRef.current.get(snapshot.id) || 0) > bindingRevision(snapshot)) return false
+    const known = [...chatCacheRef.current.values()].filter(row => ids.has(row.id))
+    const oldDevices = known.map(row => row.device_id || '').filter(id => id !== snapshot.device_id)
+    continuitySeenRef.current.set(snapshot.id, bindingRevision(snapshot))
+    if (canonicalDevice && continuityDeviceMatches(snapshot, canonicalDevice)) setDevices(rows => [...rows.filter(row => row.id !== canonicalDevice.id), canonicalDevice])
+    if (!known.length || known.every(row => row.id === snapshot.id && row.device_id === snapshot.device_id && bindingRevision(row) >= bindingRevision(snapshot))) return true
+    for (const id of ids) {
+      continuityAliasesRef.current.set(id, snapshot.id); chatCacheRef.current.set(id, snapshot)
+      canonicalStatesRef.current.delete(id)
+    }
+    pins.remapContinuity(snapshot)
+    if (listAnchorRef.current && ids.has(listAnchorRef.current.id)) listAnchorRef.current.id = snapshot.id
+    if (queueAnchorRef.current && ids.has(queueAnchorRef.current.id)) queueAnchorRef.current.id = snapshot.id
+    const state = window.history.state
+    if (state?.clarinChatId && ids.has(state.clarinChatId)) window.history.replaceState({ ...state, clarinChatId: snapshot.id }, '')
+    const removed = Math.max(0, chatsRef.current.filter(row => ids.has(row.id)).length - 1)
+    if (removed) setTotalChats(total => Math.max(0, total - removed))
+    setChats(rows => reconcileContinuityRows(rows, snapshot))
+    setSelectedChat(current => current && ids.has(current.id) && (verifiedChatContinuity(snapshot, current, event) || restrictedChatContinuity(snapshot, current, event)) ? snapshot : current)
+    setSelectedChats(current => remapContinuityIds(current, snapshot))
+    setParticipantPrivate(current => current && ids.has(current.source) ? { ...current, source: snapshot.id, sourceDevice: snapshot.device_id } : current)
+    setFilterDevices(current => {
+      const next = verified ? remapContinuityDeviceFilter(current, oldDevices, snapshot.device_id!) : current
+      if (next !== current) preserveContinuityQueryRef.current = true
+      return next
+    })
+    cursorRef.current = ''; inboxRevisionRef.current++
+    return true
+  }
 
   // Foreground requests may show loading UI. WebSocket reconciliation is silent
   // and uses its own sequence so it can never cancel a user-triggered query.
   const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean; after?: { id: string; waiting_since: string } } = {}) => {
+    const requestScope = pins.scope
+    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope) || chatQueryKey !== activeChatQueryKeyRef.current) return null
+    if (!reset && (paginationQueryKeyRef.current !== chatQueryKey || chatsRequestAbortRef.current || !cursorRef.current)) return null
     const silent = Boolean(options.silent && reset)
     const sequenceRef = silent ? chatsReconcileSequenceRef : chatsRequestSequenceRef
     const abortRef = silent ? chatsReconcileAbortRef : chatsRequestAbortRef
@@ -524,7 +666,8 @@ export default function ChatsPage() {
       setLoadingMore(true)
     }
     try {
-      const params = new URLSearchParams()
+      const params = new URLSearchParams({ kind: chatKind, pagination: 'cursor' })
+      if (!filterPending && !reset && cursorRef.current) params.set('cursor', cursorRef.current)
       filterDevices.forEach(id => params.append('device_ids', id))
       if (filterUnread) params.append('unread_only', 'true')
       if (filterPending) { params.set('pending_only', 'true'); if (options.after) params.set('cursor', options.after.waiting_since + '|' + options.after.id); else if (!reset && cursorRef.current) params.set('cursor', cursorRef.current) }
@@ -533,7 +676,9 @@ export default function ChatsPage() {
         params.append('has_reaction', 'true')
         if (reactionFromMe !== 'any') params.append('reaction_from_me', reactionFromMe === 'me' ? 'true' : 'false')
         reactionEmojis.forEach(e => params.append('reaction_emojis', e))
-        const now = new Date()
+        // Cursor scope hashes include these timestamps; they must not drift
+        // between pages or silent reconciliation of the same filter snapshot.
+        const now = new Date(queryStartedAtRef.current)
         let since: Date | null = null
         let until: Date | null = null
         if (reactionRange === '1d') since = new Date(now.getTime() - 24 * 60 * 60 * 1000)
@@ -555,11 +700,26 @@ export default function ChatsPage() {
         signal: controller.signal,
       })
       const data = await res.json().catch(() => null)
-      if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudieron cargar las conversaciones.')
-      if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+      if (!res.ok || !data?.success) throw new Error(chatReadError(data?.error, 'No se pudo cargar esta vista.', res.status))
+      if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
       if (data.success) {
         setChatListError('')
-        let newChats: Chat[] = data.chats || []
+        let newChats: Chat[] = (data.chats || []).map((row: Chat) => {
+          const canonicalId = continuityAliasesRef.current.get(row.id)
+          const known = chatCacheRef.current.get(canonicalId || row.id)
+          if (canonicalId && canonicalId !== row.id && known) return pins.project(known)
+          if (known && bindingRevision(known) > bindingRevision(row)) return pins.project(known)
+          return pins.project(row)
+        })
+        newChats = [...new Map(newChats.map(row => [row.id, row])).values()]
+        for (const row of newChats) if (row.binding_state) acceptContinuitySnapshot(row)
+        setSelectedChat(current => {
+          if (!current) return current
+          const canonicalId = continuityAliasesRef.current.get(current.id) || current.id
+          const snapshot = newChats.find(row => row.id === canonicalId)
+          if (!snapshot || snapshot.id !== current.id && !(verifiedChatContinuity(snapshot, current) || restrictedChatContinuity(snapshot, current))) return current
+          return mergeChatSnapshot(current.id === snapshot.id ? current : null, snapshot)
+        })
         const total: number = data.total ?? 0
         let serverOffset = offset + newChats.length
         let nextCursor = data.next_cursor || ''
@@ -567,19 +727,19 @@ export default function ChatsPage() {
         // rows blindly would retain chats that no longer match search/reactions.
         if (silent && !options.after) {
           const loadedCount = Math.max(CHATS_PAGE_SIZE, chatsRef.current.length)
-          while (newChats.length < loadedCount && serverOffset < total && (!filterPending || nextCursor)) {
+          while (newChats.length < loadedCount && serverOffset < total && nextCursor) {
             const pageParams = new URLSearchParams(params)
             pageParams.set('offset', String(filterPending ? 0 : serverOffset))
-            if (filterPending) pageParams.set('cursor', nextCursor)
+            pageParams.set('cursor', nextCursor)
             const pageResponse = await fetch(`/api/chats?${pageParams}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
             const page = await pageResponse.json().catch(() => null)
-            if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(page?.error || 'No se pudieron actualizar las conversaciones.')
-            if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+            if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(chatReadError(page?.error, 'No se pudieron actualizar las conversaciones.', pageResponse.status))
+            if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
             serverOffset += page.chats.length
             nextCursor = page.next_cursor || ''
             const known = new Set(newChats.map(chat => chat.id))
             const unique = (page.chats as Chat[]).filter(chat => !known.has(chat.id))
-            newChats = [...newChats, ...unique]
+            newChats = [...newChats, ...unique.map(pins.project)]
             if (!page.chats.length || !unique.length) break
           }
         }
@@ -605,39 +765,40 @@ export default function ChatsPage() {
         }
         if (!options.after) {
           cursorRef.current = nextCursor
-          setHasMore(filterPending ? Boolean(nextCursor) : serverOffset < total)
+          setHasMore(Boolean(nextCursor))
         }
         return reconcileInboxPage([], newChats, canonicalStatesRef.current, inboxView, false)
       }
     } catch (err) {
-      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current && getAuthScope() === requestScope) {
         if (silent) console.warn('Silent chat reconciliation failed', err)
         else {
           console.error('Failed to fetch chats', err)
-          setChatListError(err instanceof Error ? err.message : 'No se pudieron cargar las conversaciones.')
+          setChatListError(chatReadError(err, 'No se pudieron cargar las conversaciones. Reintenta.'))
         }
       }
     } finally {
-      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (abortRef.current === controller) abortRef.current = null
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current && getAuthScope() === requestScope) {
         if (!silent) setLoading(false)
         if (!reset) setLoadingMore(false)
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [pins.project, chatQueryKey, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   const loadMoreChats = useCallback(() => {
-    if (loadingMore || !hasMore) return
+    if (loading || loadingMore || !hasMore) return
     fetchChats(false)
-  }, [loadingMore, hasMore, fetchChats])
+  }, [loading, loadingMore, hasMore, fetchChats])
 
   const handleChatListScroll = useCallback(() => {
     const el = chatListRef.current
-    if (!el || !hasMore || loadingMore) return
+    if (!el || loading || !hasMore || loadingMore) return
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
       loadMoreChats()
     }
-  }, [hasMore, loadingMore, loadMoreChats])
+  }, [loading, hasMore, loadingMore, loadMoreChats])
 
   const fetchDevices = useCallback(async () => {
     const requestSequence = ++devicesRequestSequenceRef.current
@@ -654,7 +815,8 @@ export default function ChatsPage() {
   }, [])
 
   useEffect(() => {
-    fetchChats()
+    fetchChats(true, { silent: continuitySilentQueryRef.current === chatQueryKey })
+    continuitySilentQueryRef.current = ''
     fetchDevices()
   }, [fetchChats, fetchDevices])
 
@@ -692,7 +854,7 @@ export default function ChatsPage() {
     setSelectedChats(new Set())
     setSelectionMode(false)
     closeRowMenu()
-  }, [closeRowMenu, searchTerm, filterDevices, inboxView, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [closeRowMenu, searchTerm, chatKind, filterDevices, inboxView, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   // Direct links get a list entry beneath the conversation, even with an empty/filtered inbox.
   useEffect(() => {
@@ -791,6 +953,8 @@ export default function ChatsPage() {
       const updated: Chat = {
         ...existing,
         last_message: chatPreviewFromMessage(message),
+        last_message_from_name: message.from_name,
+        last_message_from_me: message.is_from_me,
         last_message_at: timestamp,
         unread_count: existing.unread_count,
       }
@@ -811,6 +975,8 @@ export default function ChatsPage() {
   useEffect(() => () => {
     if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
   }, [])
+
+  pinReconcileRef.current = scheduleChatReconciliation
 
   // WebSocket for List Updates
   useEffect(() => {
@@ -846,6 +1012,19 @@ export default function ChatsPage() {
         scheduleChatReconciliation()
       } else if (eventType === 'new_message' || eventType === 'message_sent') {
         applyMessageToChatList(msg.data || msg.message)
+      } else if (eventType === 'chat_continuity_reconciled') {
+        const continuity = parseChatContinuityEvent(msg.data)
+        if (!continuity || (continuitySeenRef.current.get(continuity.canonical_chat_id) || 0) > continuity.binding_revision) return
+        continuityRequestsRef.current.get(continuity.canonical_chat_id)?.abort()
+        const controller = new AbortController(), scope = pins.scope
+        continuityRequestsRef.current.set(continuity.canonical_chat_id, controller)
+        chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort(); chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++
+        void fetch('/api/chats/' + encodeURIComponent(continuity.canonical_chat_id), { credentials: 'include', cache: 'no-store', signal: controller.signal, headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
+          .then(response => response.ok ? response.json() : Promise.reject(new Error('continuity_unavailable'))).then(data => {
+            if (controller.signal.aborted || getAuthScope() !== scope || isAuthIdentityChanging(scope) || !data.success || !data.chat) return
+            if (acceptContinuitySnapshot(data.chat, data.device, continuity)) { void fetchDevices(); scheduleChatReconciliation() }
+          }).catch(() => { if (!controller.signal.aborted && getAuthScope() === scope) scheduleChatReconciliation() })
+          .finally(() => { if (continuityRequestsRef.current.get(continuity.canonical_chat_id) === controller) continuityRequestsRef.current.delete(continuity.canonical_chat_id) })
       } else if (eventType === 'chat_identity_reconciled') {
         const reconciliation = msg.data as ChatIdentityReconciliation
         if (reconciliation?.source_chat_id && reconciliation?.canonical_chat?.id) {
@@ -853,7 +1032,7 @@ export default function ChatsPage() {
           setSelectedChat(current => {
             if (!current) return current
             if (current.id === reconciliation.source_chat_id || current.id === reconciliation.canonical_chat.id) {
-              return reconciliation.canonical_chat
+              return mergeReconciledChatIdentity([...chatsRef.current.filter(chat => chat.id !== current.id), current], reconciliation)
             }
             return current
           })
@@ -874,6 +1053,8 @@ export default function ChatsPage() {
           if (!known && (inboxView === 'all' || inboxView === 'unread' && payload.unread_count > 0 || inboxView === 'pending' && payload.needs_reply)) scheduleChatReconciliation()
         } else scheduleChatReconciliation()
       } else if (eventType === 'message_reaction' && filterHasReaction) {
+        scheduleChatReconciliation()
+      } else if (eventType === 'chat_group_updated' || eventType === 'groups_synced' || eventType === 'whatsapp_identity_updated') {
         scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
@@ -1011,12 +1192,16 @@ export default function ChatsPage() {
 
   const requestSelectedChatsDeletion = () => {
     const ids = Array.from(selectedChats)
+    const issue = ids.map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
+    if (issue) { setListFeedback(issue); return }
     if (ids.length === 0) return
     setListFeedback('')
     setDeleteRequest({ ids, label: ids.length === 1 ? 'esta conversación' : `${ids.length} conversaciones` })
   }
 
   const requestSingleChatDeletion = (chat: Chat) => {
+    const issue = chatDeletionIssue(chat)
+    if (issue) { setListFeedback(issue); return }
     closeRowMenu()
     setListFeedback('')
     setDeleteRequest({ ids: [chat.id], label: `la conversación con ${getChatDisplayName(chat)}` })
@@ -1025,6 +1210,8 @@ export default function ChatsPage() {
   const confirmDeleteChats = async () => {
     if (!deleteRequest || deleting) return
     const ids = [...deleteRequest.ids]
+    const issue = ids.map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
+    if (issue) { setDeleteRequest(null); setListFeedback(issue); return }
     setDeleting(true)
     setListFeedback('')
     const token = localStorage.getItem('token')
@@ -1080,6 +1267,27 @@ export default function ChatsPage() {
       })
   }
 
+  const groupSyncDevices = devices.filter(device => !filterDevices.length || filterDevices.includes(device.id))
+  const identityRecovery = useGroupIdentityRecovery(chatKind === 'group' ? groupSyncDevices.filter(device => (device.provider || 'whatsapp_web') === 'whatsapp_web').map(device => device.id) : [], selectedChat?.account_id || chats[0]?.account_id)
+  const groupSyncTargets = groupSyncDevices.filter(device => device.status === 'connected' && device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web')
+  const groupSyncUnavailableReason = groupSyncDevices.some(device => device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web') ? 'Conecta un dispositivo de WhatsApp con soporte de grupos.' : 'La sincronización de grupos no está disponible para estos dispositivos.'
+  const syncGroups = async () => {
+    if (syncingGroups) return
+    setSyncingGroups(true); setListFeedback('')
+    const targets = groupSyncTargets
+    try {
+      if (!targets.length) throw new Error(groupSyncUnavailableReason)
+      for (const device of targets) {
+        const response = await fetch('/api/devices/' + device.id + '/groups/sync', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })
+        const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron actualizar los grupos.')
+      }
+      identityRecovery.refresh()
+      await fetchChats(true, { silent: true })
+    } catch (cause) { setListFeedback(cause instanceof Error ? cause.message : 'No se pudieron actualizar los grupos.') }
+    finally { setSyncingGroups(false) }
+  }
+
+  const selectionDeleteIssue = [...selectedChats].map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
   const selectedDevice = selectedChat?.device_id ? devices.find(device => device.id === selectedChat.device_id) : undefined
   const selectedDeviceName = selectedChat?.device_name || selectedDevice?.name
   const selectedDevicePhone = selectedChat?.device_phone || selectedDevice?.phone
@@ -1100,60 +1308,44 @@ export default function ChatsPage() {
         className={`min-h-0 shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white ${layoutMode === 'compact' && compactSurface !== 'list' ? 'hidden' : 'flex'}`}
         style={{ width: layoutMode === 'compact' ? '100%' : leftPanelWidth }}
       >
-         <div className="p-3 border-b border-slate-200/70 bg-white/95 backdrop-blur space-y-3">
-            {/* Header / Selection Mode. Search gets the full compact viewport while the software keyboard is open. */}
+         <div data-chat-list-header className="shrink-0 space-y-2 border-b border-slate-200/70 bg-white px-3 py-2.5">
             {!collapseMobileListToolbar && (selectionMode ? (
-                <div className="flex min-h-11 items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                <button type="button" onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Salir de selección"><X className="w-4 h-4" /></button>
-                        <div>
-                          <p className="text-xs font-semibold text-slate-700">{selectedChats.size} seleccionados</p>
-                          <p className="text-[10px] text-slate-400">Solo chats cargados ({chats.length})</p>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                <button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title="Seleccionar todos los chats cargados"><CheckSquare className="w-4 h-4" /></button>
-                <button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="w-4 h-4" /></button>
-                    </div>
-                </div>
+              <div className="flex h-11 items-center justify-between gap-2 sm:h-10">
+                <div className="flex min-w-0 items-center gap-1"><button type="button" onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="flex h-10 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" aria-label="Salir de selección"><X className="h-4 w-4" /></button><span className="text-xs font-semibold text-slate-700">{selectedChats.size} seleccionados</span></div>
+                <div className="flex items-center gap-1"><button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title={'Solo chats cargados (' + chats.length + ')'}><CheckSquare className="h-4 w-4" /></button><button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0 || Boolean(selectionDeleteIssue)} title={selectionDeleteIssue || undefined} aria-describedby={selectionDeleteIssue ? 'consolidated-delete-hint' : undefined} className="flex h-10 w-10 items-center justify-center rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="h-4 w-4" /></button></div>
+              </div>
             ) : (
-                <div className="flex min-h-11 min-w-0 items-center gap-1.5">
-                    <DeviceSelector
-                        devices={devices}
-                        selectedDeviceIds={filterDevices}
-                        onDeviceChange={setFilterDevices}
-                        className="min-w-0 flex-1"
-                    />
-                    {showExpandedToolbar && (
-                      <>
-                        <button type="button" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()) }} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Seleccionar chats" title="Seleccionar chats">
-                            <ListChecks className="w-4 h-4" />
-                        </button>
-                        <button type="button" onClick={() => setShowOwnStatuses(true)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Mis estados" title="Mis estados">
-                            <Sparkles className="w-4 h-4" />
-                        </button>
-                      </>
-                    )}
-                    <button type="button" onClick={() => setShowNewChatModal(true)} className={`flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 text-xs font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-700 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 active:scale-[0.98] ${showExpandedToolbar ? 'px-3' : 'w-11'}`} aria-label="Nuevo chat" title="Nuevo chat">
-                        <Plus className="w-4 h-4" />
-                        {showExpandedToolbar && <span>Nuevo chat</span>}
-                    </button>
-                    {!showExpandedToolbar && (
-                      <div ref={toolbarMenuRef} className="relative shrink-0">
-                        <button type="button" onClick={() => setShowToolbarMenu(value => !value)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones de chats" aria-haspopup="menu" aria-expanded={showToolbarMenu}>
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {showToolbarMenu && (
-                          <div role="menu" className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[70] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:w-52">
-                            <button type="button" role="menuitem" onClick={() => { setShowOwnStatuses(true); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Sparkles className="h-4 w-4 text-emerald-600" /> Mis estados</button>
-                            <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ListChecks className="h-4 w-4 text-slate-500" /> Seleccionar chats</button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                </div>
+              <div className="flex h-11 min-w-0 items-center gap-1.5 sm:h-10">
+                <DeviceSelector devices={devices} selectedDeviceIds={filterDevices} onDeviceChange={setFilterDevices} className="min-w-0 flex-1" compact />
+                <button type="button" onClick={() => setShowNewChatModal(true)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 sm:h-10 sm:w-10" aria-label="Nuevo chat" title="Nuevo chat"><Plus className="h-4 w-4" /></button>
+                <button ref={toolbarMenuTriggerRef} type="button" onClick={() => setShowToolbarMenu(value => !value)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:h-10 sm:w-9" aria-label="Más acciones de chats" aria-haspopup="menu" aria-expanded={showToolbarMenu}>{syncingGroups ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreVertical className="h-4 w-4" />}</button>
+                {showToolbarMenu && <ConversationMenu anchor={toolbarMenuTriggerRef} label="Acciones de chats" onClose={() => setShowToolbarMenu(false)}>
+                  <button type="button" role="menuitem" onClick={() => { setShowOwnStatuses(true); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-emerald-50"><Sparkles className="h-4 w-4 text-slate-500" />Mis estados</button>
+                  <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-slate-50"><ListChecks className="h-4 w-4 text-slate-500" />Seleccionar chats</button>
+                  <button type="button" role="menuitem" disabled={syncingGroups || !groupSyncTargets.length} aria-describedby={!groupSyncTargets.length ? 'group-sync-unavailable' : undefined} onClick={() => { setShowToolbarMenu(false); void syncGroups() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"><RefreshCw className="h-4 w-4 shrink-0 text-slate-500" /><span>Actualizar grupos de WhatsApp{!groupSyncTargets.length && <span id="group-sync-unavailable" className="mt-1 block text-xs font-normal leading-4">{groupSyncUnavailableReason}</span>}</span></button>
+                </ConversationMenu>}
+              </div>
             ))}
-
+            <div className="flex h-11 min-w-0 items-center gap-1.5 sm:h-10">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input ref={searchInputRef} type="text" placeholder="Buscar chats..." value={searchTerm} onChange={event => updateSearchTerm(event.target.value)} onFocus={() => setListSearchFocused(true)} onBlur={() => setListSearchFocused(false)} aria-busy={searchPending || loading} className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-14 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 sm:h-10" />
+                {searchPending && <Loader2 aria-label="Esperando para buscar chats" className="absolute right-9 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" />}
+                {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de chats" className="absolute right-0.5 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
+              </div>
+              <button ref={filterTriggerRef} type="button" onClick={openFilterDraft} aria-label={'Abrir filtros de chats' + (activeMobileFilterCount ? ', ' + activeMobileFilterCount + ' activos' : '')} aria-haspopup="dialog" aria-expanded={showMobileFilters} className={'relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:h-10 sm:w-9 ' + (activeMobileFilterCount ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-100')}><SlidersHorizontal className="h-4 w-4" />{activeMobileFilterCount > 0 && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-emerald-600" aria-hidden />}</button>
+            </div>
+            {!collapseMobileListToolbar && <div className="flex min-w-0 items-center gap-1">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5" role="group" aria-label="Vista de la bandeja">
+                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} disabled={chatKind === 'group' && view === 'pending'} aria-describedby={chatKind === 'group' && view === 'pending' ? 'group-pending-hint' : undefined} aria-pressed={inboxView === view} title={view === 'pending' ? 'Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.' : undefined} className={'h-11 min-w-0 flex-1 rounded-lg px-1 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 sm:h-9 ' + (inboxView === view ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800')}>{label}</button>)}
+              </div>
+              <span aria-hidden className="h-4 w-px shrink-0 bg-slate-200" />
+              <ChatKindSelector value={chatKind} onChange={selectChatKind} />
+            </div>}
+            {chatKind === 'group' && !collapseMobileListToolbar && <p id="group-pending-hint" className="text-[11px] leading-4 text-slate-400">Los grupos no generan pendientes.</p>}
+                        {selectionMode && selectionDeleteIssue && <p id="consolidated-delete-hint" className="text-xs leading-5 text-slate-500">{selectionDeleteIssue}</p>}
+             {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
+            {chatKind === 'group' && <GroupIdentityRecoveryNotice rows={identityRecovery.rows} devices={devices} retryHint />}
             {listFeedback && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700" role="alert">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1163,65 +1355,14 @@ export default function ChatsPage() {
             )}
 
             {chatListError && chats.length > 0 && (
-              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800" role="status">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 pl-3 pr-1 text-xs text-slate-600" role="alert">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
                 <span className="min-w-0 flex-1">{chatListError}</span>
-                <button type="button" onClick={() => void fetchChats()} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label="Reintentar"><RotateCcw className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={() => void fetchChats()} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Reintentar"><RotateCcw className="h-3.5 w-3.5" /></button>
               </div>
             )}
 
-              <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de la bandeja">
-                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} aria-pressed={inboxView === view} className={`min-h-10 flex-1 rounded-lg px-2 text-xs font-semibold transition ${inboxView === view ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}
-              </div>
-              {filterPending && <p className="text-[11px] leading-4 text-slate-500">Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.</p>}
-            {/* Search */}
-             <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Buscar chats..."
-                value={searchTerm}
-                onChange={(e) => updateSearchTerm(e.target.value)}
-                onFocus={() => setListSearchFocused(true)}
-                onBlur={() => setListSearchFocused(false)}
-                aria-busy={searchPending || loading}
-                className={`w-full pl-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 outline-none transition-all placeholder:text-slate-400 ${layoutMode === 'compact' ? 'pr-24' : 'pr-16'}`}
-                />
-                {searchPending && <Loader2 aria-label="Esperando para buscar chats" className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500 ${layoutMode === 'compact' ? 'right-20' : 'right-10'}`} />}
-                {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de chats" className={`absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 ${layoutMode === 'compact' ? 'right-11' : 'right-1'}`}><X className="h-4 w-4" /></button>}
-                {layoutMode === 'compact' && (
-                  <button
-                    type="button"
-                    onClick={openFilterDraft}
-                    className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                    aria-label={`Abrir filtros de chats${activeMobileFilterCount ? `, ${activeMobileFilterCount} activos` : ''}`}
-                  >
-                    <SlidersHorizontal className="h-4.5 w-4.5" />
-                    {activeMobileFilterCount > 0 && <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[9px] font-bold text-white">{activeMobileFilterCount}</span>}
-                  </button>
-                )}
-            </div>
 
-              {/* Quick filters */}
-              {layoutMode !== 'compact' && <div className="flex flex-wrap items-center gap-2">
-
-                <button
-                    data-testid="filter-reaction-toggle"
-                    onClick={() => setFilterHasReaction(!filterHasReaction)}
-                  className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-all duration-200 active:scale-[0.98] ${
-                        filterHasReaction
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
-                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
-                    }`}
-                    title="Filtrar chats con reacciones"
-                >
-                  <Heart className={`w-3.5 h-3.5 ${filterHasReaction ? 'fill-emerald-500 text-emerald-500' : ''}`} />
-                    Con reacción
-                </button>
-            </div>}
-
-            {layoutMode !== 'compact' && filterHasReaction && <button type="button" data-testid="filter-reaction-advanced" onClick={openFilterDraft} className="flex min-h-11 w-full items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700"><span>Opciones de reacción</span><SlidersHorizontal className="h-4 w-4" /></button>}
          </div>
 
          {/* Chat List Items */}
@@ -1252,7 +1393,7 @@ export default function ChatsPage() {
                 <MessageCircle className="w-7 h-7 text-slate-400" />
               </div>
               <h3 className="text-sm font-semibold text-slate-700 mb-1">{filterPending ? 'No hay conversaciones pendientes' : filterUnread ? 'Todo leído' : 'No se encontraron chats'}</h3>
-              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">{filterUnread ? 'Los mensajes ya leídos salen de esta vista. Revisa Pendientes para ver a quién falta responder.' : filterPending ? 'Las conversaciones que requieran atención aparecerán aquí.' : 'Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.'}</p>
+              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">{filterUnread ? chatKind === 'group' ? 'Los grupos sin mensajes por leer salen de esta vista.' : 'Los mensajes ya leídos salen de esta vista. Revisa Pendientes para ver a quién falta responder.' : filterPending ? 'Las conversaciones que requieran atención aparecerán aquí.' : 'Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.'}</p>
             </div>
             ) : (
                 <div style={{ height: chatVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
@@ -1303,11 +1444,11 @@ export default function ChatsPage() {
                         )}
 
                         <div className="relative shrink-0">
-                             {chat.contact_avatar_url ? (
-                              <img src={chat.contact_avatar_url} alt="" className="h-11 w-11 rounded-full object-cover ring-1 ring-slate-200 shadow-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
+                             {chatAvatar(chat) ? (
+                              <img src={chatAvatar(chat)} alt="" className="h-11 w-11 rounded-full object-cover ring-1 ring-slate-200 shadow-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
                              ) : null}
-                            <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100 shadow-sm ${chat.contact_avatar_url ? 'hidden' : ''}`}>
-                                <span className="text-base font-bold text-emerald-700">{getChatDisplayName(chat).charAt(0).toUpperCase()}</span>
+                            <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100 shadow-sm ${chatAvatar(chat) ? 'hidden' : ''}`}>
+                                <span className="text-base font-bold text-emerald-700">{isGroupChat(chat) ? <Users className="h-5 w-5" /> : getChatDisplayName(chat).charAt(0).toUpperCase()}</span>
                              </div>
                              {chat.unread_count > 0 && (
                               <div className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[10px] font-bold h-5 min-w-5 px-1.5 rounded-full flex items-center justify-center shadow-sm ring-2 ring-white tabular-nums">
@@ -1321,7 +1462,7 @@ export default function ChatsPage() {
                                 <h3 className={`truncate pr-2 text-sm font-semibold leading-5 ${chat.unread_count > 0 ? 'text-slate-950' : 'text-slate-800'}`}>
                                     {getChatDisplayName(chat)}
                                 </h3>
-                                <div className="flex shrink-0 items-center">
+                                <div className="flex shrink-0 items-center gap-1">{chat.is_pinned && <Pin aria-label="Chat fijado para ti" className="h-3 w-3 text-slate-500" />}
                                   <span className={`whitespace-nowrap pt-0.5 text-[10px] ${chat.unread_count > 0 ? 'font-bold text-emerald-700' : 'text-slate-400'}`}>
                                       {formatTime(chat.last_message_at)}
                                   </span>
@@ -1329,7 +1470,7 @@ export default function ChatsPage() {
                             </div>
                             <div className="flex items-center gap-1.5 min-w-0">
                               <span className="text-xs text-slate-500 truncate block">
-                                    {chat.last_message || 'Sin mensajes'}
+                                    {chatPreview(chat)}
                                 </span>
                             </div>
                             {/* Device & Phone Labels */}
@@ -1386,10 +1527,11 @@ export default function ChatsPage() {
                                 onClick={event => event.stopPropagation()}
                               >
                                 <button data-chat-row-menu-first={chat.id} type="button" role="menuitem" onClick={() => openChat(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><MessageCircle className="h-4 w-4 text-slate-400" /> Abrir conversación</button>
+                                <button type="button" role="menuitem" disabled={pins.pending.has(chat.id)} onClick={() => { closeRowMenu(true); void pins.toggle(chat) }} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">{chat.is_pinned ? <PinOff className="h-4 w-4 text-slate-400" /> : <Pin className="h-4 w-4 text-slate-400" />}{chat.is_pinned ? 'Desfijar para mí' : 'Fijar para mí'}</button>
                                 <button type="button" role="menuitem" onClick={() => openChatDetails(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
                                 <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set([chat.id])); closeRowMenu() }} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><CheckSquare className="h-4 w-4 text-slate-400" /> Seleccionar</button>
                                 <div className="my-1 border-t border-slate-100" />
-                                <button type="button" role="menuitem" onClick={() => requestSingleChatDeletion(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button>
+                                <button type="button" role="menuitem" disabled={Boolean(chatDeletionIssue(chat))} title={chatDeletionIssue(chat) || undefined} onClick={() => requestSingleChatDeletion(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> <span className="min-w-0"><span className="block">Eliminar del CRM</span>{chatDeletionIssue(chat) && <span className="block text-[10px] font-normal leading-4">{chatDeletionIssue(chat)}</span>}</span></button>
                               </div>
                             , document.body)}
                           </div>
@@ -1444,15 +1586,20 @@ export default function ChatsPage() {
 	                deviceId={selectedChat.device_id || ''}
 	                device={selectedDevice}
 	                initialChat={selectedChat}
+                    participantChat={participantChat}
+                    onParticipantChatChange={changeParticipantChat}
+                    onParticipantCloseGuardChange={bindParticipantCloseGuard}
+                  onTogglePin={() => void pins.toggle(selectedChat)}
+                  pinPending={pins.pending.has(selectedChat.id)}
 	                readOnly={selectedChatReadOnly}
-	                onClose={() => returnFromCompactSurface('conversation')}
+	                onClose={closeConversation}
 	                onContactInfoToggle={show => {
 	                  if (show) openContactInfo()
-	                  else if (contactPanelRef.current?.canClose() !== false) returnFromCompactSurface('details')
+	                  else closeDetails()
 	                }}
 	                contactInfoOpen={showContactInfo}
 	                onRequestDelete={() => requestSingleChatDeletion(selectedChat)}
-	                isActive={compactSurface !== 'list' && (layoutMode !== 'compact' || compactSurface === 'conversation')}
+	                isActive={Boolean(participantChat) || (compactSurface !== 'list' && (layoutMode !== 'compact' || compactSurface === 'conversation'))}
 	                onRead={reconcileChatUnread}
                   focusRequest={composerFocusRequest}
                   attentionMode={filterPending}
@@ -1472,9 +1619,9 @@ export default function ChatsPage() {
       </div>
 
       {/* Right Resizer + Contact Panel (3rd column) */}
-      {layoutMode === 'wide' && showContactInfo && selectedChat && (
+      {showContactInfo && selectedChat && (
         <>
-          <div
+          {layoutMode === 'wide' && <div
             role="separator"
             aria-label="Cambiar ancho del panel de detalles"
             aria-orientation="vertical"
@@ -1490,49 +1637,30 @@ export default function ChatsPage() {
             title="Arrastra para ajustar. Doble clic para restablecer."
           >
             <span aria-hidden="true" className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 transition-all group-hover:w-1 group-hover:bg-emerald-300 group-active:bg-emerald-500" />
-          </div>
-          <div className="shrink-0 overflow-hidden bg-white" style={{ width: rightPanelWidth }}>
-            <ContactPanel
-              ref={contactPanelRef}
-              chatId={selectedChat.id}
-              isOpen={true}
-              onClose={() => returnFromCompactSurface('details')}
-              onFocusConversation={focusConversation}
-              focusConversationClosesDetails={false}
-              deviceName={selectedDeviceName}
-              devicePhone={selectedDevicePhone}
-              chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
-            />
-          </div>
-        </>
-      )}
-
-      {/* Medium widths use a drawer; compact widths use a full workspace panel. */}
-      {layoutMode !== 'wide' && showContactInfo && selectedChat && (
-        <>
-          {layoutMode === 'medium' && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => { if (contactPanelRef.current?.canClose() !== false) setShowContactInfo(false) }} aria-label="Cerrar detalles" />}
-          <div
-            className={`absolute inset-y-0 right-0 z-30 overflow-hidden bg-white shadow-2xl ${layoutMode === 'compact' ? 'left-0' : 'border-l border-slate-200'}`}
-            style={layoutMode === 'compact' ? undefined : { width: 'clamp(360px, 38vw, 440px)', maxWidth: '92%' }}
+          </div>}
+          {layoutMode === 'medium' && !participantChat && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => closeDetails()} aria-label="Cerrar detalles" />}
+          <ChatDetailsSurface
+            key="conversation-details-surface"
+            mode={layoutMode} width={rightPanelWidth} suspended={Boolean(participantChat)}
           >
-            <ContactPanel
+            {isGroupChat(selectedChat) ? <GroupDetailsPanel ref={groupPanelRef} chat={selectedChat} suspended={Boolean(participantChat)} onOpenChat={changeParticipantChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
               ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
               onClose={() => returnFromCompactSurface('details')}
               onFocusConversation={focusConversation}
-              focusConversationClosesDetails
+              focusConversationClosesDetails={layoutMode !== 'wide'}
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
-            />
-          </div>
+            />}
+          </ChatDetailsSurface>
         </>
       )}
 
       {showMobileFilters && typeof document !== 'undefined' && createPortal(
-        <div className="app-viewport fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/30 p-0 sm:p-4"><div ref={filterDialogRef} tabIndex={-1} className="flex h-full w-full flex-col bg-white shadow-2xl sm:max-h-[min(760px,92dvh)] sm:max-w-lg sm:rounded-2xl" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
-          <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+        <div className="fixed inset-0 z-[90]" onMouseDown={event => { if (event.target === event.currentTarget) setShowMobileFilters(false) }}><div ref={filterDialogRef} tabIndex={-1} style={filterPosition} className="fixed flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
+          <div className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4">
             <div className="min-w-0">
               <h2 id="mobile-chat-filters-title" className="font-bold text-slate-900">Filtros de chats</h2>
               <p className="text-xs text-slate-500">{activeMobileFilterCount ? `${activeMobileFilterCount} activo${activeMobileFilterCount === 1 ? '' : 's'}` : 'Sin filtros activos'}</p>
@@ -1558,7 +1686,7 @@ export default function ChatsPage() {
                 <div>
                   <p className="mb-2 text-xs font-semibold text-slate-600">¿De quién?</p>
                   <div className="grid grid-cols-3 gap-2">
-                    {([{ v: 'client' as const, label: 'Cliente' }, { v: 'me' as const, label: 'Operador' }, { v: 'any' as const, label: 'Cualquiera' }]).map(option => (
+                    {([{ v: 'client' as const, label: chatKind === 'group' ? 'Otros' : 'Cliente' }, { v: 'me' as const, label: chatKind === 'group' ? 'Mi número' : 'Operador' }, { v: 'any' as const, label: 'Cualquiera' }]).map(option => (
                       <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, from: option.v }))} className={`min-h-11 rounded-xl border px-2 text-xs font-semibold ${filterDraft.from === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
@@ -1579,12 +1707,12 @@ export default function ChatsPage() {
                       <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, range: option.v }))} className={`min-h-11 rounded-xl border px-3 text-xs font-semibold ${filterDraft.range === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
-                  {filterDraft.range === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><label className="text-xs text-slate-500">Desde<input type="date" value={filterDraft.customFrom} onChange={event => setFilterDraft(draft => ({ ...draft, customFrom: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label><label className="text-xs text-slate-500">Hasta<input type="date" value={filterDraft.customTo} onChange={event => setFilterDraft(draft => ({ ...draft, customTo: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label></div>}
+                  {filterDraft.range === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><div className="text-xs text-slate-500">Desde<OperationalDatePicker mode="date" label="Desde" value={filterDraft.customFrom} onChange={value => setFilterDraft(draft => ({ ...draft, customFrom: value }))} onDraftStateChange={filterDates.track('from')} showQuickValues={false} /></div><div className="text-xs text-slate-500">Hasta<OperationalDatePicker mode="date" label="Hasta" value={filterDraft.customTo} onChange={value => setFilterDraft(draft => ({ ...draft, customTo: value }))} onDraftStateChange={filterDates.track('to')} showQuickValues={false} /></div></div>}
                 </div>
               </section>
             )}
           </div>
-          <div className="safe-area-bottom flex shrink-0 gap-2 border-t border-slate-200 bg-white p-4">
+          <div className="flex shrink-0 gap-2 border-t border-slate-200 bg-white p-3">
             <button type="button" onClick={() => setFilterDraft({ view: 'all', reaction: false, from: 'client', emojis: [], range: '30d', customFrom: '', customTo: '' })} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Limpiar</button>
             <button type="button" onClick={() => setShowMobileFilters(false)} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
             <button type="button" onClick={applyFilterDraft} className="min-h-12 flex-1 rounded-xl bg-emerald-600 text-sm font-bold text-white hover:bg-emerald-700">Aplicar</button>

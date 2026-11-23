@@ -32,6 +32,10 @@ func lockWhiteboardActorMembershipsTx(
 	if accountID == uuid.Nil || actorID == uuid.Nil {
 		return ErrWhiteboardInvalid
 	}
+	// This is the FK parent reservation, not the whiteboard authority barrier.
+	if err := lockTaskContainerAccountReferenceTx(ctx, tx, accountID); err != nil {
+		return ErrWhiteboardNotFound
+	}
 	requested := append([]uuid.UUID{actorID}, relatedMembershipIDs...)
 	for _, userID := range requested {
 		if userID == uuid.Nil {

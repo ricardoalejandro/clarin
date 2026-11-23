@@ -260,7 +260,8 @@ func validateClarinTextElementFormats(element map[string]json.RawMessage, elemen
 	}
 	rawTextFormat, hasTextFormat := customData[clarinTextFormatCustomDataProperty]
 	rawParagraphFormat, hasParagraphFormat := customData[clarinParagraphFormatCustomDataProperty]
-	if !hasTextFormat && !hasParagraphFormat {
+	rawCharacterStyle, hasCharacterStyle := customData[clarinCharacterStyleProperty]
+	if !hasTextFormat && !hasParagraphFormat && !hasCharacterStyle {
 		return 0, nil
 	}
 	if elementType != "text" {
@@ -284,6 +285,13 @@ func validateClarinTextElementFormats(element map[string]json.RawMessage, elemen
 			return 0, err
 		}
 		segmentCount += paragraphCount
+	}
+	if hasCharacterStyle {
+		count, err := validateClarinCharacterStyle(rawCharacterStyle, element, originalText)
+		if err != nil {
+			return 0, err
+		}
+		segmentCount += count
 	}
 	return segmentCount, nil
 }

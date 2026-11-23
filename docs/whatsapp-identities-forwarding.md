@@ -1,0 +1,136 @@
+# WhatsApp Web: participantes, reenvío nativo y copias
+
+Esta entrega usa `go.mau.fi/whatsmeow` fijado en `v0.0.0-20261017175727-b2b1e71d45e2`. No implementa estas funciones mediante WhatsApp Cloud API.
+
+## Identidad
+
+Los nombres y usuarios públicos se proyectan por cuenta y dispositivo desde hechos PN/LID entregados por el proveedor. Cada campo conserva origen y fecha. Una sincronización antigua no reemplaza hechos más recientes ni revive un usuario eliminado. Consultar participantes no importa Contactos al CRM. Los alias comprobados se usan para resolver y buscar; un usuario público nunca es una clave de Contacto.
+
+Se procesan nombres de mensajes, caché, historial, Contact, BusinessName y AppState cuando esos eventos realmente llegan. La presencia de campos username en protobuf no demuestra que una sesión los entregue. No hay búsqueda genérica ni apertura por @usuario; tampoco se habilita Mensaje sin teléfono comprobado. El fallback visible es Nombre no disponible.
+
+## Reenvío
+
+`Message.forwarding` contiene `state` (`unknown`, `not_forwarded`, `forwarded`, `frequently_forwarded`) y `score` nullable. Los históricos son desconocidos. Las lecturas completas, búsqueda y WebSocket conservan la misma proyección; las observaciones parciales no degradan hechos confirmados. El remitente del grupo sigue siendo quien envió el mensaje al grupo, no un supuesto autor original.
+
+El servidor construye un contexto nuevo: conserva el contador sin copiar citas, identidad del chat de origen ni menciones. Se mantienen leyendas, archivos, audio/nota de voz y animación WebP comprobada. No se reenvían mensajes revocados, de una visualización, medios ausentes ni tipos sin constructor nativo.
+
+POST /api/messages/forward/batch recibe source_chat_id, source_message_id (UUID local), device_id, destination_chat_ids y client_operation_id. El servidor valida el conjunto, reserva un ID de WhatsApp por destino y persiste los resultados. GET /api/messages/forward/batch/:id consulta el recibo del actor autenticado. Repetir una operación no reenvía. Un resultado incierto requiere reconciliación por el mismo ID, nunca una nueva copia automática. Los envíos múltiples pueden tener resultado parcial.
+
+El lote admite `mode: native | copy` y `content_variant: original | audio_document`. Omitirlos conserva `native/original` y el hash de las operaciones anteriores. Una operación existente nunca cambia de modo ni de destinos. La copia construye un mensaje nuevo con el contenido disponible y no promete la marca remota «Reenviado». La bandera experimental nativa no bloquea este envío normal.
+
+Los históricos `unknown` pueden enviarse como copia sin inventar su contador. Texto, imagen, vídeo, GIF, documento, audio con clasificación conocida y sticker verificado conservan su tipo y contenido. Un audio cuya clasificación falta solo se convierte en documento después de elegir explícitamente «Enviar como archivo adjunto». No hay conversión silenciosa de otros tipos.
+
+`Message.sharing_limits` conserva restricciones de compartición separadas del sobre observado en `Message.forwarding`. Los límites efectivos toman los valores más restrictivos de ambos; una copia y sus ecos nunca reinician los límites conocidos de la cadena. La política se calcula en servidor, se conserva también si el eco llega primero y no admite valores aportados por el cliente.
+
+Límites: cinco destinos; para un mensaje ya reenviado, un solo grupo; para reenvíos frecuentes, un destino. Un original propio no se etiqueta automáticamente. Un contador desconocido no se reinicia para permitir el envío.
+
+## Activación
+
+La recepción y visualización de metadatos y el envío de copias no necesitan habilitar envíos experimentales. El reenvío nativo permanece apagado por defecto:
+
+- WHATSAPP_NATIVE_FORWARDING_ENABLED=false
+- WHATSAPP_NATIVE_FORWARDING_DEVICE_IDS= (UUID separados por coma)
+
+Con la bandera activa, una lista no vacía limita los dispositivos permitidos; vacía permite el despliegue general únicamente después de verificarlo. La capacidad runtime can_forward_native también exige conexión. Tanto el handler como el transporte vuelven a comprobar la bandera. Esto no concede permisos de cuenta, grupo o contacto. Los recibos previos siguen disponibles si se desactiva.
+
+Publicar primero el backend compatible y después el frontend. Mantener las migraciones aditivas y los recibos al revertir la interfaz.
+
+## Verificación frontend previa a la corrección (62a6294)
+
+La pasada de esa versión ejecutó 145 pruebas de 11 archivos del chat, todas correctas. Cubren la conservación monotónica de metadatos en historial, búsqueda, ecos y respuestas parciales; autor real del grupo y etiquetas; fuente desconocida, contenido restringido, audio sin clasificación; límites de destinos y grupos; búsqueda y vaciado a 500 ms con texto y aborto inmediatos, cancelación y páginas obsoletas; cambio de cuenta/dispositivo; operación única, respuesta perdida, consulta del mismo ID, reintento explícito de destinos probados como no enviados y cierre de fallos definitivos. Esa versión bloqueaba todas las escrituras del selector cuando faltaba la capacidad nativa: fue la regresión de usabilidad corregida mediante la separación explícita de copias.
+
+TypeScript y compilación de producción pasaron. La revisión de navegador se ejecutó sobre esa compilación local con cuentas, identidades, mensajes y API totalmente sintéticos; no se enviaron mensajes reales a WhatsApp.
+
+| Superficie | Evidencia y resultado |
+| --- | --- |
+| 320, 375, 768, 1024 y 1440 px | Diálogo de reenvío, recibo incierto y ficha sin teléfono; sin desbordamiento horizontal ni errores de página. Usuario separado del nombre y teléfono; Mensaje desactivado sin número comprobado. |
+| Lote privado y grupo | Un POST por operación; restricción de un grupo y de un destino para mensajes frecuentes. Autor del grupo conservado y original propio sin etiqueta falsa. |
+| Respuesta incierta | Cierre y reapertura conservan la operación. A 375 px también se recargó el documento y se reabrió explícitamente el grupo; comprobar hizo un GET al mismo ID sin crear otro POST. |
+| Sidebar y Eros | Ocho combinaciones a 1024/1440 px. Eros en pantalla completa a 1024 cubre temporalmente el diálogo: al volver se conservan el mismo nodo, selección y scroll de 120 px. A 1440 se probó Eros acoplado. |
+| Capacidad nativa desactivada, 375 px | Explicación visible, confirmación desactivada y cero POST de reenvío. |
+
+Evidencia local no versionada: `tmp/reporteria-qa/identities-forwarding-browser-results.json` y `tmp/reporteria-qa/screenshots/identities-forwarding/`. Se inspeccionaron visualmente `forward-320.png`, `username-320.png`, `chrome-1440-sidebar-expanded-eros-open.png` y `capability-unverified-375.png`. Estas pruebas no acreditan entrega ni presentación remota de WhatsApp, ni que una sesión real entregue nombres de usuario.
+
+## Pruebas reales autorizadas
+
+Usar únicamente Ricardo Frelance / Ricardo Rojas, Filial Iquitos / Propafono y el grupo común test. Antes de cada envío comprobar identificadores de cuenta/dispositivo y miembros actuales: exactamente los dos números autorizados. No contactar terceros, cambiar privacidad, modificar mapas PN/LID ni abrir un segundo cliente de WhatsApp con las mismas sesiones.
+
+La ejecución debe usar una sesión auténtica y las rutas normales de Clarin. No generar JWT de prueba, desactivar Turnstile ni agregar envíos al arranque del servidor. Un ejecutor separado no enviará nada sin autenticación y validación de destinos.
+
+Verificar originales en ambas direcciones, reenvío recibido, original propio, cadena hasta frecuente, imagen/documento/audio sintéticos y recepción del mismo ID. La aceptación del servidor no acredita recepción. Enviar a un LID de un número conocido no demuestra búsqueda por usuario ni comunicación con una persona cuyo número nunca estuvo disponible.
+
+## Evidencia
+
+Registrar por separado pruebas automatizadas, integración PostgreSQL, navegador con datos sintéticos, recepción real y presentación en WhatsApp Web. El informe final y el PR deben identificar capacidades verificadas, no ejercitables, fallidas y no soportadas. No guardar credenciales, sincronizaciones completas ni contenido personal como evidencia.
+
+## Matriz de aceptación de esta entrega
+
+| Capacidad | Estado y límite comprobado |
+| --- | --- |
+| Resolver nombres PN/LID, procedencia y búsquedas | Implementado; verificación automatizada y de interfaz con datos sintéticos. No se importan Contactos al consultar integrantes. |
+| Aislamiento de alias | El mapa global interno de whatsmeow no acredita que otra cuenta/dispositivo conozca un teléfono. Solo se usan pruebas del dispositivo para proyectar identidad y reconciliar Contactos. Las proyecciones históricas sin procedencia se leen conservadoramente hasta recibir metadata actual, sin inventar ni borrar asociaciones. |
+| Usuario público recibido | Implementado y probado con eventos/protobuf sintéticos, incluidos cambio y eliminación explícita. No ejercitable como caso nuevo real con las dos cuentas autorizadas. |
+| Iniciar por cualquier @usuario | No soportado por un recorrido público verificable de esta versión fijada; no se expone. La presencia de campos protobuf no demuestra resolución ni entrega. |
+| Privado LID sin teléfono nunca conocido | Desactivado. Los dos números autorizados ya tienen teléfono conocido; su direccionamiento LID no demostraría este caso. |
+| Recibir, persistir y mostrar reenvíos | Implementado y probado con eventos, PostgreSQL, HTTP/WebSocket y navegador sintéticos. No se atribuye el autor original de un reenvío. Los registros antiguos siguen desconocidos. |
+| Envío nativo, medios e idempotencia | Implementado y verificado con proveedor simulado y serialización del protobuf real. Deshabilitado por defecto hasta completar recepción real. Resultados inciertos no generan copias automáticas. |
+| Recepción real en el otro dispositivo y apariencia WhatsApp Web | Pendiente. No se han enviado mensajes reales en esta entrega. Aunque el usuario abrió una sesión, la herramienta de navegador de la tarea solo expone MCP Apps sin pestañas y devuelve Browser is not available: iab. No se eludió autenticación ni se abrió otro cliente de WhatsApp. |
+
+No se declararon fallidas transmisiones que no llegaron a ejecutarse. El bloqueo de acceso al navegador impide acreditar el recorrido real, no demuestra falta de soporte del protocolo.
+
+## Corrección del bloqueo general de envío
+
+La versión `62a6294` sustituyó el envío anterior de copias por un recorrido exclusivamente nativo. Con metadatos históricos desconocidos o la capacidad experimental apagada, el selector quedaba inutilizable. La corrección recupera las copias de contenido compatible, distingue ambos modos antes de confirmar y mantiene bloqueados solo los mensajes realmente no disponibles o sin constructor compatible.
+
+La pasada Go final en Linux con PostgreSQL aislado (`go test -count=1 ./...` y compilación del servidor) pasó después de corregir un fixture que reutilizaba el chat entre dispositivos. Incluye migraciones repetidas, compatibilidad exacta del hash anterior, copia con nativo apagado, audio como documento optativo, respuesta perdida, conflictos de modo/variante, aislamiento y mínimos concurrentes de política. Los ecos propios heredan las restricciones desde la reserva incluso cuando llegan a otro chat PN/LID; esto no cambia identidades ni confirma automáticamente el destino original. La reserva nativa también conserva los límites más estrictos del mensaje resultante antes de recibir su eco.
+
+La regresión frontend pasó 158 pruebas en 11 archivos; una pasada final de los dos archivos modificados por el tratamiento de límites nulos pasó 30 pruebas. Son pasadas solapadas y no se suman. TypeScript pasó con caché de pruebas separada. Las pruebas distinguen un límite ausente de uno confirmado y mantienen modo e identificador ante resultados inciertos.
+
+La compilación de producción y sus comprobaciones de activos locales pasaron. Sobre esa compilación se probaron 320, 375, 768, 1024 y 1440 px: imagen histórica con copia habilitada y nativo apagado, audio como documento tras elección explícita, límites de grupo y de copias heredadas, borrador conservado y recibo incierto consultado sin un segundo envío. A 375 px se recargó el documento y reabrió el grupo para recuperar la misma operación. Ocho combinaciones de sidebar/Eros conservaron diálogo y selección; Eros se probó acoplado a 1440 px y con cobertura temporal de pantalla completa a 1024. No hubo desbordamiento horizontal ni errores de página. Con capacidad nativa simulada también se comprobó la elección explícita entre los dos modos. Todos los datos y 17 POST de esa revisión fueron sintéticos e interceptados localmente.
+
+Evidencia local no versionada de la corrección: `C:/proyectos/001.CLARIN/tmp/forward-copy-qa/results.json` y `screenshots/` del mismo directorio. Se inspeccionaron visualmente la copia de imagen y la opción de audio a 320 px, además del diálogo a 1440 px con sidebar y Eros acoplado.
+
+La sesión real sigue fuera del alcance de la herramienta: al buscar la URL autenticada, el navegador disponible es MCP Apps y su lista de pestañas está vacía. No se enviaron mensajes reales ni se eludió autenticación para esta corrección.
+
+## Verificación backend
+
+La pasada final de Linux con PostgreSQL aislado y `GOCACHE=/tmp/go-build go test -count=1 ./...` pasó, al igual que `go build ./cmd/server`. Incluye migraciones repetidas, filas antiguas desconocidas, hidratación monótona, alias entre cuentas/dispositivos con el sqlstore real compartido, reasignación de teléfono, ninguna creación CRM por consultas y operaciones HTTP con proveedor simulado, respuesta perdida y cambio tardío del destinatario. Los tests de grupo exigen el mismo autor o sus alias comprobados antes de enriquecer un mensaje duplicado.
+
+La preparación nativa vuelve a comprobar permiso de grupo después de preparar medios y rechaza contenido o destino modificado antes del transporte. Los eventos de edición se prueban después de ejecutar `events.Message.UnwrapRaw()` real: una edición parcial no convierte la procedencia desconocida en original.
+
+Se ejecutó además una pasada frontend focalizada de 36 pruebas en 3 archivos y TypeScript tras endurecer la reconciliación de participantes: las omisiones canónicas eliminan teléfono, usuario y avatar revocados, y LID distintos no se unen por reutilizar un teléfono. Esta pasada se solapa con las 145 pruebas anteriores.
+
+Los alias incorporados por los propios fallbacks globales de whatsmeow tampoco cuentan como prueba nueva: un SenderAlt LID añadido a un PN entrante se admite solo si ya existe la relación local; los eventos de nombres usan su JID original. La agenda FullName/FirstName se conserva, mientras PushName/BusinessName copiados a alias requieren un hecho original verificable. Las regresiones incluyen este comportamiento real del proveedor. No se intentan deshacer automáticamente fusiones CRM históricas cuya procedencia no puede acreditarse.
+
+
+## Recuperación histórica de identidades (2026-10-25)
+
+La recuperación usa los clientes ya vinculados. No crea Contactos, chats individuales ni mensajes. Cada relación teléfono–LID aceptada debe provenir de una respuesta explícita del mismo dispositivo: consulta de registro, información de usuario, metadata de grupo, historial o acción de agenda. Los PN históricos `@c.us` se normalizan. El mapa global de whatsmeow, una foto, un nombre y un usuario público no acreditan esa relación.
+
+La proyección conserva por cuenta/dispositivo la procedencia, fecha y generación de sesión. Los datos sin fecha solo completan valores desconocidos; no reemplazan valores conocidos ni resucitan eliminaciones explícitas. Los eventos iniciales `FromFullSync` alimentan únicamente identidad y nunca el importador CRM. El arranque y la reconexión de una sesión existente no importan ni fusionan Contactos o chats; solo el primer emparejamiento consume una importación inicial, una vez. Las acciones manuales y la ingestión de mensajes reales conservan sus recorridos existentes. Un error al leer o guardar datos se propaga con su causa, sin presentarlo como ausencia confirmada por WhatsApp.
+
+La migración aditiva de `Migrate()` incorpora ámbitos, revisiones y una cola durable versionada con sus candidatos. El trabajador inventaría agenda y conversaciones existentes; comprueba teléfonos en lotes de hasta 50; solicita una resincronización controlada de `critical_unblock_low`; espera su confirmación y persistencia; vuelve a inventariar y consultar lo nuevo; finalmente recalcula grupos. Hay una consulta activa por dispositivo, dos dispositivos como máximo y separación persistida de dos segundos. Reintenta fallos transitorios a los 30 segundos, dos minutos y diez minutos. Los dispositivos desconectados esperan; cambios de sesión invalidan la generación anterior. Los reinicios conservan progreso y no repiten una resincronización ya confirmada. Antes de esperar por teléfonos con reintento diferido se guardan las proyecciones ya recuperadas y su contador; un candidato pendiente no oculta los integrantes comprobados. Los fallos de persistencia conservan su causa y no consumen el presupuesto de reintentos del proveedor. El diagnóstico de consultas registra únicamente tipo, código IQ y banderas de conexión/timeout, sin mensajes de error, nodos ni identidades personales.
+
+`Actualizar grupos` reusa el trabajo de recuperación. Abrir un grupo no consulta remotamente a cada integrante. `GET /api/devices/:id/group-identities/recovery` expone progreso mínimo a Chats o Reportería; estados completado y parcial no equivalen a identificación universal. Los contadores separan teléfonos candidatos de identidades pendientes; la misma identidad se cuenta una vez aunque figure en varios grupos. El inventario de verificación también conserva el conteo por fila de grupo, que puede repetir personas.
+
+Participantes, ficha y Reportería utilizan el mismo resolver. Una coincidencia CRM única se proyecta solo con permisos de Contactos o una conversación privada real autorizada. Las coincidencias ambiguas no se fusionan. Las revisiones monótonas de identidad, membresía y datos CRM invalidan resultados sin enviar datos personales en WebSocket. Los cambios CRM se observan después del commit cada cinco segundos y se notifican a Chats o Reportería mediante una revisión agregada, sin exigir acceso al contenido CRM. Las lecturas descartan cambios concurrentes, otra cuenta y otra sesión.
+
+Antes de CSV/Excel, `POST /api/reports/whatsapp-group-coverage/validate` comprueba las tres revisiones y la política de Leads. Un resultado antiguo devuelve `409 report_snapshot_changed`; no se descarga una mezcla de resultados. El usuario público se exporta separado del teléfono. Las migraciones y revisiones deben conservarse si se revierte únicamente la interfaz.
+
+### Verificación de la recuperación
+
+- Go: suite completa y compilación Linux con PostgreSQL aislado correctas; pruebas adicionales de HTTP real, sesión, cola, idempotencia, duplicados y material de revisiones. Los paquetes se ejecutan secuencialmente (`go test -p 1 -count=1 ./...`) para no competir por DDL en la misma base de pruebas; las carreras de datos se ejercitan con conexiones concurrentes reales dentro de las pruebas. También se comprueba la espera de un dispositivo offline y que los dígitos de un Contacto LID no se utilicen como teléfono al emparejar.
+- TypeScript y compilación frontend de producción correctos. Suite general: 2706/2709 pruebas correctas; las tres discrepancias pertenecen al calendario Work sin cambios en este PR y dependen de la zona horaria local. La pasada del archivo de calendario con `TZ=UTC` pasó sus cinco pruebas. Las pruebas de recuperación, ficha y Reportería pasaron.
+- Navegador sobre compilación de producción y datos sintéticos: 320, 375, 768, 1024 y 1440 px, cinco estados de recuperación por ancho y ocho combinaciones sidebar/Eros. Conservó filas, búsqueda, scroll y borrador; sin desbordamiento ni errores JavaScript. La identidad apareció primero sin teléfono y después con PN comprobado. El CSV conservó usuario y teléfono separado, sin LID. WebSocket, foco y preflight rechazaron reportes obsoletos y evitaron descargas.
+- Evidencia local sintética: `tmp/reporteria-qa/identity-recovery-browser-results.json` y `tmp/reporteria-qa/screenshots/identity-recovery/`. No acredita una sesión real del navegador ni disponibilidad universal de usuarios públicos.
+
+La comprobación productiva se registrará con conteos agregados antes/después y procedencia de la relación devuelta por el cliente existente. No se declarará identificado el caso de aceptación hasta comprobar la relación, el Contacto existente y las proyecciones de sus grupos. No se enviarán mensajes para esta recuperación.
+
+
+### Interacción detectada con la reconciliación antigua
+
+Durante la verificación productiva, los nuevos alias hicieron elegibles duplicados para dos rutinas antiguas de arranque. Estas ejecutaron 19 fusiones automáticas: 17 en la cuenta del caso de aceptación y una en cada una de otras dos cuentas. La auditoría acredita 18 chats y un Lead reubicados, 19 Contactos canónicos existentes y los 19 alias históricos conservados. Carlos mantuvo su Contacto y su chat privado. No se encontraron registros de eliminación o programación de limpieza de avatares en esas cuentas durante el intervalo comprobado.
+
+Se retiraron las fusiones automáticas del arranque y de la reconexión, y la importación general quedó limitada al primer emparejamiento. Los hechos de recuperación no son una autorización para fusionar CRM. Hay pruebas del reinicio sin importación y de la importación inicial consumida una sola vez incluso con callbacks concurrentes.
+
+La auditoría antigua contiene conteos, no los campos originales. La comparación de un respaldo del 11 de octubre cubre 18 de las 19 fuentes: ninguno de sus campos históricos no vacíos queda vacío en el Contacto canónico actual; hay dos valores alternativos históricos distintos. Ese respaldo es anterior al momento de la fusión y no cubre la última fuente, por lo que no acredita conservación exacta de todos los valores al fusionar. No se restauraron valores antiguos ni se deshicieron fusiones mediante suposiciones. La evidencia agregada y los respaldos se mantienen separados del código.

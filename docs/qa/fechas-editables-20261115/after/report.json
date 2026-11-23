@@ -1,0 +1,2787 @@
+{
+  "variant": "after",
+  "source": "Current real OperationalDatePicker, TaskDateRangePicker, ContactDetailSurface and OfflineTasksView",
+  "baselineRevision": "c97f663b3855cb7120130046ffcdbe2b94b1dd3d",
+  "syntheticOnly": true,
+  "scenarios": [
+    {
+      "width": 320,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "320-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 0,
+        "y": 190,
+        "width": 320,
+        "height": 461.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 200,
+            "available": 176,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 200,
+            "available": 176,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 128,
+            "available": 104,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      },
+      "touchTargets": {
+        "icon": {
+          "x": 250,
+          "y": 138,
+          "width": 44,
+          "height": 44
+        },
+        "days": [
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          }
+        ],
+        "buttons": [
+          {
+            "width": 44,
+            "height": 44
+          },
+          {
+            "width": 190,
+            "height": 44
+          },
+          {
+            "width": 44,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.296875,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 44.28125,
+            "height": 44
+          },
+          {
+            "width": 79.34375,
+            "height": 44
+          },
+          {
+            "width": 100.875,
+            "height": 44
+          }
+        ]
+      }
+    },
+    {
+      "width": 375,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "375-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 39,
+        "y": 190,
+        "width": 324,
+        "height": 461.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 255,
+            "available": 231,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 255,
+            "available": 231,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 183,
+            "available": 159,
+            "required": 78.890625,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      },
+      "touchTargets": {
+        "icon": {
+          "x": 305,
+          "y": 138,
+          "width": 44,
+          "height": 44
+        },
+        "days": [
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          }
+        ],
+        "buttons": [
+          {
+            "width": 44,
+            "height": 44
+          },
+          {
+            "width": 194,
+            "height": 44
+          },
+          {
+            "width": 44,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.84375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 44.859375,
+            "height": 44
+          },
+          {
+            "width": 79.34375,
+            "height": 44
+          },
+          {
+            "width": 100.875,
+            "height": 44
+          }
+        ]
+      }
+    },
+    {
+      "width": 768,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "768-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 432,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 572,
+            "available": 548,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 500,
+            "available": 476,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 179,
+            "available": 155,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 179,
+            "available": 155,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 572,
+            "available": 548,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 500,
+            "available": 476,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 179,
+            "available": 155,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 179,
+            "available": 155,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 768,
+      "sidebar": "open",
+      "eros": "closed",
+      "name": "768-sidebar-open-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 432,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 400,
+            "available": 376,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 400,
+            "available": 376,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 328,
+            "available": 304,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 768,
+      "sidebar": "open",
+      "eros": "open",
+      "name": "768-sidebar-open-eros-open",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 418,
+        "y": 221,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 120,
+            "available": 96,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1024,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "1024-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 688,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1024,
+      "sidebar": "open",
+      "eros": "closed",
+      "name": "1024-sidebar-open-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 688,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 656,
+            "available": 632,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 584,
+            "available": 560,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 221,
+            "available": 197,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 221,
+            "available": 197,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 656,
+            "available": 632,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 584,
+            "available": 560,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 221,
+            "available": 197,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 221,
+            "available": 197,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1024,
+      "sidebar": "open",
+      "eros": "open",
+      "name": "1024-sidebar-open-eros-open",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 674,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 376,
+            "available": 352,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 376,
+            "available": 352,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 304,
+            "available": 280,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "closed",
+      "eros": "closed",
+      "name": "1440-sidebar-closed-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 1104,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "open",
+      "eros": "closed",
+      "name": "1440-sidebar-open-eros-closed",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 1104,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 808,
+            "available": 784,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 736,
+            "available": 712,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 297,
+            "available": 273,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 1440,
+      "sidebar": "open",
+      "eros": "open",
+      "name": "1440-sidebar-open-eros-open",
+      "failures": [],
+      "blockedExternalRequests": [],
+      "geometry": {
+        "x": 1090,
+        "y": 177,
+        "width": 324,
+        "height": 405.5
+      },
+      "dateReadability": {
+        "initial": [
+          {
+            "label": "Nacimiento",
+            "value": "15/05/1990",
+            "clientWidth": 792,
+            "available": 768,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "15/11/2026",
+            "clientWidth": 720,
+            "available": 696,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "15/11/2026",
+            "clientWidth": 289,
+            "available": 265,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "16/11/2026",
+            "clientWidth": 289,
+            "available": 265,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ],
+        "typed": [
+          {
+            "label": "Nacimiento",
+            "value": "29/02/2028",
+            "clientWidth": 792,
+            "available": 768,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Reunión",
+            "value": "20/11/2026",
+            "clientWidth": 720,
+            "available": 696,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Inicio opcional",
+            "value": "17/11/2026",
+            "clientWidth": 289,
+            "available": 265,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Entrega",
+            "value": "18/11/2026",
+            "clientWidth": 289,
+            "available": 265,
+            "required": 69.029296875,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "contact-real-375",
+      "width": 375,
+      "failures": [],
+      "dateReadability": {
+        "contact-editing": [
+          {
+            "label": "Fecha de nacimiento",
+            "value": "09/05/1992",
+            "clientWidth": 239,
+            "available": 215,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Renovación",
+            "value": "20/06/2026",
+            "clientWidth": 239,
+            "available": 215,
+            "required": 80.078125,
+            "font": "16px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      },
+      "syntheticServices": [
+        "useContactProfile",
+        "useGoogleContactSync",
+        "Avatar",
+        "ContactTagEditor",
+        "activityAuthorLabel",
+        "api"
+      ]
+    },
+    {
+      "name": "contact-real-1440",
+      "width": 1440,
+      "failures": [],
+      "dateReadability": {
+        "contact-editing": [
+          {
+            "label": "Fecha de nacimiento",
+            "value": "09/05/1992",
+            "clientWidth": 479,
+            "available": 455,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          },
+          {
+            "label": "Renovación",
+            "value": "20/06/2026",
+            "clientWidth": 1032,
+            "available": 1008,
+            "required": 70.068359375,
+            "font": "14px Arial, sans-serif",
+            "fits": true
+          }
+        ]
+      },
+      "syntheticServices": [
+        "useContactProfile",
+        "useGoogleContactSync",
+        "Avatar",
+        "ContactTagEditor",
+        "activityAuthorLabel",
+        "api"
+      ]
+    },
+    {
+      "name": "offline-real-csp-320",
+      "width": 320,
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; worker-src 'self'; base-uri 'none'; form-action 'self'",
+      "css": "offline-v4/offline-runtime.css + operational-date/operationalDate.css; no Tailwind",
+      "failures": [],
+      "cspViolations": [],
+      "styles": {
+        "position": "fixed",
+        "color": "rgb(15, 23, 42)",
+        "background": "rgb(255, 255, 255)",
+        "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "fieldFontSize": "14px",
+        "left": "0px",
+        "top": "376px",
+        "width": "320px",
+        "radius": "14px"
+      },
+      "touchTargets": {
+        "icon": {
+          "x": 262,
+          "y": 324,
+          "width": 44,
+          "height": 44
+        },
+        "days": [
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "width": 45.140625,
+            "height": 44
+          }
+        ],
+        "buttons": [
+          {
+            "label": "Mes anterior",
+            "width": 44,
+            "height": 44
+          },
+          {
+            "label": "Elegir mes y año",
+            "width": 206,
+            "height": 44
+          },
+          {
+            "label": "Mes siguiente",
+            "width": 44,
+            "height": 44
+          },
+          {
+            "label": "lunes, 26 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 27 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 28 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 29 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 30 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 31 de octubre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 1 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "lunes, 2 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 3 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 4 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 5 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 6 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 7 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 8 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "lunes, 9 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 10 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 11 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 12 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 13 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 14 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 15 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "lunes, 16 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 17 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 18 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 19 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 20 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 21 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 22 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "lunes, 23 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 24 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 25 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 26 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 27 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 28 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 29 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "lunes, 30 de noviembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "martes, 1 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 2 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "jueves, 3 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "viernes, 4 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "sábado, 5 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "domingo, 6 de diciembre de 2026",
+            "width": 45.140625,
+            "height": 44
+          },
+          {
+            "label": "Quitar",
+            "width": 65.09375,
+            "height": 44
+          },
+          {
+            "label": "Aplicar",
+            "width": 82.90625,
+            "height": 44
+          }
+        ]
+      },
+      "dateReadability": {
+        "offline-before-calendar": [
+          {
+            "label": "Fecha límite",
+            "value": "20/11/2026",
+            "clientWidth": 228,
+            "available": 208,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ],
+        "offline-before-save": [
+          {
+            "label": "Fecha límite",
+            "value": "22/11/2026",
+            "clientWidth": 228,
+            "available": 208,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "offline-real-csp-375",
+      "width": 375,
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; worker-src 'self'; base-uri 'none'; form-action 'self'",
+      "css": "offline-v4/offline-runtime.css + operational-date/operationalDate.css; no Tailwind",
+      "failures": [],
+      "cspViolations": [],
+      "styles": {
+        "position": "fixed",
+        "color": "rgb(15, 23, 42)",
+        "background": "rgb(255, 255, 255)",
+        "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "fieldFontSize": "14px",
+        "left": "39px",
+        "top": "376px",
+        "width": "324px",
+        "radius": "14px"
+      },
+      "touchTargets": {
+        "icon": {
+          "x": 317,
+          "y": 324,
+          "width": 44,
+          "height": 44
+        },
+        "days": [
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "width": 45.71875,
+            "height": 44
+          }
+        ],
+        "buttons": [
+          {
+            "label": "Mes anterior",
+            "width": 44,
+            "height": 44
+          },
+          {
+            "label": "Elegir mes y año",
+            "width": 210,
+            "height": 44
+          },
+          {
+            "label": "Mes siguiente",
+            "width": 44,
+            "height": 44
+          },
+          {
+            "label": "lunes, 26 de octubre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 27 de octubre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 28 de octubre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 29 de octubre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 30 de octubre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 31 de octubre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 1 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "lunes, 2 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 3 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 4 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 5 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 6 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 7 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 8 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "lunes, 9 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 10 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 11 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 12 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 13 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 14 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 15 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "lunes, 16 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 17 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 18 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 19 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 20 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 21 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 22 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "lunes, 23 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 24 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 25 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 26 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 27 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 28 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 29 de noviembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "lunes, 30 de noviembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "martes, 1 de diciembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "miércoles, 2 de diciembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "jueves, 3 de diciembre de 2026",
+            "width": 45.703125,
+            "height": 44
+          },
+          {
+            "label": "viernes, 4 de diciembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "sábado, 5 de diciembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "domingo, 6 de diciembre de 2026",
+            "width": 45.71875,
+            "height": 44
+          },
+          {
+            "label": "Quitar",
+            "width": 65.09375,
+            "height": 44
+          },
+          {
+            "label": "Aplicar",
+            "width": 82.90625,
+            "height": 44
+          }
+        ]
+      },
+      "dateReadability": {
+        "offline-before-calendar": [
+          {
+            "label": "Fecha límite",
+            "value": "20/11/2026",
+            "clientWidth": 283,
+            "available": 263,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ],
+        "offline-before-save": [
+          {
+            "label": "Fecha límite",
+            "value": "22/11/2026",
+            "clientWidth": 283,
+            "available": 263,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "offline-real-csp-1440",
+      "width": 1440,
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; worker-src 'self'; base-uri 'none'; form-action 'self'",
+      "css": "offline-v4/offline-runtime.css + operational-date/operationalDate.css; no Tailwind",
+      "failures": [],
+      "cspViolations": [],
+      "styles": {
+        "position": "fixed",
+        "color": "rgb(15, 23, 42)",
+        "background": "rgb(255, 255, 255)",
+        "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "fieldFontSize": "14px",
+        "left": "1091.55px",
+        "top": "170px",
+        "width": "324px",
+        "radius": "14px"
+      },
+      "touchTargets": null,
+      "dateReadability": {
+        "offline-before-calendar": [
+          {
+            "label": "Fecha límite",
+            "value": "20/11/2026",
+            "clientWidth": 102,
+            "available": 82,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ],
+        "offline-before-save": [
+          {
+            "label": "Fecha límite",
+            "value": "22/11/2026",
+            "clientWidth": 102,
+            "available": 82,
+            "required": 71.28515625,
+            "font": "14px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+            "fits": true
+          }
+        ]
+      }
+    }
+  ],
+  "errors": []
+}

@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -56,19 +57,48 @@ func TestPendingJIDNormalizationNeverReturnsPhoneDigits(t *testing.T) {
 	}
 }
 
-func TestShouldMergeMappedLIDContactRequiresSameAccountAndDifferentContacts(t *testing.T) {
+func TestMappedLIDContactNeverMergesCRMOnProviderObservation(t *testing.T) {
 	t.Parallel()
 	accountID := uuid.New()
 	canonical := &domain.Contact{ID: uuid.New(), AccountID: accountID}
-	source := &domain.Contact{ID: uuid.New(), AccountID: accountID}
-	if !shouldMergeMappedLIDContact(accountID, "65657383165996@lid", canonical, source) {
-		t.Fatal("expected a proven same-account LID duplicate to be mergeable")
+	// No repositories are attached: the compatibility hook must not perform a
+	// lookup, merge, delete or rewrite even for a proven mapping.
+	pool := &DevicePool{}
+	if got := pool.reconcileMappedLIDContact(context.Background(), accountID, "7001@lid", canonical); got != canonical {
+		t.Fatal("provider mapping replaced the canonical CRM identity")
 	}
-	if shouldMergeMappedLIDContact(accountID, "51904806007@s.whatsapp.net", canonical, source) {
-		t.Fatal("phone JIDs must not be treated as legacy LID duplicates")
+}
+
+func TestPrivateMessageChatJIDPreservesLegacyExactRoutes(t *testing.T) {
+	lid := types.NewJID("7001", types.HiddenUserServer)
+	pn := types.NewJID("51900000001", types.DefaultUserServer)
+	identity := peerIdentityResolution{JID: pn, LID: lid}
+	for _, chat := range []types.JID{lid, pn} {
+		if got := privateMessageChatJID(types.MessageSource{Chat: chat}, identity); got != chat.String() {
+			t.Fatalf("changed exact legacy route %s to %s", chat, got)
+		}
 	}
-	source.AccountID = uuid.New()
-	if shouldMergeMappedLIDContact(accountID, "65657383165996@lid", canonical, source) {
-		t.Fatal("cross-account contacts must never be merged")
+}
+
+func TestIncomingPNAltCannotIntroduceAnUnverifiedLID(t *testing.T) {
+	pn, lid := types.NewJID("51900000001", types.DefaultUserServer), types.NewJID("7001", types.HiddenUserServer)
+	source := types.MessageSource{Chat: pn, Sender: pn, SenderAlt: lid}
+	got := messageSourceWithVerifiedPNAlt(source, types.EmptyJID)
+	if got.Sender != pn || !got.SenderAlt.IsEmpty() {
+		t.Fatalf("provider-global alt became pair evidence: %+v", got)
+	}
+	if got := messageSourceWithVerifiedPNAlt(source, lid); got.SenderAlt != lid {
+		t.Fatal("already-scoped pair was discarded")
+	}
+	if got := messageSourceWithVerifiedPNAlt(source, types.NewJID("7002", types.HiddenUserServer)); !got.SenderAlt.IsEmpty() {
+		t.Fatal("different scoped LID legitimized stale global alias")
+	}
+	actualLID := types.MessageSource{Chat: lid, Sender: lid, SenderAlt: pn}
+	if got := messageSourceWithVerifiedPNAlt(actualLID, types.EmptyJID); got.SenderAlt != pn {
+		t.Fatal("wire LID-to-PN evidence was discarded")
+	}
+	ownOutgoing := types.MessageSource{Chat: lid, Sender: pn, SenderAlt: lid, RecipientAlt: pn, IsFromMe: true}
+	if got := messageSourceWithVerifiedPNAlt(ownOutgoing, types.EmptyJID); got.RecipientAlt != pn {
+		t.Fatal("own outgoing wire recipient alt was discarded")
 	}
 }

@@ -14,6 +14,7 @@ import (
 )
 
 var (
+	ErrReportSnapshotChanged     = errors.New("report snapshot changed")
 	ErrReportDeviceNotFound      = errors.New("report device not found")
 	ErrReportUnsupportedDevice   = errors.New("report device provider is not supported")
 	ErrReportDeviceNotConnected  = errors.New("report device is not connected")
@@ -36,7 +37,7 @@ func (s *ReportService) reportDevice(ctx context.Context, accountID, deviceID uu
 	if err != nil {
 		return nil, err
 	}
-	if device == nil || device.AccountID != accountID {
+	if device == nil || device.AccountID != accountID || device.Deletion != nil {
 		return nil, ErrReportDeviceNotFound
 	}
 	provider := domain.DeviceProviderWhatsAppWeb
@@ -81,6 +82,10 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 		return nil, translateWhatsAppReportError(err)
 	}
 
+	crmRevision, err := s.repos.Chat.CRMRevision(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
 	matches, err := s.repos.Report.MatchWhatsAppGroupMembers(ctx, accountID, snapshot.Members)
 	if err != nil {
 		return nil, err
@@ -100,11 +105,14 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 	}
 
 	report := &domain.WhatsAppGroupCoverageReport{
-		AccountID:          accountID,
-		LeadsEnabled:       policy.LeadsEnabled,
-		LeadsPolicyVersion: policy.Version,
-		GeneratedAt:        time.Now().UTC(),
-		Members:            make([]domain.WhatsAppGroupCoverageMember, 0, len(snapshot.Members)),
+		IdentityRevision:    snapshot.IdentityRevision,
+		GroupRevision:       snapshot.GroupRevision,
+		CRMIdentityRevision: crmRevision,
+		AccountID:           accountID,
+		LeadsEnabled:        policy.LeadsEnabled,
+		LeadsPolicyVersion:  policy.Version,
+		GeneratedAt:         time.Now().UTC(),
+		Members:             make([]domain.WhatsAppGroupCoverageMember, 0, len(snapshot.Members)),
 	}
 	report.Device.ID = device.ID
 	report.Device.Name = reportString(device.Name)
@@ -118,6 +126,7 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 	for _, identity := range snapshot.Members {
 		member := domain.WhatsAppGroupCoverageMember{
 			WhatsAppName:        identity.WhatsAppName,
+			Username:            identity.Username,
 			Phone:               identity.Phone,
 			RedactedPhone:       identity.RedactedPhone,
 			Role:                identity.Role,
@@ -171,6 +180,9 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 	if currentPolicy.Version != policy.Version || currentPolicy.LeadsEnabled != policy.LeadsEnabled {
 		return nil, repository.ErrLeadPolicyConflict
 	}
+	if err = s.ValidateWhatsAppCoverageSnapshot(ctx, accountID, WhatsAppCoverageSnapshotCheck{DeviceID: deviceID, GroupID: snapshot.ID, IdentityRevision: report.IdentityRevision, GroupRevision: report.GroupRevision, CRMIdentityRevision: report.CRMIdentityRevision, LeadsPolicyVersion: report.LeadsPolicyVersion, LeadsEnabled: report.LeadsEnabled}); err != nil {
+		return nil, err
+	}
 	return report, nil
 }
 
@@ -186,6 +198,8 @@ func whatsAppReportContactForPolicy(contact *domain.WhatsAppReportContact, leads
 
 func translateWhatsAppReportError(err error) error {
 	switch {
+	case errors.Is(err, whatsapp.ErrGroupReportSnapshotChanged), errors.Is(err, repository.ErrWhatsAppGroupSnapshotChanged), errors.Is(err, repository.ErrWhatsAppIdentitySessionChanged):
+		return ErrReportSnapshotChanged
 	case errors.Is(err, whatsapp.ErrGroupReportAccountMismatch):
 		return ErrReportDeviceNotFound
 	case errors.Is(err, whatsapp.ErrGroupReportDeviceNotConnected):

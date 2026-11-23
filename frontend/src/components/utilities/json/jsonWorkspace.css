@@ -1,0 +1,65 @@
+.json-editor-field {
+  --editor-selection: #a7f3d0;
+}
+
+/* Override the application-wide important form color only on editor fields. */
+[data-editor-theme] .json-editor-field {
+  color: var(--editor-ink) !important;
+  caret-color: var(--editor-ink);
+}
+
+[data-editor-theme='dark'] .json-editor-field {
+  --editor-selection: #065f46;
+}
+
+[data-editor-theme] .json-editor-field::placeholder {
+  color: var(--editor-muted) !important;
+  opacity: 1;
+}
+
+[data-editor-theme] .json-editor-field::selection {
+  background-color: var(--editor-selection);
+  color: var(--editor-ink);
+}
+
+.json-toolbar-icon {
+  width: var(--utility-control-size);
+  padding-inline: 0;
+}
+
+.json-toolbar-group {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  border-left: 1px solid var(--editor-border);
+  padding-left: 4px;
+}
+
+.json-editor-footer {
+  display: flex;
+  min-width: 0;
+  min-height: 44px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 4px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .json-editor-footer {
+    min-height: 28px;
+  }
+  .json-editor-footer .utility-control {
+    --utility-control-size: 28px;
+  }
+}
+
+@media (any-pointer: coarse) {
+  .json-editor-footer {
+    min-height: 44px;
+  }
+  .json-editor-footer .utility-control {
+    --utility-control-size: 44px;
+  }
+}

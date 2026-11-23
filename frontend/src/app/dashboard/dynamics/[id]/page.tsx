@@ -7,6 +7,8 @@ import { Dynamic, DynamicItem, DynamicConfig, DynamicOption, DynamicLink, Dynami
 import { compressImageStandard } from '@/utils/imageCompression';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import WhatsAppTextInput from '@/components/WhatsAppTextInput';
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker';
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields';
 import {
   ArrowLeft, Save, Images, Settings2, Link2, Plus, Trash2, GripVertical,
   Upload, ExternalLink, Copy, Check, Eye, EyeOff, Palette, Volume2, VolumeX,
@@ -1611,6 +1613,8 @@ function LinksTab({
   onLinksChange: (links: DynamicLink[]) => void;
   toast: { show: (text: string, type?: ToastType) => void };
 }) {
+  const createDates = useOperationalDateFields();
+  const editDates = useOperationalDateFields();
   const [creating, setCreating] = useState(false);
   const [newSlug, setNewSlug] = useState('');
   const [newWAEnabled, setNewWAEnabled] = useState(false);
@@ -1693,6 +1697,8 @@ function LinksTab({
 
   const handleCreate = async () => {
     if (!newSlug.trim()) return;
+    if (!createDates.validate()) return;
+    const startsAt = createDates.value('starts_at', newStartsAt), endsAt = createDates.value('ends_at', newEndsAt);
     try {
       const res = await api<DynamicLink>(`/api/dynamics/${dynamicId}/links`, {
         method: 'POST',
@@ -1700,8 +1706,8 @@ function LinksTab({
           slug: newSlug.trim(),
           whatsapp_enabled: newWAEnabled,
           whatsapp_message: newWAMessage,
-          starts_at: newStartsAt ? new Date(newStartsAt).toISOString() : null,
-          ends_at: newEndsAt ? new Date(newEndsAt).toISOString() : null,
+          starts_at: startsAt ? new Date(startsAt).toISOString() : null,
+          ends_at: endsAt ? new Date(endsAt).toISOString() : null,
         }),
       });
       if (res.success && res.data) {
@@ -1718,6 +1724,8 @@ function LinksTab({
   };
 
   const handleUpdate = async (link: DynamicLink) => {
+    if (!editDates.validate()) return;
+    const startsAt = editDates.value('starts_at', editStartsAt), endsAt = editDates.value('ends_at', editEndsAt);
     try {
       await api<DynamicLink>(`/api/dynamics/${dynamicId}/links/${link.id}`, {
         method: 'PUT',
@@ -1726,8 +1734,8 @@ function LinksTab({
           whatsapp_enabled: editWAEnabled,
           whatsapp_message: editWAMessage,
           is_active: editActive,
-          starts_at: editStartsAt ? new Date(editStartsAt).toISOString() : null,
-          ends_at: editEndsAt ? new Date(editEndsAt).toISOString() : null,
+          starts_at: startsAt ? new Date(startsAt).toISOString() : null,
+          ends_at: endsAt ? new Date(endsAt).toISOString() : null,
         }),
       });
       onLinksChange(links.map(l => l.id === link.id ? {
@@ -1737,8 +1745,8 @@ function LinksTab({
         whatsapp_message: editWAMessage,
         extra_media: editExtras,
         is_active: editActive,
-        starts_at: editStartsAt ? new Date(editStartsAt).toISOString() : null,
-        ends_at: editEndsAt ? new Date(editEndsAt).toISOString() : null,
+        starts_at: startsAt ? new Date(startsAt).toISOString() : null,
+        ends_at: endsAt ? new Date(endsAt).toISOString() : null,
       } : l));
       setEditingId(null);
       toast.show('Link actualizado');
@@ -1760,6 +1768,7 @@ function LinksTab({
   };
 
   const startEdit = (link: DynamicLink) => {
+    editDates.reset();
     setEditingId(link.id);
     setEditSlug(link.slug);
     setEditWAEnabled(link.whatsapp_enabled);
@@ -1778,7 +1787,7 @@ function LinksTab({
           <p className="text-xs text-slate-400 mt-0.5">Cada link tiene su propia URL, registro y configuración de WhatsApp</p>
         </div>
         <button
-          onClick={() => { setCreating(true); setNewSlug(generateSlug()); }}
+          onClick={() => { createDates.reset(); setCreating(true); setNewSlug(generateSlug()); }}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 transition-colors"
         >
           <Plus className="w-3.5 h-3.5" /> Nuevo link
@@ -1812,15 +1821,13 @@ function LinksTab({
               <label className="block text-xs font-medium text-slate-600 mb-1">
                 <Calendar className="w-3 h-3 inline mr-1" />Inicio (opcional)
               </label>
-              <input type="datetime-local" value={newStartsAt} onChange={e => setNewStartsAt(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+              <OperationalDatePicker mode="datetime" label="Inicio del nuevo enlace" value={newStartsAt} onChange={setNewStartsAt} onDraftStateChange={createDates.track('starts_at')} showQuickValues={false} />
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
                 <Calendar className="w-3 h-3 inline mr-1" />Fin (opcional)
               </label>
-              <input type="datetime-local" value={newEndsAt} onChange={e => setNewEndsAt(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+              <OperationalDatePicker mode="datetime" label="Fin del nuevo enlace" value={newEndsAt} onChange={setNewEndsAt} onDraftStateChange={createDates.track('ends_at')} showQuickValues={false} />
             </div>
           </div>
           <div className="flex items-center justify-between p-3 bg-white rounded-lg">
@@ -1892,15 +1899,13 @@ function LinksTab({
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       <Calendar className="w-3 h-3 inline mr-1" />Inicio (opcional)
                     </label>
-                    <input type="datetime-local" value={editStartsAt} onChange={e => setEditStartsAt(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+                    <OperationalDatePicker mode="datetime" label="Inicio del enlace" value={editStartsAt} onChange={setEditStartsAt} onDraftStateChange={editDates.track('starts_at')} showQuickValues={false} />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       <Calendar className="w-3 h-3 inline mr-1" />Fin (opcional)
                     </label>
-                    <input type="datetime-local" value={editEndsAt} onChange={e => setEditEndsAt(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+                    <OperationalDatePicker mode="datetime" label="Fin del enlace" value={editEndsAt} onChange={setEditEndsAt} onDraftStateChange={editDates.track('ends_at')} showQuickValues={false} />
                   </div>
                 </div>
                 <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">

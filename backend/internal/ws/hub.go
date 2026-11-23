@@ -28,61 +28,71 @@ const (
 
 // Event types for WebSocket communication
 const (
-	EventNewMessage             = "new_message"
-	EventMessageSent            = "message_sent"
-	EventMessageStatus          = "message_status"
-	EventDeviceStatus           = "device_status"
-	EventQRCode                 = "qr_code"
-	EventChatUpdate             = "chat_update"
-	EventChatIdentityReconciled = "chat_identity_reconciled"
-	EventPresence               = "presence"
-	EventTyping                 = "typing"
-	EventLeadUpdate             = "lead_update"
-	EventNotification           = "notification"
-	EventMessageReaction        = "message_reaction"
-	EventPollUpdate             = "poll_update"
-	EventInteractionUpdate      = "interaction_update"
-	EventMessageRevoked         = "message_revoked"
-	EventMessageEdited          = "message_edited"
-	EventMessageUpdated         = "message_updated"
-	EventEventParticipantUpdate = "event_participant_update"
-	EventHistorySyncComplete    = "history_sync_complete"
-	EventLogbookUpdate          = "logbook_update"
-	EventDynamicRegistration    = "dynamic_registration"
-	EventContactUpdate          = "contact_update"
-	EventVersionUpdate          = "version_update"
-	EventTaskUpdate             = "task_update"
-	EventTaskReminder           = "task_reminder"
-	EventTaskOverdue            = "task_overdue"
-	EventTaskMention            = "task_mention"
-	EventWorkEventUpdate        = "work_event_update"
-	EventWorkEventInvitation    = "work_event_invitation"
-	EventWorkEventRSVP          = "work_event_rsvp"
-	EventWorkEventReminder      = "work_event_reminder"
-	EventCustomFieldDefUpdate   = "custom_field_def_update"
-	EventWhatsAppStatus         = "whatsapp_status"
-	EventQuickReplyUpdate       = "quick_reply_update"
+	EventNewMessage                 = "new_message"
+	EventMessageSent                = "message_sent"
+	EventMessageStatus              = "message_status"
+	EventDeviceStatus               = "device_status"
+	EventQRCode                     = "qr_code"
+	EventChatUpdate                 = "chat_update"
+	EventChatIdentityReconciled     = "chat_identity_reconciled"
+	EventPresence                   = "presence"
+	EventTyping                     = "typing"
+	EventLeadUpdate                 = "lead_update"
+	EventNotification               = "notification"
+	EventMessageReaction            = "message_reaction"
+	EventPollUpdate                 = "poll_update"
+	EventInteractionUpdate          = "interaction_update"
+	EventMessageRevoked             = "message_revoked"
+	EventMessageEdited              = "message_edited"
+	EventMessageUpdated             = "message_updated"
+	EventEventParticipantUpdate     = "event_participant_update"
+	EventHistorySyncComplete        = "history_sync_complete"
+	EventLogbookUpdate              = "logbook_update"
+	EventDynamicRegistration        = "dynamic_registration"
+	EventContactUpdate              = "contact_update"
+	EventVersionUpdate              = "version_update"
+	EventTaskUpdate                 = "task_update"
+	EventTaskReminder               = "task_reminder"
+	EventTaskOverdue                = "task_overdue"
+	EventTaskMention                = "task_mention"
+	EventWorkEventUpdate            = "work_event_update"
+	EventWorkEventInvitation        = "work_event_invitation"
+	EventWorkEventRSVP              = "work_event_rsvp"
+	EventWorkEventReminder          = "work_event_reminder"
+	EventCustomFieldDefUpdate       = "custom_field_def_update"
+	EventWhatsAppStatus             = "whatsapp_status"
+	EventWhatsAppIdentityUpdated    = "whatsapp_identity_updated"
+	EventWhatsAppCRMIdentityUpdated = "whatsapp_crm_identity_updated"
+	EventQuickReplyUpdate           = "quick_reply_update"
 )
 
 // Message represents a WebSocket message
 type Message struct {
-	Event              string      `json:"event"`
-	AccountID          string      `json:"account_id,omitempty"`
-	DeviceID           string      `json:"device_id,omitempty"`
-	Data               interface{} `json:"data"`
-	RequiredPermission string      `json:"-"`
-	TargetUserIDs      []uuid.UUID `json:"-"`
+	Event                  string      `json:"event"`
+	AccountID              string      `json:"account_id,omitempty"`
+	DeviceID               string      `json:"device_id,omitempty"`
+	Data                   interface{} `json:"data"`
+	RequiredPermission     string      `json:"-"`
+	RequiredAnyPermissions []string    `json:"-"`
+	TargetUserIDs          []uuid.UUID `json:"-"`
 }
 
 // Client represents a connected WebSocket client
 type Client struct {
-	ID          string
-	AccountID   uuid.UUID
-	UserID      uuid.UUID
-	Conn        *websocket.Conn
-	Send        chan []byte
-	Hub         *Hub
-	Permissions map[string]bool
+	ID           string
+	AccountID    uuid.UUID
+	UserID       uuid.UUID
+	Conn         *websocket.Conn
+	Send         chan []byte
+	Hub          *Hub
+	Permissions  map[string]bool
+	sessionGuard *sessionGuard
+}
+
+// GuardSession binds this socket to the issuing session. The callback checks
+// current server authority without reporting activity.
+func (c *Client) GuardSession(deadline time.Time, validate func() (time.Time, int)) {
+	c.sessionGuard = newSessionGuard(deadline, validate)
 }
 
 // AuthorityEpoch is the local registration barrier for long-lived account
@@ -114,6 +124,22 @@ func clientCanReceive(client *Client, msg *Message) bool {
 	}
 	if !client.HasPermission(required) {
 		return false
+	}
+	anyPermissions := msg.RequiredAnyPermissions
+	if msg.Event == EventWhatsAppIdentityUpdated || msg.Event == EventWhatsAppCRMIdentityUpdated {
+		anyPermissions = []string{domain.PermChats, domain.PermReports}
+	}
+	if len(anyPermissions) > 0 {
+		allowed := false
+		for _, permission := range anyPermissions {
+			if permission != "" && client.HasPermission(permission) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
 	}
 	if len(msg.TargetUserIDs) > 0 {
 		for _, userID := range msg.TargetUserIDs {
@@ -366,6 +392,11 @@ func (h *Hub) BroadcastToAccountWithPermission(accountID uuid.UUID, permission, 
 	}
 }
 
+// BroadcastToAccountWithAnyPermission delivers one minimal cross-module notice.
+func (h *Hub) BroadcastToAccountWithAnyPermission(accountID uuid.UUID, permissions []string, event string, data interface{}) {
+	h.broadcast <- &Message{Event: event, AccountID: accountID.String(), Data: data, RequiredAnyPermissions: append([]string(nil), permissions...)}
+}
+
 // BroadcastToAccountUsersWithPermission targets only the selected users in an
 // account and still enforces the module permission on each live socket.
 func (h *Hub) BroadcastToAccountUsersWithPermission(accountID uuid.UUID, userIDs []uuid.UUID, permission, event string, data interface{}) {
@@ -454,6 +485,9 @@ func (c *Client) ReadPump() {
 			log.Printf("[WS Client] Invalid message format: %v", err)
 			continue
 		}
+		if !c.checkSession() {
+			return
+		}
 
 		// Process client message (e.g., typing indicators, read receipts)
 		c.handleMessage(&msg)
@@ -463,6 +497,13 @@ func (c *Client) ReadPump() {
 // WritePump writes messages to the WebSocket connection
 func (c *Client) WritePump() {
 	ticker := time.NewTicker(pingInterval)
+	var checkTimer *time.Timer
+	var checkTime <-chan time.Time
+	if c.sessionGuard != nil {
+		checkTimer = time.NewTimer(c.sessionGuard.delay())
+		checkTime = checkTimer.C
+		defer checkTimer.Stop()
+	}
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
@@ -477,6 +518,9 @@ func (c *Client) WritePump() {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
+			if !c.checkSession() {
+				return
+			}
 
 			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Printf("[WS Client] Write error: %v", err)
@@ -489,8 +533,29 @@ func (c *Client) WritePump() {
 				log.Printf("[WS Client] Ping error: %v", err)
 				return
 			}
+		case <-checkTime:
+			if !c.checkSession() {
+				return
+			}
+			checkTimer.Reset(c.sessionGuard.delay())
 		}
 	}
+}
+
+func (c *Client) checkSession() bool {
+	if c.sessionGuard == nil {
+		return true
+	}
+	code := c.sessionGuard.check(time.Now())
+	if code == 0 {
+		return true
+	}
+	message := "session invalidated"
+	if code == websocket.CloseTryAgainLater {
+		message = "authorization unavailable"
+	}
+	_ = c.Conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, message), time.Now().Add(time.Second))
+	return false
 }
 
 // handleMessage processes incoming messages from the client

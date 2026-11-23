@@ -1,7 +1,10 @@
 'use client'
 
+import type { ContactDetailSurfaceHandle } from '@/components/contact-details/ContactDetailSurface'
+
 import { useEffect, useState, useCallback, useMemo, useRef, memo } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
 import {
   ArrowLeft, Users, UserPlus, Search, Phone, MessageSquare, Mail,
   CheckCircle2, Clock, GripVertical, List, LayoutGrid, X, Plus, Trash2,
@@ -591,6 +594,13 @@ export default function EventDetailPage() {
 
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
+  const contactDetailRef = useRef<ContactDetailSurfaceHandle>(null)
+  const detachedDirtyRef = useRef(false)
+  const reportDetachedDirty = useCallback((dirty: boolean) => { detachedDirtyRef.current = dirty }, [])
+  const canLeaveDetail = useCallback(() => {
+    if (contactDetailRef.current && !contactDetailRef.current.canClose()) return false
+    return !detachedDirtyRef.current || window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')
+  }, [])
   const [detailParticipant, setDetailParticipant] = useState<Participant | null>(null)
   const [detailParticipantLoading, setDetailParticipantLoading] = useState(false)
   const [detailParticipantError, setDetailParticipantError] = useState('')
@@ -1260,6 +1270,7 @@ export default function EventDetailPage() {
 
   // ─── Detail Panel ──────────────────────────────────────────────────────────
   const openDetailPanel = useCallback((p: Participant) => {
+    if (showDetailPanel && detailParticipant?.id !== p.id && !canLeaveDetail()) return
     resetInlineChatState()
     setDetailParticipant(p)
     setShowDetailPanel(true)
@@ -1292,7 +1303,7 @@ export default function EventDetailPage() {
         if (requestID === detailParticipantRequestRef.current) setDetailParticipantLoading(false)
       }
     })()
-  }, [eventId, fetchParticipantsPaginated, resetInlineChatState])
+  }, [eventId, fetchParticipantsPaginated, resetInlineChatState, showDetailPanel, detailParticipant?.id, canLeaveDetail])
 
   const handleViewExistingParticipant = useCallback((person: SelectedPerson) => {
     if (!person.participant_id) return
@@ -1724,7 +1735,7 @@ export default function EventDetailPage() {
       if (showInlineChat) { closeLayer(closeInlineChatAndRestoreFocus); return }
       if (showMoreMenu) { closeLayer(() => setShowMoreMenu(false)); return }
       if (showFilterDropdown) { closeLayer(() => setShowFilterDropdown(false)); return }
-      if (showDetailPanel) { closeLayer(() => { setShowDetailPanel(false); resetInlineChatState() }); return }
+      if (showDetailPanel) { closeLayer(() => { if (!canLeaveDetail()) return; setShowDetailPanel(false); resetInlineChatState() }); return }
       if (selectionMode) { closeLayer(() => { setSelectionMode(false); setSelectedIds(new Set()) }); return }
       // If in logbook mode, return to kanban view instead of leaving the event
       // No modals open — go back to events list (preserves folder state)
@@ -2044,11 +2055,11 @@ export default function EventDetailPage() {
                         <div className="mt-2 space-y-1.5">
                           <div>
                             <label className="text-[9px] font-semibold text-slate-400 uppercase">Desde</label>
-                            <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                            <OperationalDatePicker mode="date" label="Desde" value={filterDateFrom} onChange={setFilterDateFrom} showQuickValues={false} compact />
                           </div>
                           <div>
                             <label className="text-[9px] font-semibold text-slate-400 uppercase">Hasta</label>
-                            <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                            <OperationalDatePicker mode="date" label="Hasta" value={filterDateTo} onChange={setFilterDateTo} showQuickValues={false} compact />
                           </div>
                         </div>
                       )}
@@ -2679,7 +2690,7 @@ export default function EventDetailPage() {
           align="right"
           overlayZIndex={110}
           temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"
-          onRequestClose={() => { setShowDetailPanel(false); resetInlineChatState() }}
+          onRequestClose={() => { if (!canLeaveDetail()) return; setShowDetailPanel(false); resetInlineChatState() }}
           contentClassName="min-h-0 flex-1 overflow-hidden"
         >
           <CrmDetailWorkspace
@@ -2699,6 +2710,7 @@ export default function EventDetailPage() {
             ) : undefined}
             detail={detailParticipant.contact_id ? (
               <ContactDetailSurface
+                ref={contactDetailRef}
                 contactId={detailParticipant.contact_id}
                 context={{ type: 'event_participant', id: detailParticipant.id }}
                 initialContact={{
@@ -2763,6 +2775,7 @@ export default function EventDetailPage() {
               />
             ) : (
               <DetachedEventParticipantDetail
+                onDirtyChange={reportDetachedDirty}
                 participant={detailParticipant}
                 eventName={event?.name || 'Evento'}
                 readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'}

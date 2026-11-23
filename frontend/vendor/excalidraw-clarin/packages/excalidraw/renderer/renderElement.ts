@@ -77,6 +77,8 @@ import {
 } from "../element/clarinRichText";
 import type { FontString } from "../element/types";
 import { getClarinVisualLineLayouts } from "./clarinParagraphAlignment";
+import { getClarinCharacterStyle } from "../element/clarinCharacterStyle";
+import { drawClarinCharacterText } from "./clarinCharacterRendering";
 
 // using a stronger invert (100% vs our regular 93%) and saturate
 // as a temp hack to make images in dark theme look closer to original
@@ -514,7 +516,9 @@ const drawElementOnCanvas = (
           lineHeightPx,
         );
 
-        for (let index = 0; index < lines.length; index++) {
+        if (getClarinCharacterStyle(element)?.runs.length) {
+          drawClarinCharacterText(context, element);
+        } else for (let index = 0; index < lines.length; index++) {
           const baseline = index * lineHeightPx + verticalOffset;
           const lineTextAlign =
             visualLineLayouts[index]?.textAlign || element.textAlign;

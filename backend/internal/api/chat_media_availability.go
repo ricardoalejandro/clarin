@@ -81,8 +81,26 @@ func (s *Server) projectCachedChatMedia(ctx context.Context, accountID uuid.UUID
 	if err := json.Unmarshal(envelope["messages"], &messages); err != nil {
 		return nil, err
 	}
+	// Older cache entries may contain null for a valid empty history. Keep the
+	// collection contract identical to a fresh empty page.
+	if messages == nil {
+		messages = []*domain.Message{}
+	}
 	if err := s.projectChatMedia(ctx, accountID, messages); err != nil {
 		return nil, err
+	}
+	if s.repos != nil && s.repos.Message != nil {
+		byChat := make(map[uuid.UUID][]*domain.Message)
+		for _, message := range messages {
+			if message != nil && message.AccountID == accountID {
+				byChat[message.ChatID] = append(byChat[message.ChatID], message)
+			}
+		}
+		for chatID, group := range byChat {
+			if err := s.repos.Message.HydrateLinkPreviews(ctx, accountID, chatID, group); err != nil {
+				return nil, err
+			}
+		}
 	}
 	raw, err := json.Marshal(messages)
 	if err != nil {

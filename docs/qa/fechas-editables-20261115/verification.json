@@ -1,0 +1,39 @@
+{
+  "node": "24.22.3",
+  "applicationUnit": {
+    "files": 486,
+    "passed": 3188
+  },
+  "editorUnitPassed": 62,
+  "scriptUnitPassed": 48,
+  "focusedKeyboard": {
+    "files": 10,
+    "passed": 127
+  },
+  "focusedResponsive": {
+    "files": 7,
+    "passed": 45
+  },
+  "optionalStartRemovalPassed": 1,
+  "typecheck": "passed",
+  "productionBuild": "passed",
+  "productionCssArtifactsVerified": 9,
+  "browser": {
+    "current": 16,
+    "baseline": 4,
+    "cspViolations": 0,
+    "widths": [
+      320,
+      375,
+      768,
+      1024,
+      1440
+    ],
+    "completeDateTextMeasured": true
+  },
+  "inventory": {
+    "nativeDateInputs": 0,
+    "sharedControlOccurrences": 67
+  },
+  "deployment": "separate step; not performed"
+}

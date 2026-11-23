@@ -135,6 +135,13 @@ func (p *DevicePool) DeleteDevice(ctx context.Context, accountID, deviceID uuid.
 			return nil, repository.ErrDeviceSessionConflict
 		}
 		fingerprint = deviceSessionFingerprint(waDevice)
+		// Preserve only the authenticated ownership ledger before the session is
+		// removed. History reconciliation is a separate connection/sync operation.
+		if waDevice != nil && waDevice.ID != nil {
+			if _, err = p.repos.Chat.BindWhatsAppOwner(ctx, accountID, deviceID, waDevice.ID.ToNonAD().String(), waDevice.LID.ToNonAD().String(), fingerprint); err != nil {
+				return nil, err
+			}
+		}
 	}
 	result, err := p.repos.Device.BeginDeletion(ctx, accountID, deviceID, jid, fingerprint)
 	if err != nil {

@@ -7,6 +7,9 @@ describe('resolveTaskDetailEscape', () => {
     expect(resolveTaskDetailEscape(true, null)).toBe('defer')
     expect(TASK_PICKER_BLOCKING_LAYER_SELECTOR).toContain('[data-task-date-range-picker]')
     expect(TASK_DETAIL_ESCAPE_LAYER_SELECTOR).toContain('[data-task-date-range-backdrop]')
+    expect(TASK_PICKER_BLOCKING_LAYER_SELECTOR).toContain('[data-operational-date-picker]')
+    expect(TASK_PICKER_BLOCKING_LAYER_SELECTOR).toContain('[data-operational-picker-backdrop]')
+    expect(TASK_PICKER_BLOCKING_LAYER_SELECTOR).not.toContain('[data-task-date-range-field]')
   })
 
   it('returns from a subtask to its parent before closing the task window', () => {

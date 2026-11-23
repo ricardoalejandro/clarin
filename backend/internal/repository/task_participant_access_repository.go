@@ -53,6 +53,10 @@ func lockTaskActorAndMembershipsTx(
 	if actorID == uuid.Nil {
 		return nil, ErrTaskWorkNotFound
 	}
+	// Reserve the account FK before actor/barrier locks, matching container purge.
+	if err := lockTaskContainerAccountReferenceTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
 	if err := lockUserAuthorityTx(ctx, tx, actorID); err != nil {
 		return nil, err
 	}

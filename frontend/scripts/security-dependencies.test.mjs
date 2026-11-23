@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 const require = createRequire(import.meta.url)
 
 test('runtime pins the same official Node LTS image for build and execution', () => {
-  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8')
+  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const images = [...dockerfile.matchAll(/^FROM (\S+) AS (?:builder|runner)$/gm)].map(match => match[1])
   assert.equal(images.length, 2)
   assert.equal(images[0], images[1])
@@ -16,7 +16,7 @@ test('runtime pins the same official Node LTS image for build and execution', ()
 })
 
 test('non-root runtime keeps private-mode public assets readable without granting ownership', () => {
-  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8')
+  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   assert.match(dockerfile, /^COPY --from=builder \/app\/public \.\/public$/m)
   assert.match(dockerfile, /^RUN chmod -R a\+rX \/app\/public/m)
   assert.match(dockerfile, /^USER node\nCMD \["node", "server\.js"\]/m)
@@ -56,6 +56,26 @@ test('login is no-store and permits only the official Turnstile script and frame
 test('Mermaid conversion stays on the patched Excalidraw release and compatible local renderer', () => {
   assert.equal(require('@excalidraw/mermaid-to-excalidraw/package.json').version, '2.2.2')
   assert.equal(require('mermaid/package.json').version, '11.16.1')
+})
+
+test('KaTeX used by Mermaid ignores inherited trust options', async () => {
+  const mermaidRequire = createRequire(require.resolve('mermaid'))
+  const katexManifest = mermaidRequire.resolve('katex/package.json')
+  assert.equal(mermaidRequire(katexManifest).version, '0.18.2')
+  const { default: katex } = await import(new URL('dist/katex.mjs', pathToFileURL(katexManifest)).href)
+  const formula = '\\href{https://example.invalid}{x}'
+  const options = { output: 'mathml' }
+  const inheritedTrust = Object.assign(Object.create({ trust: true }), options)
+  assert.match(katex.renderToString('x^2', options), /<msup>/)
+  assert.match(katex.renderToString(formula, { ...options, trust: true }), /href="https:\/\/example\.invalid"/)
+  assert.doesNotMatch(katex.renderToString(formula, inheritedTrust), /href="/)
+
+  Object.defineProperty(Object.prototype, 'trust', { value: true, configurable: true, writable: true })
+  try {
+    assert.doesNotMatch(katex.renderToString(formula, options), /href="/)
+  } finally {
+    delete Object.prototype.trust
+  }
 })
 
 for (const name of ['lodash', 'lodash-es']) {
@@ -113,9 +133,11 @@ for (const [name, resolver] of [
 }
 
 
-test('document runtime locks patched Next, image decoder and PDF sanitizer releases', () => {
- const lock=JSON.parse(readFileSync(new URL('../package-lock.json',import.meta.url),'utf8'))
- assert.equal(lock.packages['node_modules/next'].version,'16.3.8')
- assert.equal(lock.packages['node_modules/sharp'].version,'0.35.5')
- assert.equal(lock.packages['node_modules/dompurify'].version,'3.4.16')
+test('the runtime and Monaco resolve the audited Next, image decoder and sanitizer releases', () => {
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
+  assert.equal(lock.packages['node_modules/next'].version, '16.4.1')
+  assert.equal(lock.packages['node_modules/sharp'].version, '0.35.5')
+  assert.equal(lock.packages['node_modules/dompurify'].version, '3.4.17')
+  assert.equal(lock.packages['node_modules/monaco-editor'].version, '0.57.0')
+  assert.equal(lock.packages['node_modules/monaco-editor/node_modules/dompurify'], undefined)
 })

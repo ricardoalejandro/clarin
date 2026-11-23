@@ -1,5 +1,7 @@
 import React from 'react'
 import { splitEmojiSegments } from '@/utils/appleEmoji'
+import { findWebLinks } from '@/lib/webLinks'
+import { WebLink } from '@/components/WebText'
 
 /**
  * WhatsApp text formatting:
@@ -13,6 +15,7 @@ import { splitEmojiSegments } from '@/utils/appleEmoji'
 interface FormatToken {
   type: 'text' | 'bold' | 'italic' | 'strike' | 'mono' | 'code_block' | 'url'
   content: string
+  href?: string
 }
 
 // URL regex that matches http(s) URLs and common domain patterns
@@ -20,6 +23,7 @@ const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`[\]]+|(?:www\.)[^\s<>"{}|\\^`[\]]+/g
 
 function tokenize(text: string): FormatToken[] {
   const tokens: FormatToken[] = []
+  const links = new Map(findWebLinks(text).map(link => [link.start, link]))
   let i = 0
 
   while (i < text.length) {
@@ -44,6 +48,13 @@ function tokenize(text: string): FormatToken[] {
     }
 
     // Bold: *...*
+    const link = links.get(i)
+    if (link) {
+      tokens.push({ type: 'url', content: link.text, href: link.href })
+      i = link.end
+      continue
+    }
+
     if (text[i] === '*') {
       const end = findClosing(text, i, '*')
       if (end !== -1) {
@@ -75,49 +86,30 @@ function tokenize(text: string): FormatToken[] {
 
     // Regular text - collect until next potential format char
     let j = i + 1
-    while (j < text.length && !'*_~`'.includes(text[j])) {
+    while (j < text.length && !'*_~`'.includes(text[j]) && !links.has(j)) {
       j++
     }
     tokens.push({ type: 'text', content: text.slice(i, j) })
     i = j
   }
 
-  // Post-process: split text tokens that contain URLs
-  return splitUrlsInTokens(tokens)
-}
-
-function splitUrlsInTokens(tokens: FormatToken[]): FormatToken[] {
-  const result: FormatToken[] = []
-  for (const token of tokens) {
-    if (token.type !== 'text') {
-      result.push(token)
-      continue
-    }
-    const text = token.content
-    URL_REGEX.lastIndex = 0
-    let lastIndex = 0
-    let match: RegExpExecArray | null
-    while ((match = URL_REGEX.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        result.push({ type: 'text', content: text.slice(lastIndex, match.index) })
-      }
-      result.push({ type: 'url', content: match[0] })
-      lastIndex = match.index + match[0].length
-    }
-    if (lastIndex < text.length && lastIndex > 0) {
-      result.push({ type: 'text', content: text.slice(lastIndex) })
-    }
-    if (lastIndex === 0) {
-      result.push(token)
-    }
-  }
-  return result
+  return tokens
 }
 
 function findClosing(text: string, start: number, char: string): number {
   // WhatsApp requires: no whitespace right after opening marker, no whitespace right before closing marker
   if (start + 1 >= text.length || /\s/.test(text[start + 1])) return -1
+  const links = new Map(findWebLinks(text.slice(start + 1)).map(link => [start + 1 + link.start, link]))
   for (let i = start + 1; i < text.length; i++) {
+    const link = links.get(i)
+    if (link) {
+      // Markers inside a URL are path/query characters. Only its final marker
+      // can close the surrounding WhatsApp format.
+      const end = start + 1 + link.end
+      if (link.text.endsWith(char)) return end - 1
+      i = end - 1
+      continue
+    }
     if (text[i] === char) {
       // Character before closing marker must not be whitespace
       if (i > start + 1 && !/\s/.test(text[i - 1])) {
@@ -130,6 +122,15 @@ function findClosing(text: string, start: number, char: string): number {
     }
   }
   return -1
+}
+
+/** Match preview metadata against precisely the links the message renderer exposes. */
+export function formattedWebHrefs(text: string): string[] {
+  return tokenize(text).flatMap(token => {
+    if (token.type === 'url') return [token.href!]
+    if (token.type === 'bold' || token.type === 'italic' || token.type === 'strike') return formattedWebHrefs(token.content)
+    return []
+  })
 }
 
 function renderInlineFormattedText(text: string): React.ReactNode[] {
@@ -155,17 +156,8 @@ function renderInlineFormattedText(text: string): React.ReactNode[] {
           </pre>
         )
       case 'url': {
-        const href = token.content.startsWith('http') ? token.content : `https://${token.content}`
         return (
-          <a
-            key={i}
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-blue-600 underline hover:text-blue-800 break-all"
-          >
-            {token.content}
-          </a>
+          <WebLink key={i} href={token.href!}>{token.content}</WebLink>
         )
       }
       default: {
@@ -201,14 +193,14 @@ function renderFormattedLines(text: string, keyPrefix: string): React.ReactNode[
       nodes.push(
         <span key={`${keyPrefix}-line-${index}`} data-whatsapp-prefix={`${bullet[1]} `} className="inline-flex w-full gap-2 pl-1">
           <span data-whatsapp-ignore="true" aria-hidden="true">•</span>
-          <span>{renderInlineFormattedText(bullet[2])}</span>
+          <span className="min-w-0">{renderInlineFormattedText(bullet[2])}</span>
         </span>,
       )
     } else if (numbered) {
       nodes.push(
         <span key={`${keyPrefix}-line-${index}`} data-whatsapp-prefix={numbered[1]} className="inline-flex w-full gap-2 pl-1">
           <span data-whatsapp-ignore="true" aria-hidden="true">{numbered[1].trim()}</span>
-          <span>{renderInlineFormattedText(numbered[2])}</span>
+          <span className="min-w-0">{renderInlineFormattedText(numbered[2])}</span>
         </span>,
       )
     } else if (quote) {

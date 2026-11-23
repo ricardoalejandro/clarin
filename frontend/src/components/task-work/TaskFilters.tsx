@@ -31,7 +31,8 @@ import {
   TaskWorkflowStatus,
 } from '@/types/task'
 import type { TaskAccountUser } from './TaskEditorModal'
-import TaskDateTimePicker from './TaskDateTimePicker'
+import OperationalDatePicker from '../operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
 import TaskWorkWindowShell from './TaskWorkWindowShell'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
@@ -150,7 +151,7 @@ function Choice({ checked, label, detail, onChange }: { checked: boolean; label:
   </button>
 }
 
-function FilterPanel({ filters, statuses, users, onChange }: Omit<Props, 'scope' | 'view' | 'collapsedStatusIds' | 'groupBy' | 'groupDirection' | 'collapsedGroupKeys' | 'onApplyView' | 'applyDefaultOnLoad' | 'onDefaultLoadHandled' | 'onError'>) {
+function FilterPanel({ filters, statuses, users, onChange, dateFields }: Omit<Props, 'scope' | 'view' | 'collapsedStatusIds' | 'groupBy' | 'groupDirection' | 'collapsedGroupKeys' | 'onApplyView' | 'applyDefaultOnLoad' | 'onDefaultLoadHandled' | 'onError'> & { dateFields: ReturnType<typeof useOperationalDateFields> }) {
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useDebouncedValue(query)
   const needle = debouncedQuery.trim().toLocaleLowerCase('es')
@@ -173,10 +174,10 @@ function FilterPanel({ filters, statuses, users, onChange }: Omit<Props, 'scope'
 
       <div className="mt-4 grid gap-3 border-t border-slate-100 pt-4 md:grid-cols-3">
         <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Vencimiento<select value={filters.due} onChange={event => set('due', event.target.value as TaskDueFilter)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400">{dueOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-        <TaskDateTimePicker label="Creada desde" allDay value={filters.created_from ? `${filters.created_from}T12:00` : ''} onChange={value => set('created_from', value ? value.slice(0, 10) : '')} />
-        <TaskDateTimePicker label="Creada hasta" allDay value={filters.created_to ? `${filters.created_to}T12:00` : ''} onChange={value => set('created_to', value ? value.slice(0, 10) : '')} />
-        <TaskDateTimePicker label="Completada desde" allDay value={filters.completed_from ? `${filters.completed_from}T12:00` : ''} onChange={value => set('completed_from', value ? value.slice(0, 10) : '')} />
-        <TaskDateTimePicker label="Completada hasta" allDay value={filters.completed_to ? `${filters.completed_to}T12:00` : ''} onChange={value => set('completed_to', value ? value.slice(0, 10) : '')} />
+        <OperationalDatePicker mode="date" label="Creada desde" value={filters.created_from} max={filters.created_to} onDraftStateChange={dateFields.track('created_from')} onChange={value => set('created_from', value)} />
+        <OperationalDatePicker mode="date" label="Creada hasta" value={filters.created_to} min={filters.created_from} onDraftStateChange={dateFields.track('created_to')} onChange={value => set('created_to', value)} />
+        <OperationalDatePicker mode="date" label="Completada desde" value={filters.completed_from} max={filters.completed_to} onDraftStateChange={dateFields.track('completed_from')} onChange={value => set('completed_from', value)} />
+        <OperationalDatePicker mode="date" label="Completada hasta" value={filters.completed_to} min={filters.completed_from} onDraftStateChange={dateFields.track('completed_to')} onChange={value => set('completed_to', value)} />
       </div>
 
       <section className="mt-4 border-t border-slate-100 pt-4"><h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Contenido</h4><div className="grid gap-1 sm:grid-cols-2">{([
@@ -305,6 +306,7 @@ export function TaskFilterChips({ filters, statuses, users, onChange, onOpenFilt
 }
 
 export default function TaskFilterToolbar({ filters, statuses, users, storageScope, scope, view, collapsedStatusIds, groupBy, groupDirection, collapsedGroupKeys, onChange, onApplyView, applyDefaultOnLoad, onDefaultLoadHandled, onError, showChips = true, compact = false, betweenControls }: Props) {
+  const dateFields = useOperationalDateFields()
   const filterButtonRef = useRef<HTMLButtonElement>(null)
   const viewsButtonRef = useRef<HTMLButtonElement>(null)
   const [mode, setMode] = useState<'filters' | 'views' | null>(null)
@@ -355,6 +357,7 @@ export default function TaskFilterToolbar({ filters, statuses, users, storageSco
   const openFilters = () => {
     if (mode === 'filters') { setMode(null); return }
     setFilterDraft(normalizeTaskFilters(filters))
+    dateFields.reset()
     setMode('filters')
   }
   const closeFilters = () => {
@@ -362,7 +365,11 @@ export default function TaskFilterToolbar({ filters, statuses, users, storageSco
     requestAnimationFrame(() => filterButtonRef.current?.focus())
   }
   const applyFilters = () => {
-    onChange(normalizeTaskFilters(filterDraft))
+    if (!dateFields.validate()) return
+    const next = { ...filterDraft }
+    for (const key of ['created_from', 'created_to', 'completed_from', 'completed_to'] as const) next[key] = dateFields.value(key, filterDraft[key])
+    if (next.created_from && next.created_to && next.created_from > next.created_to || next.completed_from && next.completed_to && next.completed_from > next.completed_to) { onError('La fecha final del filtro no puede ser anterior a la inicial.'); return }
+    onChange(normalizeTaskFilters(next))
     closeFilters()
   }
   const chips = taskFilterChips(filters, uniqueStatuses, users)
@@ -374,7 +381,7 @@ export default function TaskFilterToolbar({ filters, statuses, users, storageSco
     {showChips && chips.slice(0, 4).map(chip => <span key={`${chip.key}:${chip.value || chip.label}`} className="inline-flex max-w-36 items-center gap-1 rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-semibold text-slate-600"><span className="truncate">{chip.label}</span><button type="button" onClick={() => onChange(removeFilterChip(filters, chip.key, chip.value))} aria-label={`Quitar ${chip.label}`} className="rounded text-slate-400 hover:text-slate-700"><X className="h-3 w-3" /></button></span>)}
     {showChips && chips.length > 4 && <button type="button" onClick={openFilters} className="rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-500">+{chips.length - 4}</button>}
 
-    <TaskWorkWindowShell open={mode === 'filters'} storageKey="clarin:tasks:filter-window" storageScope={storageScope} title="Filtrar tareas" eyebrow="Clarin Work" description="Prepara varios criterios y aplícalos juntos sin recargar el trabajo por cada clic." icon={Filter} defaultWidth={760} defaultHeight={720} minWidth={520} minHeight={500} onRequestClose={closeFilters} dataAttribute="task-filter-window" footer={<div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => setFilterDraft({ ...EMPTY_TASK_FILTERS })} disabled={!taskFilterCount(filterDraft)} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-white disabled:opacity-35">Limpiar borrador</button><button type="button" onClick={closeFilters} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-white">Cancelar</button><button type="button" onClick={applyFilters} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-lg shadow-emerald-600/15 transition hover:bg-emerald-700"><Check className="h-4 w-4" />Aplicar filtros ({taskFilterCount(filterDraft)})</button></div>}><FilterPanel filters={filterDraft} statuses={uniqueStatuses} users={users} onChange={setFilterDraft} /></TaskWorkWindowShell>
+    <TaskWorkWindowShell open={mode === 'filters'} storageKey="clarin:tasks:filter-window" storageScope={storageScope} title="Filtrar tareas" eyebrow="Clarin Work" description="Prepara varios criterios y aplícalos juntos sin recargar el trabajo por cada clic." icon={Filter} defaultWidth={760} defaultHeight={720} minWidth={520} minHeight={500} onRequestClose={closeFilters} dataAttribute="task-filter-window" footer={<div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => { dateFields.reset(); setFilterDraft({ ...EMPTY_TASK_FILTERS }) }} disabled={!taskFilterCount(filterDraft)} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-white disabled:opacity-35">Limpiar borrador</button><button type="button" onClick={closeFilters} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-white">Cancelar</button><button type="button" onClick={applyFilters} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-lg shadow-emerald-600/15 transition hover:bg-emerald-700"><Check className="h-4 w-4" />Aplicar filtros ({taskFilterCount(filterDraft)})</button></div>}><FilterPanel filters={filterDraft} statuses={uniqueStatuses} users={users} dateFields={dateFields} onChange={setFilterDraft} /></TaskWorkWindowShell>
     {mode === 'views' && typeof document !== 'undefined' && createPortal(<><button type="button" aria-label="Cerrar panel" onMouseDown={close} className="fixed inset-0 cursor-default bg-slate-950/30 backdrop-blur-[2px]" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><div role="dialog" aria-modal="true" aria-label="Vistas guardadas" style={{ ...style, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} className="fixed overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/25"><SavedViewsPanel views={views} loading={viewsLoading} filters={filters} scope={scope} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onReload={loadViews} onApply={saved => { onApplyView({ ...saved, filters: normalizeTaskFilters(saved.filters) }); close() }} onError={onError} onClose={close} /></div></>, document.body)}
   </div>
 }

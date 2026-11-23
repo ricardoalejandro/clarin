@@ -631,7 +631,7 @@ describe('whiteboard frontend contracts', () => {
         },
       },
       scene_schema_version: 'excalidraw',
-      editor_version: '0.18.1-clarin.8',
+      editor_version: '0.18.1-clarin.9',
     })
   })
 

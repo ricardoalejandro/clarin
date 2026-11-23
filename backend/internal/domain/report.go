@@ -26,6 +26,7 @@ type WhatsAppGroupOption struct {
 type WhatsAppGroupReportIdentity struct {
 	Ordinal       int     `json:"-"`
 	WhatsAppName  string  `json:"whatsapp_name"`
+	Username      string  `json:"username,omitempty"`
 	Phone         *string `json:"phone"`
 	RedactedPhone *string `json:"redacted_phone"`
 	PhoneJID      string  `json:"-"`
@@ -35,6 +36,8 @@ type WhatsAppGroupReportIdentity struct {
 }
 
 type WhatsAppGroupSnapshot struct {
+	IdentityRevision int64                         `json:"-"`
+	GroupRevision    int64                         `json:"-"`
 	ID               string                        `json:"id"`
 	Name             string                        `json:"name"`
 	ParticipantCount int                           `json:"participant_count"`
@@ -72,6 +75,7 @@ type WhatsAppReportContact struct {
 
 type WhatsAppGroupCoverageMember struct {
 	WhatsAppName        string                 `json:"whatsapp_name"`
+	Username            string                 `json:"username,omitempty"`
 	Phone               *string                `json:"phone"`
 	RedactedPhone       *string                `json:"redacted_phone"`
 	Role                string                 `json:"role"`
@@ -99,11 +103,14 @@ type WhatsAppGroupCoverageSummary struct {
 }
 
 type WhatsAppGroupCoverageReport struct {
-	AccountID          uuid.UUID `json:"account_id"`
-	LeadsEnabled       bool      `json:"leads_enabled"`
-	LeadsPolicyVersion int64     `json:"leads_policy_version"`
-	GeneratedAt        time.Time `json:"generated_at"`
-	Device             struct {
+	IdentityRevision    int64     `json:"identity_revision"`
+	GroupRevision       int64     `json:"group_revision"`
+	CRMIdentityRevision int64     `json:"crm_identity_revision"`
+	AccountID           uuid.UUID `json:"account_id"`
+	LeadsEnabled        bool      `json:"leads_enabled"`
+	LeadsPolicyVersion  int64     `json:"leads_policy_version"`
+	GeneratedAt         time.Time `json:"generated_at"`
+	Device              struct {
 		ID    uuid.UUID `json:"id"`
 		Name  string    `json:"name"`
 		Phone string    `json:"phone"`

@@ -1,4 +1,7 @@
 export interface DeviceRuntimeCapabilities {
+  can_forward_native?: boolean
+  can_list_groups?: boolean
+  can_send_group_messages?: boolean
   can_start_chat: boolean
   can_check_whatsapp: boolean
   can_send_sticker: boolean
@@ -64,11 +67,41 @@ export interface PollVote {
   selected_names: string[]
 }
 
+export interface MessageLinkPreview {
+  url: string
+  title: string
+  description: string
+  thumbnail_url: string | null
+}
+
+export interface MessageForwarding {
+  state: 'unknown' | 'not_forwarded' | 'forwarded' | 'frequently_forwarded'
+  score: number | null
+}
+
+export interface MessageSharingLimits {
+  max_chats: 1 | 5
+  max_groups: 1 | 5
+}
+
 export interface Message {
-  send_phase?: 'uploading' | 'sending'
+  account_id?: string
+  forwarding?: MessageForwarding
+  sharing_limits?: MessageSharingLimits | null
+  /** Distinguishes voice notes from ordinary audio; absence means unknown. */
+  audio_ptt?: boolean
+  chat_id?: string
+  /** Omitted in partial events; explicit null removes a previously received preview. */
+  link_preview?: MessageLinkPreview | null
+  link_preview_version?: number
+  media_recoverable?: boolean
+  media_unavailable_reason?: 'group_media_too_large'
+  mentions?: ChatMention[]
+  quoted_sender_name?: string
+  send_phase?: 'uploading' | 'sending' | 'uncertain'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
-  device_id?: string
+  device_id?: string | null
   message_id: string
   from_jid?: string
   from_name?: string
@@ -107,7 +140,19 @@ export interface Message {
   contact_vcard?: string
 }
 
+export type ChatBindingState = 'verified_continuity' | 'pending' | 'conflict'
 export interface Chat {
+  canonical_chat_id?: string
+  alias_chat_ids?: string[]
+  binding_revision?: number
+  binding_state?: ChatBindingState
+  account_id?: string
+  kind?: 'direct' | 'group'
+  group?: WhatsAppGroup | null
+  pinned_at?: string | null
+  pin_version?: number
+  last_message_from_name?: string
+  last_message_from_me?: boolean
   last_incoming_message_id?: string | null
   last_incoming_at?: string | null
   state_version?: number
@@ -131,5 +176,34 @@ export interface Chat {
   lead_is_blocked?: boolean
   identity_pending?: boolean
 }
+
+export interface ChatMention { jid: string; name?: string }
+export interface WhatsAppGroup {
+  subject: string
+  description?: string
+  avatar_url?: string
+  participant_count: number
+  membership_status: 'member' | 'left' | 'unknown'
+  announce: boolean
+  can_send: boolean
+  send_disabled_reason?: string
+  synced_at?: string
+  kind?: 'group' | 'announcement' | 'community'
+}
+export interface GroupParticipant {
+  jid: string
+  lid?: string
+  phone?: string
+  redacted_phone?: string
+  username?: string
+  name: string
+  name_source?: string
+  whatsapp_name?: string
+  role: 'member' | 'admin' | 'super_admin' | 'owner'
+  is_self: boolean
+  avatar_url?: string
+  avatar_source?: 'contact' | 'whatsapp' | 'none'
+}
+export interface ChatPinState { chat_id: string; is_pinned: boolean; pinned_at: string | null; pin_version: number }
 
 export interface ChatState { last_incoming_message_id?: string | null; last_incoming_at?: string | null; chat_id: string; unread_count: number; needs_reply: boolean; waiting_since: string | null; state_version: number }

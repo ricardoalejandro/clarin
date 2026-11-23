@@ -33,6 +33,8 @@ import type { ContactProfileContact, ContactProfileResponse } from '@/types/cont
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { calendarDateKey, formatCalendarDate, limaDateInputValue, localDateInputValue } from '@/utils/calendarDate';
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker';
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue';
 import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicConfigPanel';
@@ -152,7 +154,7 @@ function ProgramParticipantHistoryList({
           const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
           return (
             <button key={participant.id} type="button" data-testid="mobile-program-participant-history-row" onClick={event => onOpen(participant, event.currentTarget)} className="flex min-h-[78px] w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500">
-              <ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} sizeClassName="h-11 w-11" />
+              <ContactPhotoPreview ownerKey={`contact:${participant.contact_id}`} url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} sizeClassName="h-11 w-11" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-semibold text-slate-800">{participant.contact_name || 'Sin nombre'}</span>
                 <span className="block truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</span>
@@ -181,7 +183,7 @@ function ProgramParticipantHistoryList({
               const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
               return (
                 <tr key={participant.id} onClick={() => onOpen(participant)} className="cursor-pointer transition-colors hover:bg-slate-50">
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} /><div className="min-w-0"><p className="truncate font-medium text-slate-800">{participant.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><ContactPhotoPreview ownerKey={`contact:${participant.contact_id}`} url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} /><div className="min-w-0"><p className="truncate font-medium text-slate-800">{participant.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</p></div></div></td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${participant.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{participant.status === 'completed' ? 'Completado' : 'Retirado'}</span></td>
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{formatCalendarDate(participant.enrolled_at, 'dd MMM yyyy', { locale: es })} — {endedAt ? formatCalendarDate(endedAt, 'dd MMM yyyy', { locale: es }) : '—'}</td>
                   <td className="max-w-64 truncate px-4 py-3 text-xs text-slate-500">{participant.drop_reason || '—'}</td>
@@ -197,6 +199,10 @@ function ProgramParticipantHistoryList({
 }
 
 export default function ProgramDetailPage() {
+  const createSessionDates = useOperationalDateFields();
+  const editSessionDates = useOperationalDateFields();
+  const generationDates = useOperationalDateFields();
+  const outcomeDates = useOperationalDateFields();
   const { isOffline, requireOnline, snapshot: runtimeSnapshot } = useClarinRuntime();
   const params = useParams<{ id?: string }>();
   const router = useRouter();
@@ -1244,6 +1250,8 @@ export default function ProgramDetailPage() {
   const saveParticipantOutcome = async () => {
     if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!outcomeParticipant || savingOutcome) return;
+    if (!outcomeDates.validate()) return;
+    const endedOn = outcomeDates.value('ended_on', outcomeForm.ended_on);
     const request = beginAdminRequest('participant-outcome');
     if (!request) return;
     setSavingOutcome(true);
@@ -1251,13 +1259,13 @@ export default function ProgramDetailPage() {
       const payload = outcomeForm.status === 'completed'
         ? {
             status: 'completed',
-            completed_at: outcomeForm.ended_on,
+            completed_at: endedOn,
             transferred_to_level: outcomeForm.transferred_to_level,
             transferred_at: outcomeForm.transferred_to_level ? new Date().toISOString() : '',
           }
         : {
             status: 'dropped',
-            dropped_at: outcomeForm.ended_on,
+            dropped_at: endedOn,
             drop_reason: outcomeForm.drop_reason,
             drop_notes: outcomeForm.drop_notes,
           };
@@ -1586,6 +1594,7 @@ export default function ProgramDetailPage() {
 
   const handleCreateSession = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!createSessionDates.validate()) return;
     if (!programActiveRef.current) return;
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (creatingSession) return;
@@ -1609,6 +1618,7 @@ export default function ProgramDetailPage() {
         method: 'POST',
         body: JSON.stringify({
           ...newSession,
+          date: createSessionDates.value('date', newSession.date),
           title: newSession.title.trim(),
           topics: newSession.topics.map(topic => ({ kind: topic.kind, course_topic_id: topic.course_topic_id || undefined, title: topic.title.trim() })),
           start_time: newSession.start_time || undefined,
@@ -1660,6 +1670,7 @@ export default function ProgramDetailPage() {
   const handleUpdateSession = async (e: React.FormEvent) => {
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     e.preventDefault();
+    if (!editSessionDates.validate()) return;
     if (!editingSession) return;
     if (!editSessionForm.title.trim()) {
       showToast('Escribe un título para la sesión.', 'error', true);
@@ -1681,6 +1692,7 @@ export default function ProgramDetailPage() {
         method: 'PUT',
         body: JSON.stringify({
           ...editSessionForm,
+          date: editSessionDates.value('date', editSessionForm.date),
           title: editSessionForm.title.trim(),
           topics: editSessionForm.topics.map(topic => ({ kind: topic.kind, course_topic_id: topic.course_topic_id || undefined, title: topic.title.trim() })),
           start_time: editSessionForm.start_time || undefined,
@@ -2018,11 +2030,13 @@ export default function ProgramDetailPage() {
   const handleGenerateSessions = async () => {
     if (!programActiveRef.current) return;
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
-    if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) {
+    if (!generationDates.validate()) return;
+    const startDate = generationDates.value('start', genForm.start_date), endDate = generationDates.value('end', genForm.end_date);
+    if (!startDate || !endDate || genForm.days_of_week.length === 0) {
       showToast('Completa la fecha de inicio, fin y al menos un día de la semana.', 'error', true);
       return;
     }
-    if (genForm.end_date < genForm.start_date) {
+    if (endDate < startDate) {
       showToast('La fecha de fin debe ser igual o posterior a la fecha de inicio.', 'error', true);
       return;
     }
@@ -2043,6 +2057,8 @@ export default function ProgramDetailPage() {
         headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...genForm,
+          start_date: startDate,
+          end_date: endDate,
           location: genForm.location || undefined,
         }),
       });
@@ -2204,10 +2220,11 @@ export default function ProgramDetailPage() {
   };
 
   // Preview sessions count
+  const generationStart = generationDates.value('start', genForm.start_date), generationEnd = generationDates.value('end', genForm.end_date);
   const schedulePreview = useMemo(() => {
-    if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) return { count: 0, error: '' };
-    const start = new Date(`${genForm.start_date}T00:00:00Z`);
-    const end = new Date(`${genForm.end_date}T00:00:00Z`);
+    if (!generationStart || !generationEnd || genForm.days_of_week.length === 0) return { count: 0, error: '' };
+    const start = new Date(`${generationStart}T00:00:00Z`);
+    const end = new Date(`${generationEnd}T00:00:00Z`);
     if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) return { count: 0, error: '' };
     const totalDays = Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
     if (totalDays > MAX_SCHEDULE_RANGE_DAYS) {
@@ -2224,7 +2241,7 @@ export default function ProgramDetailPage() {
       return { count, error: `Un horario puede generar como máximo ${MAX_GENERATED_SESSIONS} sesiones.` };
     }
     return { count, error: '' };
-  }, [genForm.start_date, genForm.end_date, genForm.days_of_week]);
+  }, [generationStart, generationEnd, genForm.days_of_week]);
   const previewSessionCount = schedulePreview.count;
 
   if (loading) {
@@ -2681,7 +2698,7 @@ export default function ProgramDetailPage() {
                       ) : filteredHealthParticipants.map(p => mobileWorkspace ? (
                         <div key={p.participant_id} data-testid="mobile-program-participant-row" className="flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors hover:bg-slate-50">
                           <button type="button" onClick={event => { void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-                            <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-11 w-11" />
+                            <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-11 w-11" />
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-semibold text-slate-800">{p.name || 'Sin nombre'}</span>
                               <span className="block truncate text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
@@ -2697,7 +2714,7 @@ export default function ProgramDetailPage() {
                       ) : (
                         <div key={p.participant_id} onClick={() => { void openParticipantDetail(p.participant_id, p.contact_id) }} className="cursor-pointer space-y-3 p-4 transition-colors hover:bg-slate-50">
                           <div className="flex items-start gap-3">
-                            <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-12 w-12" />
+                            <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-12 w-12" />
                             <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 flex-1 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                               <span className="block truncate font-semibold text-slate-800">{p.name || 'Sin nombre'}</span>
                               <span className="block truncate text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
@@ -2738,7 +2755,7 @@ export default function ProgramDetailPage() {
                           <tr key={p.participant_id} onClick={() => void openParticipantDetail(p.participant_id, p.contact_id)} className="cursor-pointer hover:bg-slate-50">
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">
-                                <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} />
+                                <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} />
                                 <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                                   <span className="block truncate font-medium text-slate-800">{p.name || 'Sin nombre'}</span>
                                   <span className="block text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
@@ -3539,13 +3556,7 @@ export default function ProgramDetailPage() {
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
-                  <input
-                    type="date"
-                    required
-                    value={newSession.date}
-                    onChange={(e) => setNewSession({ ...newSession, date: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha de la nueva sesión" required value={newSession.date} onChange={value => setNewSession(current => ({ ...current, date: value }))} onDraftStateChange={createSessionDates.track('date')} showQuickValues={false} />
                 </div>
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5" htmlFor="new-session-title-input">Nombre de la sesión</label>
@@ -3651,13 +3662,7 @@ export default function ProgramDetailPage() {
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
-                  <input
-                    type="date"
-                    required
-                    value={editSessionForm.date}
-                    onChange={(e) => setEditSessionForm({ ...editSessionForm, date: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha de la sesión" required value={editSessionForm.date} onChange={value => setEditSessionForm(current => ({ ...current, date: value }))} onDraftStateChange={editSessionDates.track('date')} showQuickValues={false} />
                 </div>
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5" htmlFor="edit-session-title-input">Nombre de la sesión</label>
@@ -3774,21 +3779,11 @@ export default function ProgramDetailPage() {
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha inicio</label>
-                  <input
-                    type="date"
-                    value={genForm.start_date}
-                    onChange={(e) => setGenForm({ ...genForm, start_date: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha inicio" value={genForm.start_date} onChange={value => setGenForm(current => ({ ...current, start_date: value }))} onDraftStateChange={generationDates.track('start')} showQuickValues={false} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha fin</label>
-                  <input
-                    type="date"
-                    value={genForm.end_date}
-                    onChange={(e) => setGenForm({ ...genForm, end_date: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha fin" value={genForm.end_date} onChange={value => setGenForm(current => ({ ...current, end_date: value }))} onDraftStateChange={generationDates.track('end')} showQuickValues={false} />
                 </div>
               </div>
 
@@ -4129,14 +4124,7 @@ export default function ProgramDetailPage() {
             )}
             <div className="mt-4">
               <label className="mb-1.5 block text-sm font-medium text-slate-700">{outcomeForm.status === 'completed' ? 'Fecha de finalización' : 'Fecha de retiro'}</label>
-              <input
-                type="date"
-                value={outcomeForm.ended_on}
-                min={calendarDateKey(outcomeParticipant.enrolled_at)}
-                max={limaDateInputValue()}
-                onChange={(event) => setOutcomeForm(prev => ({ ...prev, ended_on: event.target.value }))}
-                className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 sm:text-sm"
-              />
+              <OperationalDatePicker mode="date" label={outcomeForm.status === 'completed' ? 'Fecha de finalización' : 'Fecha de retiro'} required value={outcomeForm.ended_on} min={calendarDateKey(outcomeParticipant.enrolled_at)} max={limaDateInputValue()} onChange={value => setOutcomeForm(prev => ({ ...prev, ended_on: value }))} onDraftStateChange={outcomeDates.track('ended_on')} showQuickValues={false} />
               <p className="mt-2 text-xs leading-5 text-slate-500">Es el primer día fuera del programa. Si existe una sesión en esa fecha, el participante no aparecerá en su lista.</p>
             </div>
             <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">

@@ -73,7 +73,6 @@ type Repositories struct {
 	Integration        *IntegrationRepository
 	MediaAsset         *MediaAssetRepository
 	Report             *ReportRepository
-	LeadIntelligence   *LeadIntelligenceReportRepository
 	WhatsAppStatus     *WhatsAppStatusRepository
 	Offline            *OfflineRepository
 	OfflineV3          *OfflineV3Repository
@@ -137,7 +136,6 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Integration:        &IntegrationRepository{db: db},
 		MediaAsset:         &MediaAssetRepository{db: db},
 		Report:             &ReportRepository{db: db},
-		LeadIntelligence:   &LeadIntelligenceReportRepository{db: db},
 		WhatsAppStatus:     &WhatsAppStatusRepository{db: db},
 		Offline:            &OfflineRepository{db: db},
 		OfflineV3:          &OfflineV3Repository{db: db},
@@ -889,7 +887,7 @@ type AccountRepository struct {
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
 			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-				a.max_users_override,
+				a.max_users_override, a.session_idle_timeout_minutes,
 				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
 				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
@@ -909,7 +907,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	var accounts []*domain.Account
 	for rows.Next() {
 		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.SessionIdleTimeoutMinutes, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
 			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
@@ -923,7 +921,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
 			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-				a.max_users_override,
+				a.max_users_override, a.session_idle_timeout_minutes,
 				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
 				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
@@ -935,7 +933,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		LEFT JOIN subscriptions s ON s.account_id = a.id
 		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		WHERE a.id = $1
-		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.SessionIdleTimeoutMinutes, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
@@ -1189,6 +1187,15 @@ var (
 )
 
 func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uuid.UUID, jid, name string) (*domain.Chat, error) {
+	if result, handled, err := createVerifiedPrivatePeer(ctx, r.db, accountID, deviceID, jid, name, name, true); handled {
+		if err != nil {
+			return nil, err
+		}
+		return result.chat, nil
+	}
+	if domain.IsGroupJID(jid) {
+		return r.GetOrCreateGroup(ctx, accountID, deviceID, jid, name)
+	}
 	if strings.TrimSpace(jid) == "" {
 		return nil, fmt.Errorf("chat jid is required")
 	}
@@ -1336,6 +1343,19 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 	channelKey := domain.DeviceProviderWhatsAppWeb
 	if provider == domain.DeviceProviderWhatsAppCloudAPI {
 		channelKey = domain.DeviceProviderWhatsAppCloudAPI + ":" + deviceID.String()
+	}
+
+	if chat, handled, err := reuseVerifiedPrivateChatForContact(ctx, tx, accountID, deviceID, contactID, jid, name); handled {
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		if err := r.HydratePrivatePeerIdentity(ctx, accountID, []*domain.Chat{chat}); err != nil {
+			return nil, err
+		}
+		return chat, nil
 	}
 
 	aliases := []struct {
@@ -1637,6 +1657,9 @@ func (r *ChatRepository) CreateAndLinkContact(ctx context.Context, accountID, ch
 }
 
 func phoneFromJID(jid string) string {
+	if domain.IsGroupJID(jid) {
+		return ""
+	}
 	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(jid)), "@lid") {
 		return ""
 	}
@@ -1656,6 +1679,13 @@ func phoneFromJID(jid string) string {
 func setChatIdentityState(chat *domain.Chat) {
 	if chat == nil {
 		return
+	}
+	chat.Kind = "direct"
+	if domain.IsGroupJID(chat.JID) {
+		chat.Kind = "group"
+		chat.ContactPhone = nil
+		chat.NeedsReply = false
+		chat.WaitingSince = nil
 	}
 	chat.IdentityPending = strings.HasSuffix(strings.ToLower(strings.TrimSpace(chat.JID)), "@lid")
 }
@@ -1777,7 +1807,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
-		WHERE c.id = $1
+		WHERE c.id = (SELECT COALESCE(source.canonical_chat_id,source.id) FROM chats source WHERE source.id=$1)
 	`, id).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
@@ -1790,6 +1820,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 	}
 	if err == nil {
 		setChatIdentityState(chat)
+		err = r.HydrateContinuity(ctx, chat.AccountID, []*domain.Chat{chat})
 	}
 	return chat, err
 }
@@ -1833,13 +1864,14 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	// Build dynamic query
 	baseQuery := `
 		FROM chats c
+		` + effectiveChatUserPreferenceJoinSQL + `
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
-		LEFT JOIN LATERAL (SELECT bool_or(is_blocked) AS is_blocked FROM leads WHERE account_id=c.account_id AND jid=c.jid) l ON TRUE
-		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
+		LEFT JOIN LATERAL (SELECT bool_or(is_blocked) AS is_blocked FROM leads WHERE c.jid NOT LIKE '%@g.us' AND account_id=c.account_id AND jid=c.jid) l ON TRUE
+		WHERE c.account_id = $1 AND c.canonical_chat_id IS NULL AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
 	`
-	args := []interface{}{accountID}
-	argNum := 2
+	args := []interface{}{accountID, filter.ActorID}
+	argNum := 3
 
 	// Provider separation is based on the durable channel identity rather than
 	// the current device row, which keeps historical chats correctly scoped if
@@ -1848,7 +1880,13 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	case domain.DeviceProviderWhatsAppCloudAPI:
 		baseQuery += " AND c.channel_key LIKE 'whatsapp_cloud_api:%'"
 	case domain.DeviceProviderWhatsAppWeb:
-		baseQuery += " AND c.channel_key = 'whatsapp_web'"
+		baseQuery += " AND (c.channel_key = 'whatsapp_web' OR c.channel_key LIKE 'whatsapp_web_group:%')"
+	}
+
+	if filter.Kind == "direct" {
+		baseQuery += " AND c.jid NOT LIKE '%@g.us'"
+	} else if filter.Kind == "group" {
+		baseQuery += " AND c.jid LIKE '%@g.us'"
 	}
 
 	// Device filter
@@ -1867,11 +1905,15 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 
 	// Unread filter
 	if filter.UnreadOnly {
-		baseQuery += " AND c.unread_count > 0"
+		baseQuery += ` AND CASE WHEN EXISTS(SELECT 1 FROM chats aliases WHERE aliases.account_id=c.account_id AND aliases.canonical_chat_id=c.id)
+ THEN EXISTS(SELECT 1 FROM messages m JOIN chats source ON source.account_id=m.account_id AND source.id=m.chat_id WHERE m.account_id=c.account_id AND COALESCE(source.canonical_chat_id,source.id)=c.id AND NOT m.is_from_me AND NOT m.is_read AND NOT COALESCE(m.is_revoked,FALSE) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id))
+ ELSE c.unread_count>0 END`
 	}
 
 	if filter.PendingOnly {
-		baseQuery += " AND c.waiting_since IS NOT NULL"
+		// Pending is a direct-chat constraint independent of the selected kind.
+		// Intersecting it with kind=group must be empty, never fall back to directs.
+		baseQuery += " AND c.jid NOT LIKE '%@g.us' AND c.waiting_since IS NOT NULL"
 	}
 	// Archived filter
 	if !filter.Archived {
@@ -1923,7 +1965,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	selectQuery := `
 		SELECT
 		       c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
-		       c.unread_count, c.is_archived, c.is_pinned,
+		       c.unread_count, c.is_archived, COALESCE(cp.is_pinned,FALSE),cp.pinned_at,COALESCE(cp.version,0),
 		       c.last_inbound_at, c.last_outbound_at, c.customer_service_window_expires_at, c.last_message_provider,
 		       c.created_at, c.updated_at,
 		       d.name, d.phone,
@@ -1937,13 +1979,15 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		}
 		selectQuery += " ORDER BY c.waiting_since,c.id"
 	} else {
-		selectQuery += " ORDER BY c.is_pinned DESC,c.last_message_at DESC NULLS LAST,c.id"
+		cursorSQL, cursorArgs := chatListCursorSQL(filter.ListCursor, argNum)
+		selectQuery += cursorSQL + " ORDER BY " + chatPinOrderSQL
+		args = append(args, cursorArgs...)
 	}
 
 	// Apply pagination
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
-		if filter.Offset > 0 {
+		if filter.Offset > 0 && !filter.UseCursor {
 			selectQuery += fmt.Sprintf(" OFFSET %d", filter.Offset)
 		}
 	}
@@ -1960,7 +2004,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		if err := rows.Scan(
 			&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 			&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
-			&chat.IsPinned, &chat.LastInboundAt, &chat.LastOutboundAt,
+			&chat.IsPinned, &chat.PinnedAt, &chat.PinVersion, &chat.LastInboundAt, &chat.LastOutboundAt,
 			&chat.CustomerServiceWindowExpiresAt, &chat.LastMessageProvider,
 			&chat.CreatedAt, &chat.UpdatedAt,
 			&chat.DeviceName, &chat.DevicePhone,
@@ -1984,63 +2028,7 @@ func (r *ChatRepository) UpdateLastMessage(ctx context.Context, accountID, chatI
 }
 
 func (r *ChatRepository) MarkAsRead(ctx context.Context, accountID, chatID uuid.UUID, throughMessageID string) (int, string, error) {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return 0, "", err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var lockedID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&lockedID); err != nil {
-		return 0, "", err
-	}
-
-	var watermarkID uuid.UUID
-	var watermarkTime time.Time
-	var readThrough string
-	query := `
-		SELECT id, timestamp, message_id
-		FROM messages
-		WHERE account_id=$1 AND chat_id=$2
-	`
-	args := []any{accountID, chatID}
-	if strings.TrimSpace(throughMessageID) != "" {
-		query += ` AND (id::text=$3 OR message_id=$3) ORDER BY CASE WHEN id::text=$3 THEN 0 ELSE 1 END LIMIT 1`
-		args = append(args, strings.TrimSpace(throughMessageID))
-	} else {
-		query += ` AND is_from_me=FALSE ORDER BY timestamp DESC, id DESC LIMIT 1`
-	}
-	watermarkErr := tx.QueryRow(ctx, query, args...).Scan(&watermarkID, &watermarkTime, &readThrough)
-	if watermarkErr != nil && (strings.TrimSpace(throughMessageID) != "" || !errors.Is(watermarkErr, pgx.ErrNoRows)) {
-		return 0, "", watermarkErr
-	}
-	if watermarkErr == nil {
-		if _, err := tx.Exec(ctx, `
-			UPDATE messages
-			SET is_read=TRUE, read_at=COALESCE(read_at, NOW())
-			WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
-			  AND (timestamp < $3 OR (timestamp = $3 AND id <= $4))
-		`, accountID, chatID, watermarkTime, watermarkID); err != nil {
-			return 0, "", err
-		}
-	}
-
-	var unreadCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*)::int
-		FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
-		  AND COALESCE(is_revoked, FALSE)=FALSE
-	`, accountID, chatID).Scan(&unreadCount); err != nil {
-		return 0, "", err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE chats SET unread_count=$3, state_version=state_version+1, updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, chatID, unreadCount); err != nil {
-		return 0, "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, "", err
-	}
-	return unreadCount, readThrough, nil
+	return r.markConversationAsRead(ctx, accountID, chatID, throughMessageID)
 }
 
 func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
@@ -2049,6 +2037,9 @@ func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, []uuid.UUID{id}, false); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = $2`, accountID, id); err != nil {
 		return err
 	}
@@ -2068,6 +2059,9 @@ func (r *ChatRepository) DeleteBatch(ctx context.Context, accountID uuid.UUID, i
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, ids, false); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = ANY($2)`, accountID, ids); err != nil {
 		return err
 	}
@@ -2087,6 +2081,9 @@ func (r *ChatRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) err
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, nil, true); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1`, accountID); err != nil {
 		return err
 	}
@@ -2167,7 +2164,25 @@ func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpser
 }
 
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
+	msg.RepairedPlaceholder = false
+	if msg.SharingLimits != nil && !msg.SharingLimits.Valid() {
+		return fmt.Errorf("invalid message sharing limits")
+	}
+	msg.ForwardingHydrated = false
+	msg.Forwarding = msg.Forwarding.Normalize()
+	if msg.ForwardingSource == "" {
+		msg.ForwardingSource = "legacy"
+		if msg.Forwarding.State != domain.ForwardingUnknown {
+			msg.ForwardingSource = "provider"
+		}
+	}
 	applyMessageSendContext(ctx, msg)
+	if len(msg.Mentions) == 0 {
+		msg.Mentions = domain.MessageMentionsFrom(ctx)
+	}
+	if msg.Mentions == nil {
+		msg.Mentions = []domain.MessageMention{}
+	}
 	insert := func(queryer interface {
 		QueryRow(context.Context, string, ...any) pgx.Row
 	}) error {
@@ -2178,11 +2193,11 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		                      quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
-		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id)
+		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions, media_unavailable_reason,link_preview,link_preview_media_asset_id,forwarding,forwarding_source,audio_ptt,sharing_limits)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37)
+		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb, $39,$40::jsonb,$41,$42::jsonb,$43::text,$44::boolean,$45::jsonb)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
-		RETURNING id, created_at
+		RETURNING id, created_at,body,is_revoked,is_edited,link_preview,link_preview_media_asset_id,link_preview_version
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
 			msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize, msg.MediaAssetID,
 			msg.IsFromMe, msg.IsRead, msg.Status, msg.Timestamp,
@@ -2190,16 +2205,25 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			msg.PollQuestion, msg.PollMaxSelections,
 			msg.IsRevoked, msg.IsViewOnce, msg.Latitude, msg.Longitude,
 			msg.ContactName, msg.ContactPhone, msg.ContactVCard, msg.Provider, msg.TemplateName,
-			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID,
-		).Scan(&msg.ID, &msg.CreatedAt)
+			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions, msg.MediaUnavailableReason, msg.LinkPreview, msg.LinkPreviewMediaAssetID, msg.Forwarding, msg.ForwardingSource, msg.AudioPTT, msg.SharingLimits,
+		).Scan(&msg.ID, &msg.CreatedAt, &msg.Body, &msg.IsRevoked, &msg.IsEdited, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion)
 	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// A pending group edit may attach a preview in the INSERT trigger even
+	// when the arriving original has none. Take the reference barrier first.
+	if err := lockLinkPreviewReferenceWrite(ctx, tx, msg.AccountID); err != nil {
+		return err
+	}
+	if err := LockMessageConversationTx(ctx, tx, msg.AccountID, msg.ChatID); err != nil {
+		return err
+	}
 	var lockedChat uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat); err != nil {
+	var lockedChatJID string
+	if err := tx.QueryRow(ctx, `SELECT id,jid FROM chats WHERE account_id=$1 AND id=$2 AND canonical_chat_id IS NULL FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat, &lockedChatJID); err != nil {
 		return err
 	}
 	if msg.MediaAssetID != nil {
@@ -2217,13 +2241,47 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			return fmt.Errorf("media asset is not active")
 		}
 	}
+	if err := validateMessageLinkPreviewTx(ctx, tx, msg); err != nil {
+		return err
+	}
+	if err := applyForwardOperationSharingLimitsTx(ctx, tx, msg); err != nil {
+		return err
+	}
 	if err := insert(tx); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			changed, hydrateErr := hydrateMessageForwardingTx(ctx, tx, msg)
+			if hydrateErr != nil {
+				return hydrateErr
+			}
+			msg.ForwardingHydrated = changed
+		}
+		if errors.Is(err, pgx.ErrNoRows) && domain.IsGroupJID(lockedChatJID) {
+			repaired, repairErr := repairGroupPlaceholderTx(ctx, tx, msg)
+			if repairErr != nil {
+				return repairErr
+			}
+			if repaired {
+				msg.RepairedPlaceholder = true
+				if err := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+		}
 		if !errors.Is(err, pgx.ErrNoRows) || msg.Sender == nil || msg.Sender.UserID == nil {
+			if errors.Is(err, pgx.ErrNoRows) && msg.ForwardingHydrated {
+				if reconcileErr := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); reconcileErr != nil {
+					return reconcileErr
+				}
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return commitErr
+				}
+			}
 			return err
 		}
 		// The provider echo can win the INSERT race. Attach verified attribution to that same message.
 		err = tx.QueryRow(ctx, `UPDATE messages SET sender=$4,send_operation_id=$5 WHERE account_id=$1 AND chat_id=$2 AND message_id=$3
-		 AND (sender IS NULL OR sender->>'user_id' IS NULL) RETURNING id,created_at`, msg.AccountID, msg.ChatID, msg.MessageID, msg.Sender, msg.SendOperationID).Scan(&msg.ID, &msg.CreatedAt)
+		 AND (sender IS NULL OR sender->>'user_id' IS NULL) RETURNING id,created_at,body,is_revoked,is_edited,link_preview,link_preview_media_asset_id,link_preview_version`, msg.AccountID, msg.ChatID, msg.MessageID, msg.Sender, msg.SendOperationID).Scan(&msg.ID, &msg.CreatedAt, &msg.Body, &msg.IsRevoked, &msg.IsEdited, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion)
 		if err != nil {
 			return err
 		}
@@ -2233,68 +2291,47 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			}
 		}
 	}
+	if err := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
-		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender
-		FROM (
-			SELECT * FROM messages WHERE chat_id = $1
-			ORDER BY timestamp DESC, id DESC
-			LIMIT $2 OFFSET $3
-		) sub ORDER BY timestamp ASC, id ASC
-	`, chatID, limit, offset)
-	if err != nil {
+	var accountID uuid.UUID
+	if err := r.db.QueryRow(ctx, `SELECT account_id FROM chats WHERE id=$1`, chatID).Scan(&accountID); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var messages []*domain.Message
-	for rows.Next() {
-		msg := &domain.Message{}
-		if err := rows.Scan(
-			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
-			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-			&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-			&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
-			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
-			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
-			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender,
-		); err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-	}
-	return messages, nil
+	return r.GetWindowByChatID(ctx, accountID, chatID, limit, offset)
 }
 
 func (r *MessageRepository) GetHistoryOffset(ctx context.Context, accountID, chatID, messageID uuid.UUID) (int, error) {
+	_, ids, err := r.conversationScope(ctx, accountID, chatID)
+	if err != nil {
+		return 0, err
+	}
 	var offset int
-	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM messages newer
-		JOIN messages target ON target.id=$3 AND target.account_id=$1 AND target.chat_id=$2
-		WHERE newer.account_id=$1 AND newer.chat_id=$2
-		  AND (newer.timestamp>target.timestamp OR (newer.timestamp=target.timestamp AND newer.id>target.id))
-	`, accountID, chatID, messageID).Scan(&offset)
+	err = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM messages newer
+ JOIN messages target ON target.id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases WHERE account_id=$1 AND alias_message_id=$3),$3)
+ AND target.account_id=$1 AND target.chat_id=ANY($2::uuid[])
+ WHERE newer.account_id=$1 AND newer.chat_id=ANY($2::uuid[])
+ AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=newer.account_id AND aliases.alias_message_id=newer.id)
+ AND (newer.timestamp,newer.id)>(target.timestamp,target.id)`, accountID, ids, messageID).Scan(&offset)
 	return offset, err
 }
 
 func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID uuid.UUID, query string, limit, offset int) ([]*domain.Message, int, error) {
+	canonical, ids, err := r.conversationScope(ctx, accountID, chatID)
+	if err != nil {
+		return nil, 0, err
+	}
 	pattern := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
 	var total int
 	if err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND COALESCE(is_revoked,false)=false
+		WHERE account_id=$1 AND chat_id=ANY($2::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id) AND COALESCE(is_revoked,false)=false
 		  AND (LOWER(COALESCE(body,'')) LIKE $3 OR LOWER(COALESCE(media_filename,'')) LIKE $3)
-	`, accountID, chatID, pattern).Scan(&total); err != nil {
+	`, accountID, ids, pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := r.db.Query(ctx, `
@@ -2303,12 +2340,12 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt,sharing_limits
 		FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND COALESCE(is_revoked,false)=false
+		WHERE account_id=$1 AND chat_id=ANY($2::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id) AND COALESCE(is_revoked,false)=false
 		  AND (LOWER(COALESCE(body,'')) LIKE $3 OR LOWER(COALESCE(media_filename,'')) LIKE $3)
 		ORDER BY timestamp DESC, id DESC LIMIT $4 OFFSET $5
-	`, accountID, chatID, pattern, limit, offset)
+	`, accountID, ids, pattern, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2324,58 +2361,52 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender,
+			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT, &msg.SharingLimits,
 		); err != nil {
 			return nil, 0, err
 		}
 		messages = append(messages, msg)
 	}
+	if err = r.hydrateConversationMediaRemoval(ctx, accountID, messages); err != nil {
+		return nil, 0, err
+	}
+	projectConversationMessages(messages, canonical)
 	return messages, total, rows.Err()
 }
 
 // GetByMessageID finds a message by its WhatsApp message_id within a chat
 func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID, messageID string) (*domain.Message, error) {
-	msg := &domain.Message{}
-	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
-		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender
-		FROM messages WHERE chat_id = $1 AND message_id = $2
-		LIMIT 1
-	`, chatID, messageID).Scan(
-		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
-		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-		&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-		&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
-		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
-		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
-		&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender,
-	)
+	account, canonical, _, err := r.conversationScopeByID(ctx, chatID)
 	if err != nil {
 		return nil, err
 	}
-	return msg, nil
+	message, err := r.GetVisibleByReference(ctx, account, canonical, messageID)
+	if err == nil {
+		message.ChatID = canonical
+	}
+	return message, err
 }
 
 // GetOldestByChatID returns the oldest message in a chat (for history sync pagination)
 func (r *MessageRepository) GetOldestByChatID(ctx context.Context, chatID uuid.UUID) (*domain.Message, error) {
+	_, canonical, ids, scopeErr := r.conversationScopeByID(ctx, chatID)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	msg := &domain.Message{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, is_from_me, timestamp
-		FROM messages WHERE chat_id = $1
+		       message_type, is_from_me, timestamp,sharing_limits
+		FROM messages WHERE chat_id=ANY($1::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id)
 		ORDER BY timestamp ASC LIMIT 1
-	`, chatID).Scan(
+	`, ids).Scan(
 		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
-		&msg.FromName, &msg.Body, &msg.MessageType, &msg.IsFromMe, &msg.Timestamp,
+		&msg.FromName, &msg.Body, &msg.MessageType, &msg.IsFromMe, &msg.Timestamp, &msg.SharingLimits,
 	)
 	if err != nil {
 		return nil, err
 	}
+	msg.ChatID = canonical
 	return msg, nil
 }
 
@@ -2428,6 +2459,9 @@ func (r *MessageRepository) MarkAsRevoked(ctx context.Context, accountID uuid.UU
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockLinkPreviewReferenceWrite(ctx, tx, accountID); err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `SELECT id FROM chats WHERE account_id=$1 AND jid=$2 ORDER BY id FOR UPDATE`, accountID, chatJID)
 	if err != nil {
 		return err
@@ -2445,7 +2479,7 @@ func (r *MessageRepository) MarkAsRevoked(ctx context.Context, accountID uuid.UU
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE messages SET is_revoked=true,body=NULL WHERE account_id=$1 AND chat_id=ANY($2) AND message_id=$3`, accountID, ids, messageID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE messages SET is_revoked=true,body=NULL,link_preview=NULL,link_preview_media_asset_id=NULL WHERE account_id=$1 AND chat_id=ANY($2) AND message_id=$3`, accountID, ids, messageID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE chats c SET
@@ -2461,7 +2495,7 @@ func (r *MessageRepository) MarkAsRevoked(ctx context.Context, accountID uuid.UU
 // UpdateBody updates the body text of an edited message
 func (r *MessageRepository) UpdateBody(ctx context.Context, accountID uuid.UUID, chatJID string, messageID string, newBody string) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE messages SET body = $4, is_edited = true
+		UPDATE messages SET body = $4, is_edited = true,link_preview=NULL,link_preview_media_asset_id=NULL
 		WHERE account_id = $1 AND message_id = $2
 		AND chat_id IN (SELECT id FROM chats WHERE account_id = $1 AND jid = $3)
 	`, accountID, messageID, chatJID, newBody)
@@ -2493,6 +2527,14 @@ func (r *MessageRepository) GetRecentStickers(ctx context.Context, accountID uui
 }
 
 func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID, deviceID *uuid.UUID, jid, phone, name, pushName string, isGroup bool) (*domain.Contact, error) {
+	if !isGroup && deviceID != nil {
+		if result, handled, err := createVerifiedPrivatePeer(ctx, r.db, accountID, *deviceID, jid, name, pushName, false); handled {
+			if err != nil {
+				return nil, err
+			}
+			return r.GetByIDForAccount(ctx, accountID, result.contactID)
+		}
+	}
 	if !isGroup {
 		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
 			return nil, err
@@ -5989,6 +6031,9 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 		return err
 	}
 	for _, rec := range recipients {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(rec.JID)), "@g.us") {
+			return fmt.Errorf("los grupos no son destinatarios de campañas")
+		}
 		if rec.CampaignID != recipients[0].CampaignID || rec.ContactID == nil {
 			return fmt.Errorf("cada destinatario debe pertenecer a la campaña y tener un contacto")
 		}
@@ -5996,7 +6041,7 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM contacts c
-				WHERE c.id=$1 AND c.account_id=$2 AND c.do_not_contact=FALSE
+				WHERE c.id=$1 AND c.account_id=$2 AND c.do_not_contact=FALSE AND c.is_group=FALSE
 				  AND NOT EXISTS (
 					SELECT 1 FROM contact_suppressions cs
 					WHERE cs.account_id=c.account_id AND cs.active=TRUE
@@ -8627,7 +8672,7 @@ func (r *ReactionRepository) Delete(ctx context.Context, accountID, chatID uuid.
 	result, err := r.db.Exec(ctx, `
 		DELETE FROM message_reactions
 		WHERE account_id = $1
-		  AND chat_id = $2
+		  AND chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2))
 		  AND target_message_id = $3
 		  AND sender_jid = regexp_replace($4::text, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
 		  AND timestamp <= $5
@@ -8642,7 +8687,8 @@ func (r *ReactionRepository) GetByChatID(ctx context.Context, accountID, chatID 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
 		FROM message_reactions
-		WHERE account_id = $1 AND chat_id = $2
+		WHERE account_id = $1 AND (chat_id = $2 OR (chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND canonical_chat_id=$2)
+ AND EXISTS(SELECT 1 FROM messages m WHERE m.account_id=$1 AND m.chat_id=message_reactions.chat_id AND m.message_id=message_reactions.target_message_id AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id))))
 		ORDER BY timestamp ASC
 	`, accountID, chatID)
 	if err != nil {
@@ -8656,6 +8702,7 @@ func (r *ReactionRepository) GetByChatID(ctx context.Context, accountID, chatID 
 		if err := rows.Scan(&r.ID, &r.AccountID, &r.ChatID, &r.TargetMessageID, &r.SenderJID, &r.SenderName, &r.Emoji, &r.IsFromMe, &r.Timestamp, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.ChatID = chatID
 		reactions = append(reactions, r)
 	}
 	return reactions, rows.Err()
@@ -8670,7 +8717,8 @@ func (r *ReactionRepository) GetByChatMessageIDs(ctx context.Context, accountID,
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
 		FROM message_reactions
-		WHERE account_id = $1 AND chat_id = $2 AND target_message_id = ANY($3)
+		WHERE account_id = $1 AND (chat_id = $2 OR (chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND canonical_chat_id=$2)
+ AND EXISTS(SELECT 1 FROM messages m WHERE m.account_id=$1 AND m.chat_id=message_reactions.chat_id AND m.message_id=message_reactions.target_message_id AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id)))) AND target_message_id = ANY($3)
 		ORDER BY timestamp ASC
 	`, accountID, chatID, targetMessageIDs)
 	if err != nil {
@@ -8684,6 +8732,7 @@ func (r *ReactionRepository) GetByChatMessageIDs(ctx context.Context, accountID,
 		if err := rows.Scan(&reaction.ID, &reaction.AccountID, &reaction.ChatID, &reaction.TargetMessageID, &reaction.SenderJID, &reaction.SenderName, &reaction.Emoji, &reaction.IsFromMe, &reaction.Timestamp, &reaction.CreatedAt); err != nil {
 			return nil, err
 		}
+		reaction.ChatID = chatID
 		reactions = append(reactions, reaction)
 	}
 	return reactions, rows.Err()
@@ -8707,23 +8756,7 @@ func (r *PollRepository) CreateOptions(ctx context.Context, messageID uuid.UUID,
 }
 
 func (r *PollRepository) GetOptions(ctx context.Context, messageID uuid.UUID) ([]*domain.PollOption, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, message_id, name, vote_count FROM poll_options WHERE message_id = $1 ORDER BY id
-	`, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var options []*domain.PollOption
-	for rows.Next() {
-		o := &domain.PollOption{}
-		if err := rows.Scan(&o.ID, &o.MessageID, &o.Name, &o.VoteCount); err != nil {
-			return nil, err
-		}
-		options = append(options, o)
-	}
-	return options, nil
+	return r.logicalOptions(ctx, messageID)
 }
 
 func (r *PollRepository) UpsertVote(ctx context.Context, vote *domain.PollVote) error {
@@ -8767,23 +8800,7 @@ func (r *PollRepository) RecalculateVoteCounts(ctx context.Context, messageID uu
 }
 
 func (r *PollRepository) GetVotes(ctx context.Context, messageID uuid.UUID) ([]*domain.PollVote, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, message_id, voter_jid, selected_names, timestamp FROM poll_votes WHERE message_id = $1 ORDER BY timestamp
-	`, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var votes []*domain.PollVote
-	for rows.Next() {
-		v := &domain.PollVote{}
-		if err := rows.Scan(&v.ID, &v.MessageID, &v.VoterJID, &v.SelectedNames, &v.Timestamp); err != nil {
-			return nil, err
-		}
-		votes = append(votes, v)
-	}
-	return votes, nil
+	return r.logicalVotes(ctx, messageID)
 }
 
 // CampaignAttachmentRepository handles campaign attachment operations

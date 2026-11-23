@@ -37,6 +37,13 @@ surface is:
   the upstream application build scripts are provenance, not release commands.
 
 - `packages/excalidraw/element/clarinRichText.ts`: canonical partial-text marks.
+- `packages/excalidraw/element/clarinCharacterStyle.ts`: versioned character
+  color, font family and relative size, with grapheme-safe editing and private
+  clipboard rebasing. Object property actions clear only matching overrides.
+- `packages/excalidraw/element/clarinCharacterLayout.ts` and shaping helpers:
+  shared visual-line metrics and temporary native geometry for styled text.
+  Renderer color passes preserve complete shaped groups and glyph opacity;
+  native SVG text keeps font subsets and editable text semantics.
 - `packages/excalidraw/element/clarinParagraphFormat.ts`: canonical partial
   paragraph-alignment model.
 - `packages/excalidraw/element/textWysiwyg.tsx`: controlled contenteditable editor.
@@ -67,5 +74,5 @@ surface is:
   first-stylus auto-switch so both Lápiz and Resaltador start constant.
 
 No HTML is persisted. Plain Excalidraw text remains in `text` and `originalText`;
-Clarin formatting is stored only in `customData.clarinTextFormat` and
-`customData.clarinParagraphFormat`.
+Clarin formatting is stored only in `customData.clarinTextFormat`,
+`customData.clarinParagraphFormat` and `customData.clarinCharacterStyle`.

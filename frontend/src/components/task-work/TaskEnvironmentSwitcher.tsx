@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Check, ChevronDown, Globe2, Loader2, LockKeyhole, Plus, Search, Settings2, ShieldCheck, X } from 'lucide-react'
+import { Check, ChevronDown, Globe2, Loader2, LockKeyhole, Plus, Search, Settings2, ShieldCheck, Trash2, X } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import type { TaskEnvironment } from '@/types/task'
@@ -11,6 +11,7 @@ import { TaskContainerIcon } from './TaskContainerAppearance'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { environmentListQuery, taskAccessLabel } from './taskEnvironmentAccess'
 import { taskContainerCanManageStructure } from './taskContainerCapabilities'
+import { taskEnvironmentCanRemove } from './taskEnvironmentIndex'
 
 type EnvironmentListResponse = {
   environments: TaskEnvironment[]
@@ -26,6 +27,7 @@ interface Props {
   onSelect: (environment: TaskEnvironment) => void
   onCreate: () => void
   onConfigure: (environment: TaskEnvironment) => void
+  onRemove?: (environment: TaskEnvironment) => void
 }
 
 function mergeEnvironments(current: TaskEnvironment[], incoming: TaskEnvironment[]) {
@@ -44,6 +46,7 @@ export default function TaskEnvironmentSwitcher({
   onSelect,
   onCreate,
   onConfigure,
+  onRemove,
 }: Props) {
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -249,7 +252,7 @@ export default function TaskEnvironmentSwitcher({
 										<span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className="truncate text-sm font-bold text-slate-700">{environment.name}</span>{environment.is_default && <span className="rounded-md bg-violet-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-violet-600">General</span>}{environment.archived_at && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-amber-700">Histórico</span>}</span><span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">{environment.visibility === 'restricted' ? <LockKeyhole className="h-3 w-3" /> : <Globe2 className="h-3 w-3" />}<span>{environment.visibility === 'restricted' ? 'Privado' : 'Cuenta'}</span><span>·</span><span>{taskEnvironmentActorAccessLabel(environment)}</span></span></span>
                     {selected && <Check className="h-4 w-4 shrink-0 text-emerald-600" />}
                   </button>
-                  {taskContainerCanManageStructure(environment) && <button type="button" aria-label={`${environment.archived_at ? 'Restaurar' : 'Administrar'} ${environment.name}`} title={environment.archived_at ? 'Restaurar Entorno' : 'Administrar Entorno'} onClick={() => { onConfigure(environment); close(false) }} className="mr-2 rounded-lg p-1.5 text-slate-400 opacity-100 transition hover:bg-white hover:text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"><Settings2 className="h-3.5 w-3.5" /></button>}
+                  {taskContainerCanManageStructure(environment) && <button type="button" aria-label={`${environment.archived_at ? 'Restaurar' : 'Administrar'} ${environment.name}`} title={environment.archived_at ? 'Restaurar Entorno' : 'Administrar Entorno'} onClick={() => { onConfigure(environment); close(false) }} className="mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 transition hover:bg-white hover:text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"><Settings2 className="h-3.5 w-3.5" /></button>}
                 </div>
               </div>
             })}
@@ -259,9 +262,10 @@ export default function TaskEnvironmentSwitcher({
           {nextCursor && !error && <button type="button" disabled={loadingMore} onClick={() => void load(debouncedQuery, nextCursor, true, showArchived)} className="mx-2 mb-2 flex w-[calc(100%-1rem)] items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50">{loadingMore && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Cargar más</button>}
         </div>
 
-        <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/80 p-3">
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/80 p-3">
           {active && taskContainerCanManageStructure(active) && <button type="button" onClick={() => { onConfigure(active); close(false) }} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-600 hover:border-slate-300"><Settings2 className="h-3.5 w-3.5" />Administrar</button>}
           <button type="button" disabled={!allowCreate} title={!allowCreate ? 'Tu rol no permite crear Entornos' : 'Crear Entorno'} onClick={() => { onCreate(); close(false) }} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-35"><Plus className="h-3.5 w-3.5" />Nuevo Entorno</button>
+          {active && onRemove && taskEnvironmentCanRemove(active) && <button type="button" aria-label={`Eliminar Entorno ${active.name}`} onClick={() => { onRemove(active); close(false) }} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl px-3 text-xs font-bold text-rose-700 hover:bg-rose-50"><Trash2 className="h-4 w-4" />Eliminar…</button>}
         </div>
       </div>
     </>, document.body)}

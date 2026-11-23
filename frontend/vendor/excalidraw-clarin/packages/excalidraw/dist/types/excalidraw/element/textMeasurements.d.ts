@@ -30,9 +30,9 @@ export declare const getApproxMinLineHeight: (fontSize: ExcalidrawTextElement["f
  */
 export declare const setCustomTextMetricsProvider: (provider: TextMetricsProvider) => void;
 export interface TextMetricsProvider {
-    getLineWidth(text: string, fontString: FontString): number;
+    getLineWidth(text: string, fontString: FontString, direction?: CanvasDirection): number;
 }
-export declare const getLineWidth: (text: string, font: FontString) => number;
+export declare const getLineWidth: (text: string, font: FontString, direction?: CanvasDirection) => number;
 export declare const getTextWidth: (text: string, font: FontString) => number;
 export declare const getTextHeight: (text: string, fontSize: number, lineHeight: ExcalidrawTextElement["lineHeight"]) => number;
 export declare const charWidth: {

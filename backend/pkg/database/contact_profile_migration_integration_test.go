@@ -106,6 +106,13 @@ func TestContactProfileCanonicalBackfill(t *testing.T) {
 			t.Fatalf("seed fixture: %v\n%s", err, fixture.query)
 		}
 	}
+	// The setup above creates the current schema for the fixture. Model an
+	// actual legacy installation explicitly before exercising its first data
+	// migration; a completed installation must never replay this backfill.
+	if _, err := db.Exec(ctx, `DROP TRIGGER trg_contacts_sync_identity_snapshots ON contacts;
+		DELETE FROM app_data_migrations WHERE key='contact_profile_canonical_v1'`); err != nil {
+		t.Fatalf("prepare legacy Contact profile installation: %v", err)
+	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("canonical migrate: %v", err)
 	}

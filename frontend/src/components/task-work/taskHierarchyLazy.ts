@@ -1,4 +1,5 @@
 import type { TaskFolder, TaskList } from '@/types/task'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 export type TaskHierarchyLoadPhase = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -9,10 +10,11 @@ export interface TaskFolderChildrenState {
 }
 
 export interface TaskContainerLifecycleMutation {
-  type: 'list' | 'folder'
+  type: 'list' | 'folder' | 'environment'
   id: string
   action: 'archived' | 'trashed'
   operationID?: string
+  hierarchyCounts?: TaskHierarchyCounts
 }
 
 type ActiveHierarchy = {
@@ -76,6 +78,7 @@ export function removeTaskContainerFromActiveHierarchy<T extends ActiveHierarchy
   hierarchy: T,
   mutation: Pick<TaskContainerLifecycleMutation, 'type' | 'id'>,
 ): T {
+  if (mutation.type === 'environment') return { ...hierarchy, folders: [], rootLists: [] }
   if (mutation.type === 'folder') {
     const folders = hierarchy.folders.filter(folder => folder.id !== mutation.id)
     return folders.length === hierarchy.folders.length ? hierarchy : { ...hierarchy, folders }
@@ -99,6 +102,7 @@ export function taskContainerListIDs(
   hierarchy: ActiveHierarchy,
   mutation: Pick<TaskContainerLifecycleMutation, 'type' | 'id'>,
 ) {
+  if (mutation.type === 'environment') return new Set([...hierarchy.rootLists, ...hierarchy.folders.flatMap(folder => folder.lists || [])].map(list => list.id))
   if (mutation.type === 'list') return new Set([mutation.id])
   const folder = hierarchy.folders.find(item => item.id === mutation.id)
   return new Set((folder?.lists || []).map(list => list.id))
@@ -109,6 +113,7 @@ export function taskScopeAffectedByContainerRemoval(
   hierarchy: ActiveHierarchy,
   mutation: Pick<TaskContainerLifecycleMutation, 'type' | 'id'>,
 ) {
+  if (mutation.type === 'environment') return scope.type === 'environment' && scope.id === mutation.id
   if (mutation.type === 'list') return scope.type === 'list' && scope.id === mutation.id
   if (scope.type === 'folder') return scope.id === mutation.id
   if (scope.type !== 'list' || !scope.id) return false

@@ -102,3 +102,22 @@ describe('TaskEnvironmentSwitcher', () => {
     expect(taskEnvironmentActorAccessLabel(withoutCapability)).toBe('Sin acceso')
   })
 })
+
+it('offers removal of a populated managed environment without writing or trusting cached counts', async () => {
+  const populated = { ...environment, id: 'private', name: 'Privado', is_default: false, task_count: 90, open_task_count: 70 }
+  const remove = vi.fn()
+  vi.mocked(apiGet).mockResolvedValue({ success: true, data: { environments: [populated] } })
+  render(<TaskEnvironmentSwitcher active={populated} environments={[populated]} canCreate={false} onSelect={vi.fn()} onCreate={vi.fn()} onConfigure={vi.fn()} onRemove={remove} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Entorno Privado' }))
+  const action = await screen.findByRole('button', { name: 'Eliminar Entorno Privado' })
+  expect(action).toBeEnabled()
+  expect(remove).not.toHaveBeenCalled()
+  fireEvent.click(action)
+  expect(remove).toHaveBeenCalledExactlyOnceWith(populated)
+})
+it('does not offer environment removal for General', async () => {
+  vi.mocked(apiGet).mockResolvedValue({ success: true, data: { environments: [environment] } })
+  render(<TaskEnvironmentSwitcher active={environment} environments={[environment]} canCreate={false} onSelect={vi.fn()} onCreate={vi.fn()} onConfigure={vi.fn()} onRemove={vi.fn()} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Entorno General' }))
+  expect(screen.queryByRole('button', { name: 'Eliminar Entorno General' })).not.toBeInTheDocument()
+})

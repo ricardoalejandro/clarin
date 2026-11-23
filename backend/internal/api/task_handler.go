@@ -1736,8 +1736,8 @@ func (s *Server) handleUpdateTaskList(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
 	}
 
-	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.Icon, req.SortOrder); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update task list"})
+	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.Icon, req.SortOrder, c.Locals("user_id").(uuid.UUID)); err != nil {
+		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
 

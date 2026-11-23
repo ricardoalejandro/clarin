@@ -321,6 +321,12 @@ func RestoreTaskStorageReferenceTx(ctx context.Context, tx pgx.Tx, accountID, ac
 // Every attachment entry point calls this while holding the attachment row
 // where it subsequently mutates child state. A removed reference is hidden.
 func requireActiveTaskAttachmentTx(ctx context.Context, tx pgx.Tx, accountID, taskID, attachmentID uuid.UUID) error {
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", []uuid.UUID{taskID}, false); err != nil {
+		return err
+	}
+	if err := requireActiveWorkTaskTx(ctx, tx, accountID, taskID); err != nil {
+		return err
+	}
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT id FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3
 		AND storage_removed_at IS NULL AND attachment_scope<>'comment_draft' FOR SHARE`, accountID, taskID, attachmentID).Scan(&id)

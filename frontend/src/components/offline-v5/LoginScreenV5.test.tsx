@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   beginOnline: vi.fn(),
   cancelOnline: vi.fn(),
   completeOnline: vi.fn(),
+  markAuthTokenRefreshed: vi.fn(),
   hasWorkerRegistration: vi.fn(),
   storeExpectation: vi.fn(),
   runtimeActive: false,
@@ -33,7 +34,7 @@ vi.mock('@/components/branding/ClarinBrandMark', () => ({ default: () => <span a
 vi.mock('@/lib/api', () => ({
   getLoginNoticeForLogoutReason: () => '',
   invalidateOfflineBeforeIdentityChange: mocks.invalidate,
-  markAuthTokenRefreshed: vi.fn(),
+  markAuthTokenRefreshed: mocks.markAuthTokenRefreshed,
 }))
 // Cookie ordering is covered against a shared LockManager in authCookieLock.test.ts.
 // These component tests simulate the HTTP result and the offline transition.
@@ -214,10 +215,14 @@ describe('Login normal con copias Offline v5', () => {
   it('completes only the v5 transition after Clarin verifies the exact offline identity', async () => {
     const userId = '11111111-1111-4111-8111-111111111111'
     const accountId = '22222222-2222-4222-8222-222222222222'
+    const session = {
+      scope: 'login-scope', account_id: accountId, idle_timeout_minutes: 30,
+      server_now: '2026-11-05T19:00:00Z', idle_expires_at: '2026-11-05T19:30:00Z', absolute_expires_at: '2026-11-12T19:00:00Z',
+    }
     mocks.expectation = { version: 3, user_id: userId, account_id: accountId, issued_at: Date.now() }
     window.history.replaceState({}, '', '/login?offline_reauth=1')
     vi.mocked(fetch).mockImplementation(async input => {
-      if (String(input).includes('/api/auth/login')) return new Response(JSON.stringify({ success: true, user: { id: userId, account_id: accountId } }), { status: 200, headers: { 'Content-Type': 'application/json', 'X-Clarin-Response': '1' } })
+      if (String(input).includes('/api/auth/login')) return new Response(JSON.stringify({ success: true, user: { id: userId, account_id: accountId }, session }), { status: 200, headers: { 'Content-Type': 'application/json', 'X-Clarin-Response': '1' } })
       return new Response(JSON.stringify({ success: true, login_enabled: true, login_turnstile_required: false }), { status: 200, headers: { 'Content-Type': 'application/json', 'X-Clarin-Response': '1' } })
     })
 
@@ -231,6 +236,7 @@ describe('Login normal con copias Offline v5', () => {
     expect(mocks.beginOnline).toHaveBeenCalledOnce()
     expect(mocks.invalidate).not.toHaveBeenCalled()
     expect(mocks.lock).not.toHaveBeenCalled()
+    expect(mocks.markAuthTokenRefreshed).toHaveBeenCalledExactlyOnceWith(session)
     expect(mocks.navigateOnline).toHaveBeenCalledExactlyOnceWith(null)
     expect(mocks.completeOnline.mock.invocationCallOrder[0]).toBeLessThan(mocks.navigateOnline.mock.invocationCallOrder[0])
     expect(mocks.push).not.toHaveBeenCalled()

@@ -1,8 +1,8 @@
 # Pizarras Clarin: avisos de terceros
 
-Pizarras Clarin integra el fork auditable `@excalidraw/excalidraw` **0.18.1-clarin.8**, derivado sin saltos del tag upstream `v0.18.1` y del commit exacto `a2ec2889babf7d2295469c6d90ebe77fae57df84`. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
+Pizarras Clarin integra el fork auditable `@excalidraw/excalidraw` **0.18.1-clarin.9**, derivado sin saltos del tag upstream `v0.18.1` y del commit exacto `a2ec2889babf7d2295469c6d90ebe77fae57df84`. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
 
-El código fuente mantenido vive en `frontend/vendor/excalidraw-clarin`. La superficie propia se limita al modelo de marcas parciales de texto y alineación por párrafos, el editor `contenteditable` con navegación nativa de líneas vacías y reconciliación IME, selección y portapapeles enriquecido, medición/render de runs y párrafos, controles accesibles, precarga determinista de fuentes locales y el backport documentado de presión constante/variable. La compilación genera la ruta inmutable `/vendor/whiteboards-editor/0.18.1-clarin.8/`; el catálogo no inicia cargas por apertura, hover, foco, desplazamiento ni selección.
+El código fuente mantenido vive en `frontend/vendor/excalidraw-clarin`. La superficie propia se limita al modelo de marcas parciales de texto y alineación por párrafos, el editor `contenteditable` con navegación nativa de líneas vacías y reconciliación IME, selección y portapapeles enriquecido, medición/render de runs y párrafos, controles accesibles, precarga determinista de fuentes locales y el backport documentado de presión constante/variable. La compilación genera la ruta inmutable `/vendor/whiteboards-editor/0.18.1-clarin.9/`; el catálogo no inicia cargas por apertura, hover, foco, desplazamiento ni selección.
 
 ## Licencia del editor
 
@@ -22,9 +22,13 @@ El orden fraccional del editor usa `fractional-indexing@3.2.0`, publicado bajo C
 
 El modo de trazo constante usa `@excalidraw/laser-pointer@1.3.1`, publicado bajo MIT, Copyright (c) 2023 Excalidraw. La dependencia ya forma parte del cierre exacto fijado por `v0.18.1`; Clarin distribuye su licencia completa como `frontend/third_party/excalidraw/LASER-POINTER-MIT.txt` y no incorpora servicios ni tráfico de red asociados.
 
-## Estado del candidato (2026-10-12)
+## Dependencias verificadas (2026-11-05)
 
-La baseline vigente del candidato es [supply-chain-2026-10-12.json](third_party/excalidraw/supply-chain-2026-10-12.json), no la baseline histórica de agosto. El árbol del fork `0.18.1-clarin.8` tiene SHA-256 `b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9`. Su [SBOM CycloneDX 1.6 archivado](third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contiene 248 componentes y tiene SHA-256 `11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef`.
+Mermaid `11.16.1` usa KaTeX `0.18.2` para corregir [GHSA-238p-pmpm-9mq7](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7). La [baseline](third_party/excalidraw/supply-chain-2026-11-05-katex.json) vincula el lockfile a la [auditoría npm de producción](third_party/excalidraw/npm-audit-2026-11-05-katex.json) y al [inventario CycloneDX](third_party/excalidraw/excalidraw-0.18.1-clarin.9.cdx.json) de 248 componentes. Los [textos de licencia](third_party/excalidraw/DEPENDENCY-LICENSES.txt) incluyen la licencia MIT de KaTeX.
+
+## Evidencia histórica (2026-10-12)
+
+La [baseline de octubre](third_party/excalidraw/supply-chain-2026-10-12.json) registra el árbol y el inventario de esa revisión.
 
 El [escaneo histórico del lock de septiembre](../docs/security-dependency-audit-after-2026-09-14.json), ejecutado el 14 de septiembre de 2026 a las 23:32 UTC, registra cero hallazgos en npm tanto con desarrollo como con `--omit=dev`. Se consultaron 710 versiones públicas exactas en OSV y GitHub, incluyendo el origen upstream `0.18.1` del fork privado. Ese cierre del motor no presentaba coincidencias activas en la fecha indicada; la baseline de octubre conserva los nuevos avisos de braces y KaTeX. Los dos resultados brutos OSV de SheetJS, fuera de ese cierre, se clasifican como no afectados por las correcciones oficiales anteriores al tarball 0.20.3 verificado byte a byte; el resultado GitHub de esbuild está retirado. El informe conserva resultados y razonamiento, sin declarar que las bases devuelven literalmente cero registros.
 
@@ -41,6 +45,60 @@ El [audit npm de producción de 2026-10-12](third_party/excalidraw/npm-audit-202
 El [aviso de braces](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) requiere que patrones de llaves profundamente anidados alcancen su parser y pueden agotar la pila de Node. La dependencia entra por Sass/Chokidar y el build del fork usa `sassPlugin`; no se hallaron importaciones de esos paquetes en la fuente de navegador ni sus módulos en los 156 chunks inspeccionados. Esto respalda alcance de compilación en este artefacto, con el límite de que son chunks de desarrollo y no una prueba global de toda la aplicación. El [aviso de KaTeX](https://github.com/advisories/GHSA-238p-pmpm-9mq7) sí afecta una dependencia alcanzable en navegador. Su explotación requiere contaminación previa de `Object.prototype` o prototipos de opciones controlados por un atacante, además de matemáticas controladas por éste; KaTeX no origina esa contaminación. No se probó explotación ni elusión del sanitizador. Ambos avisos permanecen en revisión y esta entrega no los corrige.
 
 El estado es **candidato pendiente de verificación final**. La promoción permanece **NO-GO mientras falten los gates finales de release**, especialmente build final, navegador, egress, colaboración, artefacto de rollback y verificación del despliegue autorizado. Ningún escaneo garantiza ausencia de vulnerabilidades desconocidas. La activación Offline v3 conserva su gate independiente de aceptación Windows real. El [informe histórico de actualización](../docs/security-dependency-upgrade-2026-09-14.md) distingue pruebas realizadas en septiembre de comprobaciones pendientes.
+
+## Datos Unicode 18 para continuidad de escritura
+
+El contexto visual de unión entre fragmentos tipográficos usa únicamente los valores `Joining_Type` de [DerivedJoiningType-18.0.0.txt](https://www.unicode.org/Public/18.0.0/ucd/extracted/DerivedJoiningType.txt), publicado por Unicode, Inc. La tabla local `vendor/excalidraw-clarin/packages/excalidraw/element/clarinJoiningTypes18.ts` contiene 533 intervalos ordenados y disjuntos, tras combinar intervalos contiguos del mismo tipo; los puntos no enumerados conservan el valor predeterminado `U`. No se distribuye el UCD completo y no se consulta ninguna fuente externa durante el uso del editor.
+
+La fuente inmutable tiene SHA-256 `e2408ff2c92b175b0f7bf62c989bbb54c7b077528fe31f8d69b96fa09e7d61ed`. La representación normalizada `JSON.stringify` de las ternas numéricas `[inicio, fin, tipo]` tiene SHA-256 `94c61d3088de42c0e1c4c0026a64863d37a273d7318bd9ea9c45936cbf53b1ca`. Conserva exactamente 7 puntos `C`, 615 `D`, 153 `R`, 27 `L` y 2255 `T`. Las pruebas verifican el hash normalizado, los límites, la ausencia de solapamiento, las cardinalidades y la búsqueda de todos los puntos enumerados. La regla de unión aplica la definición [Joining_Type de UAX #44](https://www.unicode.org/reports/tr44/tr44-38.html#Joining_Type); omite sólo `T`, mientras `U`, incluido ZWNJ, rompe la conexión.
+
+Los ZWJ añadidos sirven exclusivamente para componer la apariencia de un fragmento. No cambian el texto canónico, sus offsets UTF-16, las revisiones, el portapapeles ni los formatos exportados editables. El aviso completo siguiente se incorpora al `NOTICE.md` de la distribución compilada mediante el flujo existente `prepare:excalidraw`.
+
+### Unicode License V3
+
+Fuente del aviso: <https://www.unicode.org/license.txt>.
+
+```text
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
 
 ## Registro histórico, no vigente
 

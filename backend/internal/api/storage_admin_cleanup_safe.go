@@ -49,7 +49,7 @@ func (s *Server) storageAdminRemoveOrphan(ctx context.Context, actorID uuid.UUID
 		 EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging'))
 		 OR EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging'))
 		 OR EXISTS(SELECT 1 FROM storage_upload_ownership WHERE account_id=$1 AND object_key=$2 AND state='active')
-		 OR EXISTS(SELECT 1 FROM media_assets WHERE account_id=$1 AND object_key=$2 AND status='active')`, accountID, item.ObjectKey).Scan(&retained)
+		 OR EXISTS(SELECT 1 FROM media_assets WHERE account_id=$1 AND object_key=$2 AND (status='active' AND NOT (`+storageLinkPreviewAssetSQL+`) OR (`+storageLinkPreviewAssetLeaseSQL+`)))`, accountID, item.ObjectKey).Scan(&retained)
 		if err != nil {
 			return 0, err
 		}

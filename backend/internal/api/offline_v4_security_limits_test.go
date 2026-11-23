@@ -98,7 +98,12 @@ func TestOfflineV4GuardRejectsOversizeBeforeHandlerAndPermitsExactBoundary(t *te
 
 func TestOfflineV4GuardRejectsEncodingBeforeDecompression(t *testing.T) {
 	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
+	// Explicit compression keeps this an encoding-guard test across Go's
+	// default deflate implementation changes, rather than a ratio benchmark.
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, _ = writer.Write(bytes.Repeat([]byte("x"), 2<<20))
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)

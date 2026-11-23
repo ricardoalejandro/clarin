@@ -234,6 +234,11 @@ func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task
 	if !taskParticipantMembershipsLocked(lockedParticipantMemberships, participantIDs) {
 		return ErrTaskAccessInvalid
 	}
+	if t.ListID != nil {
+		if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, t.AccountID, "list", []uuid.UUID{*t.ListID}, false); err != nil {
+			return err
+		}
+	}
 	var environmentID uuid.UUID
 	// Serialize placement per list. This prevents simultaneous quick creates
 	// from receiving the same order while keeping different lists independent.
@@ -250,7 +255,7 @@ func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task
 			return err
 		}
 	} else {
-		if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, t.AccountID).Scan(new(uuid.UUID)); err != nil {
+		if err := lockLegacyTaskOrderTx(ctx, tx, t.AccountID); err != nil {
 			return err
 		}
 	}
@@ -483,6 +488,9 @@ func (r *TaskRepository) UpdateTx(ctx context.Context, tx pgx.Tx, t *domain.Task
 	if t.ListID != nil && (observedListID == nil || *t.ListID != *observedListID) {
 		listIDs = append(listIDs, *t.ListID)
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, t.AccountID, "list", listIDs, false); err != nil {
+		return err
+	}
 	if len(listIDs) > 0 {
 		rows, err := tx.Query(ctx, `SELECT id,environment_id,archived_at FROM task_lists
 			WHERE account_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL ORDER BY id FOR UPDATE`, t.AccountID, listIDs)
@@ -562,7 +570,7 @@ func (r *TaskRepository) UpdateTx(ctx context.Context, tx pgx.Tx, t *domain.Task
 				return &TaskParticipantAccessConfirmationError{AffectedUserIDs: affectedParticipants}
 			}
 		}
-	} else if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, t.AccountID).Scan(new(uuid.UUID)); err != nil {
+	} else if err := lockLegacyTaskOrderTx(ctx, tx, t.AccountID); err != nil {
 		return err
 	}
 	if observedParentID != nil {
@@ -755,8 +763,22 @@ func (r *TaskRepository) GetByIDForActor(ctx context.Context, id, accountID, act
 }
 
 func (r *TaskRepository) MarkCompleted(ctx context.Context, id, accountID, completedBy uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, completedBy, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", []uuid.UUID{id}, false); err != nil {
+		return err
+	}
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, completedBy, []uuid.UUID{id}, domain.TaskAccessEdit); err != nil {
+		return err
+	}
 	now := time.Now()
-	command, err := r.db.Exec(ctx, `
+	command, err := tx.Exec(ctx, `
 		UPDATE tasks SET status='completed',
 			status_id=COALESCE((
 				SELECT done.id FROM task_statuses current_status
@@ -774,7 +796,7 @@ func (r *TaskRepository) MarkCompleted(ctx context.Context, id, accountID, compl
 	if command.RowsAffected() == 0 {
 		return ErrTaskWorkNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *TaskRepository) RecurringOccurrenceExists(ctx context.Context, accountID, rootID uuid.UUID, dueAt time.Time) (bool, error) {
@@ -1548,6 +1570,13 @@ func (r *TaskRepository) SyncReminder(ctx context.Context, taskID uuid.UUID) err
 }
 
 func syncTaskReminderTx(ctx context.Context, tx pgx.Tx, taskID uuid.UUID) error {
+	var discoveredAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT account_id FROM tasks WHERE id=$1`, taskID).Scan(&discoveredAccountID); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, discoveredAccountID, "task", []uuid.UUID{taskID}, false); err != nil {
+		return err
+	}
 	var accountID, assignedTo uuid.UUID
 	var dueAt, deletedAt *time.Time
 	var reminderMinutes *int
@@ -1741,6 +1770,10 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, l.AccountID, "environment", []uuid.UUID{l.EnvironmentID}, false); err != nil {
+		return err
+	}
+
 	if err := tx.QueryRow(ctx, `SELECT id FROM task_environments
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR KEY SHARE`, l.AccountID, l.EnvironmentID).
 		Scan(new(uuid.UUID)); err != nil {
@@ -1801,7 +1834,32 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	return tx.Commit(ctx)
 }
 
-func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID, name, color, icon *string, sortOrder *int) error {
+func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID, name, color, icon *string, sortOrder *int, actors ...uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if len(actors) > 0 {
+		if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actors[0], nil); err != nil {
+			return err
+		}
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{id}, false); err != nil {
+		return err
+	}
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL AND archived_at IS NULL FOR UPDATE`, accountID, id).Scan(&environmentID); err != nil {
+		return ErrTaskWorkNotFound
+	}
+	if err := requireActiveWorkEnvironmentTx(ctx, tx, accountID, environmentID); err != nil {
+		return err
+	}
+	if len(actors) > 0 {
+		if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actors[0], id, "list", domain.TaskAccessFull); err != nil {
+			return err
+		}
+	}
 	sets := []string{"updated_at=NOW()"}
 	args := []interface{}{}
 	idx := 1
@@ -1829,8 +1887,11 @@ func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID
 
 	args = append(args, id, accountID)
 	query := fmt.Sprintf("UPDATE task_lists SET %s WHERE id=$%d AND account_id=$%d AND archived_at IS NULL AND deleted_at IS NULL", strings.Join(sets, ", "), idx, idx+1)
-	_, err := r.db.Exec(ctx, query, args...)
-	return err
+	_, err = tx.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID) error {
@@ -1839,6 +1900,10 @@ func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{id}, false); err != nil {
+		return err
+	}
+
 	var isDefault bool
 	if err := tx.QueryRow(ctx, `SELECT is_default FROM task_lists
 		WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL FOR UPDATE`, id, accountID).Scan(&isDefault); err != nil {
@@ -1869,6 +1934,13 @@ func (r *TaskRepository) ToggleStar(ctx context.Context, id, accountID, actorID 
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return false, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", []uuid.UUID{id}, false); err != nil {
+		return false, err
+	}
+
 	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{id}, domain.TaskAccessEdit); err != nil {
 		return false, err
 	}
@@ -1903,6 +1975,13 @@ func (r *TaskRepository) ReorderTasks(ctx context.Context, accountID, actorID uu
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", taskIDs, false); err != nil {
+		return err
+	}
+
 	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID, taskIDs, domain.TaskAccessEdit); err != nil {
 		return err
 	}
@@ -1941,7 +2020,7 @@ func (r *TaskRepository) ReorderTasks(ctx context.Context, accountID, actorID uu
 		if err := tx.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, *listID).Scan(new(uuid.UUID)); err != nil {
 			return err
 		}
-	} else if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(new(uuid.UUID)); err != nil {
+	} else if err := lockLegacyTaskOrderTx(ctx, tx, accountID); err != nil {
 		return err
 	}
 	rows, err = tx.Query(ctx, `SELECT id FROM tasks WHERE account_id=$1
@@ -2024,6 +2103,12 @@ func (r *TaskRepository) ReorderLists(ctx context.Context, accountID, actorID uu
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", listIDs, false); err != nil {
+		return err
+	}
 
 	rows, err := tx.Query(ctx, `SELECT list_item.id,list_item.environment_id,list_item.folder_id,list_item.is_default
 		FROM task_lists list_item

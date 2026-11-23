@@ -68,6 +68,9 @@ func lockWorkWhiteboardParentViewTx(
 		return state, err
 	}
 
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, state.ScopeType, []uuid.UUID{state.ScopeID}, false); err != nil {
+		return nil, err
+	}
 	parentQuery := `SELECT archived_at,deleted_at FROM task_folders
 		WHERE account_id=$1 AND id=$2 FOR SHARE`
 	if state.ScopeType == domain.TaskAccessTargetList {

@@ -27,7 +27,7 @@ class SaveHarness {
     await Promise.all([...this.sockets].map(socket => socket.close({ code: 1001, reason: 'QA network disconnected' })))
   }
   sceneRecord() {
-    return { board_id: boardID, sequence: this.sequence, editor_version: '0.18.1-clarin.8', scene_schema_version: 'excalidraw', updated_at: '2026-10-12T00:00:00Z',
+    return { board_id: boardID, sequence: this.sequence, editor_version: '0.18.1-clarin.9', scene_schema_version: 'excalidraw', updated_at: '2026-10-12T00:00:00Z',
       scene: { type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements), appState: { viewBackgroundColor: '#ffffff' }, files: {} } }
   }
   commit(operationID: string, elements: Element[]) {

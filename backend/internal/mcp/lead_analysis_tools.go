@@ -1539,7 +1539,7 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	where := ` WHERE m.account_id = $1 AND ch.account_id = $1`
+	where := ` WHERE m.account_id = $1 AND ch.account_id = $1 AND ch.jid NOT LIKE '%@g.us'`
 	args := []any{accountID}
 	argN := 2
 

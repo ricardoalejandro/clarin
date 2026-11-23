@@ -164,6 +164,27 @@ import {
   getClarinParagraphFormat,
   updateClarinParagraphCustomData,
 } from "../element/clarinParagraphFormat";
+import { clearClarinCharacterStyleProperty, getClarinCharacterStyle, getClarinEffectiveCharacterStyle } from "../element/clarinCharacterStyle";
+
+const activeClarinCharacterEditor = (appState: AppState) => {
+  const editor = getActiveClarinRichTextEditor();
+  return editor?.elementId === appState.editingTextElement?.id ? editor : null;
+};
+const captureClarinCharacterSelection = (appState: AppState) => activeClarinCharacterEditor(appState)?.captureSelection();
+const useClarinCharacterState = (appState: AppState, property: "color" | "fontFamily" | "fontSize", elements: readonly ExcalidrawElement[]) => {
+  useSyncExternalStore(subscribeClarinRichTextState, getClarinRichTextStateVersion, getClarinRichTextStateVersion);
+  const editor = activeClarinCharacterEditor(appState);
+  if (editor) return editor.getCharacterStyleState(property);
+  const targets = getClarinTextTargets(elements, appState);
+  if (!targets.length) return undefined;
+  const values = targets.flatMap((element) => {
+    const format = getClarinCharacterStyle(element);
+    const points = new Set([0]);
+    for (const run of format?.runs || []) { points.add(run.from); if (run.to < element.originalText.length) points.add(run.to); }
+    return [...points].map((offset) => getClarinEffectiveCharacterStyle(element, offset, format)[property]);
+  });
+  return values.every((value) => value === values[0]) ? values[0] : "mixed";
+};
 
 const FONT_SIZE_RELATIVE_INCREASE_STEP = 0.1;
 
@@ -548,7 +569,8 @@ const changeFontSize = (
 
         let newElement: ExcalidrawTextElement = newElementWith(oldElement, {
           fontSize: newFontSize,
-        });
+          customData: clearClarinCharacterStyleProperty(oldElement.customData, "fontScale"),
+        }, shouldForceClarinCustomDataRemoval(oldElement.customData, clearClarinCharacterStyleProperty(oldElement.customData, "fontScale")));
         redrawTextBoundingBox(
           newElement,
           app.scene.getContainerElement(oldElement),
@@ -599,6 +621,12 @@ export const actionChangeStrokeColor = register({
   label: "labels.stroke",
   trackEvent: false,
   perform: (elements, appState, value) => {
+    const activeEditor = activeClarinCharacterEditor(appState);
+    if (activeEditor && value.currentItemStrokeColor) {
+      activeEditor.setCharacterStyle("color", value.currentItemStrokeColor);
+      return { appState: { ...appState, ...value, openPopup: null }, captureUpdate: CaptureUpdateAction.NEVER };
+    }
+    if (activeEditor && value.openPopup === null) activeEditor.restoreSelection();
     return {
       ...(value.currentItemStrokeColor && {
         elements: changeProperty(
@@ -608,7 +636,8 @@ export const actionChangeStrokeColor = register({
             return hasStrokeColor(el.type)
               ? newElementWith(el, {
                   strokeColor: value.currentItemStrokeColor,
-                })
+                  ...(isTextElement(el) ? { customData: clearClarinCharacterStyleProperty(el.customData, "color") } : {}),
+                }, isTextElement(el) && shouldForceClarinCustomDataRemoval(el.customData, clearClarinCharacterStyleProperty(el.customData, "color")))
               : el;
           },
           true,
@@ -623,15 +652,17 @@ export const actionChangeStrokeColor = register({
         : CaptureUpdateAction.EVENTUALLY,
     };
   },
-  PanelComponent: ({ elements, appState, updateData, appProps }) => (
-    <>
+  PanelComponent: ({ elements, appState, updateData, appProps }) => {
+    const state = useClarinCharacterState(appState, "color", elements);
+    return <fieldset onPointerDownCapture={() => captureClarinCharacterSelection(appState)} onFocusCapture={() => captureClarinCharacterSelection(appState)}>
       <h3 aria-hidden="true">{t("labels.stroke")}</h3>
+      {state === "mixed" && <span role="status">Color mixto</span>}
       <ColorPicker
         topPicks={DEFAULT_ELEMENT_STROKE_PICKS}
         palette={DEFAULT_ELEMENT_STROKE_COLOR_PALETTE}
         type="elementStroke"
         label={t("labels.stroke")}
-        color={getFormValue(
+        color={state !== undefined && state !== "mixed" ? String(state) : state === "mixed" ? "" : getFormValue(
           elements,
           appState,
           (element) => element.strokeColor,
@@ -643,8 +674,8 @@ export const actionChangeStrokeColor = register({
         appState={appState}
         updateData={updateData}
       />
-    </>
-  ),
+    </fieldset>;
+  },
 });
 
 export const actionChangeBackgroundColor = register({
@@ -1055,11 +1086,15 @@ export const actionChangeFontSize = register({
   label: "labels.fontSize",
   trackEvent: false,
   perform: (elements, appState, value, app) => {
+    const editor = activeClarinCharacterEditor(appState);
+    if (editor) { editor.setCharacterStyle("fontSize", value); return { captureUpdate: CaptureUpdateAction.NEVER }; }
     return changeFontSize(elements, appState, app, () => value, value);
   },
-  PanelComponent: ({ elements, appState, updateData, app }) => (
-    <fieldset>
+  PanelComponent: ({ elements, appState, updateData, app }) => {
+    const state = useClarinCharacterState(appState, "fontSize", elements);
+    return <fieldset onPointerDownCapture={() => captureClarinCharacterSelection(appState)} onFocusCapture={() => captureClarinCharacterSelection(appState)}>
       <legend>{t("labels.fontSize")}</legend>
+      {state === "mixed" && <span role="status">Tamaño mixto</span>}
       <ButtonIconSelect
         group="font-size"
         options={[
@@ -1088,7 +1123,7 @@ export const actionChangeFontSize = register({
             testId: "fontSize-veryLarge",
           },
         ]}
-        value={getFormValue(
+        value={state !== undefined ? state === "mixed" ? null : Number(state) : getFormValue(
           elements,
           appState,
           (element) => {
@@ -1117,8 +1152,8 @@ export const actionChangeFontSize = register({
         )}
         onChange={(value) => updateData(value)}
       />
-    </fieldset>
-  ),
+    </fieldset>;
+  },
 });
 
 export const actionDecreaseFontSize = register({
@@ -1127,6 +1162,8 @@ export const actionDecreaseFontSize = register({
   icon: fontSizeIcon,
   trackEvent: false,
   perform: (elements, appState, value, app) => {
+    const editor = activeClarinCharacterEditor(appState);
+    if (editor) { editor.scaleFontSize(1 / (1 + FONT_SIZE_RELATIVE_INCREASE_STEP)); return { captureUpdate: CaptureUpdateAction.NEVER }; }
     return changeFontSize(elements, appState, app, (element) =>
       Math.round(
         // get previous value before relative increase (doesn't work fully
@@ -1151,6 +1188,8 @@ export const actionIncreaseFontSize = register({
   icon: fontSizeIcon,
   trackEvent: false,
   perform: (elements, appState, value, app) => {
+    const editor = activeClarinCharacterEditor(appState);
+    if (editor) { editor.scaleFontSize(1 + FONT_SIZE_RELATIVE_INCREASE_STEP); return { captureUpdate: CaptureUpdateAction.NEVER }; }
     return changeFontSize(elements, appState, app, (element) =>
       Math.round(element.fontSize * (1 + FONT_SIZE_RELATIVE_INCREASE_STEP)),
     );
@@ -1186,6 +1225,13 @@ export const actionChangeFontFamily = register({
   perform: (elements, appState, value, app) => {
     const { cachedElements, resetAll, resetContainers, ...nextAppState } =
       value as ChangeFontFamilyData;
+    const activeEditor = activeClarinCharacterEditor(appState);
+    if (activeEditor) {
+      if (value.currentItemFontFamily) activeEditor.setCharacterStyle("fontFamily", value.currentItemFontFamily);
+      else if (nextAppState.openPopup === null) activeEditor.restoreSelection();
+      // A font hover previews the picker sample; only selection mutates text.
+      return { appState: { ...appState, ...nextAppState }, captureUpdate: CaptureUpdateAction.NEVER };
+    }
 
     if (resetAll) {
       const nextElements = changeProperty(
@@ -1303,7 +1349,9 @@ export const actionChangeFontFamily = register({
                 {
                   fontFamily: nextFontFamily,
                   lineHeight: getLineHeight(nextFontFamily!),
+                  customData: clearClarinCharacterStyleProperty(oldElement.customData, "fontFamily"),
                 },
+                shouldForceClarinCustomDataRemoval(oldElement.customData, clearClarinCharacterStyleProperty(oldElement.customData, "fontFamily")),
               );
 
               const cachedContainer =
@@ -1381,6 +1429,7 @@ export const actionChangeFontFamily = register({
     return result;
   },
   PanelComponent: ({ elements, appState, app, updateData }) => {
+    const characterFontState = useClarinCharacterState(appState, "fontFamily", elements);
     const cachedElementsRef = useRef<Map<string, ExcalidrawElement>>(new Map());
     const prevSelectedFontFamilyRef = useRef<number | null>(null);
     // relying on state batching as multiple `FontPicker` handlers could be called in rapid succession and we want to combine them
@@ -1457,11 +1506,12 @@ export const actionChangeFontFamily = register({
     }, []);
 
     return (
-      <fieldset>
+      <fieldset onPointerDownCapture={() => captureClarinCharacterSelection(appState)} onFocusCapture={() => captureClarinCharacterSelection(appState)}>
         <legend>{t("labels.fontFamily")}</legend>
+        {characterFontState === "mixed" && <span role="status">Fuente mixta</span>}
         <FontPicker
           isOpened={appState.openPopup === "fontFamily"}
-          selectedFontFamily={selectedFontFamily}
+          selectedFontFamily={characterFontState === undefined ? selectedFontFamily : characterFontState === "mixed" ? null : Number(characterFontState)}
           hoveredFontFamily={appState.currentHoveredFontFamily}
           onSelect={(fontFamily) => {
             setBatchedData({
