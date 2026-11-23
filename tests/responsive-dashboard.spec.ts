@@ -1901,6 +1901,71 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expectToolbarOutsideEditor(page, toolbar, desktopComposer)
   })
 
+  test('Programas importación revisa el conflicto y conserva el archivo al cambiar de tamaño', async ({ page }, testInfo) => {
+    test.setTimeout(90_000)
+    test.skip(!useMockSession, 'La transferencia usa únicamente datos sintéticos en esta prueba')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    const portable = { version: 1, records: [{ kind: 'program', id: 'portable-program' }], signature: 'synthetic-installation-signature' }
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = []
+    const summary = { create: 4, update: 0, unchanged: 2, conflicts: 1 }
+    await page.route('**/api/programs/transfer/**', async route => {
+      const path = new URL(route.request().url()).pathname
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      requests.push({ path, body })
+      if (path.endsWith('/preview')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+          token: 'synthetic-preview', program_name: 'Programa de prueba', summary,
+          conflicts: [{ key: 'attendance-status', kind: 'attendance', label: 'Asistencia de Ana', field: 'status', local: 'present', incoming: 'absent' }],
+          items: [{ action: 'create', kind: 'session', label: 'Clase importada' }],
+        }) })
+        return
+      }
+      expect(path).toBe('/api/programs/transfer/confirm')
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        program_id: 'program-1', summary: { ...summary, conflicts: 0 },
+      }) })
+    })
+    await page.goto(`${baseURL}/dashboard/programs`, { waitUntil: 'domcontentloaded' })
+    const trigger = page.getByRole('button', { name: 'Importar programa', exact: true })
+    await trigger.click()
+    const dialog = page.getByRole('dialog', { name: 'Importar programa', exact: true })
+    await expectInsideVisualViewport(page, dialog)
+    await dialog.getByLabel('Archivo de programa', { exact: true }).setInputFiles({
+      name: 'programa.clarin-program.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(portable)),
+    })
+    await expect(dialog.getByText('Seleccionado: programa.clarin-program.json')).toBeVisible()
+    await dialog.getByRole('button', { name: 'Generar vista previa', exact: true }).click()
+    await expect(dialog.getByRole('heading', { name: /Vista previa/ })).toBeVisible()
+    await expect(dialog.getByText('Presente', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Ausente', { exact: true })).toBeVisible()
+    expect(requests.map(request => request.path)).toEqual(['/api/programs/transfer/preview'])
+    const confirm = dialog.getByRole('button', { name: 'Confirmar importación', exact: true })
+    await expect(confirm).toBeDisabled()
+    await expectInsideVisualViewport(page, confirm)
+    await page.setViewportSize({ width: 375, height: 667 })
+    await expect(dialog).toBeHidden()
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText('Seleccionado: programa.clarin-program.json')).toBeVisible()
+    await expect(confirm).toBeDisabled()
+    const keepLocal = dialog.getByRole('radio', { name: 'Conservar el dato local', exact: true })
+    await keepLocal.focus()
+    await keepLocal.press('Space')
+    await expect(confirm).toBeEnabled()
+    await confirm.click()
+    await expect(dialog.getByRole('status')).toHaveText(/Importación finalizada/)
+    expect(requests).toEqual([
+      { path: '/api/programs/transfer/preview', body: { file: portable } },
+      { path: '/api/programs/transfer/confirm', body: { file: portable, token: 'synthetic-preview', decisions: { 'attendance-status': 'local' } } },
+    ])
+    await expect(dialog.getByRole('link', { name: 'Ver programa' })).toHaveAttribute('href', '/dashboard/programs/program-1')
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programa-transferencia-confirmada.png') })
+    await dialog.getByRole('button', { name: 'Cerrar', exact: true }).click()
+    await expect(dialog).toBeHidden()
+    await expect(trigger).toBeFocused()
+  })
+
   test('Programas experiencia compacta integra filtros y retira Eros solamente de Programas', async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 539, height: 655 })

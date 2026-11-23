@@ -3960,6 +3960,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, messageLinkPreviewMigrations()...)
 	migrations = append(migrations, documentTemplateRevisionMigrations()...)
 	migrations = append(migrations, programExperienceMigrations()...)
+	migrations = append(migrations, programTransferMigrations()...)
 	migrations = append(migrations, storageSelfServiceMigrations()...)
 	migrations = append(migrations, storageRemovedReferencesMigrations()...)
 	migrations = append(migrations, storageUploadOwnershipMigrations()...)

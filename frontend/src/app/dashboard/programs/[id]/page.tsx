@@ -8,7 +8,7 @@ import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
   Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2, Search, FileSpreadsheet, Loader2, BookOpen, UserPlus, ClipboardList,
-  ArrowUp, ArrowDown,
+  ArrowUp, ArrowDown, Download,
 } from 'lucide-react';
 import { api, subscribeWebSocket } from '@/lib/api';
 import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents';
@@ -52,6 +52,9 @@ import { isDialogFocusableVisible, restoreDialogFocus, useDialogTabTrap } from '
 import { mobileProgramTab, programSections, type ProgramDetailTab, type ProgramMobileTab } from '@/components/programs/programWorkspacePolicy';
 import { useProgramWorkspacePolicy } from '@/components/programs/useProgramWorkspacePolicy';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
+import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu';
+import { programTransferAllowed } from '@/components/programs/programTransfer';
+import { useProgramTransferDownload, useProgramTransferScope } from '@/components/programs/useProgramTransfer';
 import {
   acceptProgramAttendanceConflicts,
   buildProgramAttendanceBatchRecords,
@@ -209,6 +212,11 @@ export default function ProgramDetailPage() {
   const programId = canonicalResourceID(params.id, 'programs');
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
   const { compact: compactWorkspace, touch: touchWorkspace, mobile: mobileWorkspace, desktopActions } = useProgramWorkspacePolicy(workspaceWidth);
+  const transferScope = useProgramTransferScope();
+  const [transferAccess, setTransferAccess] = useState<string | null>(null);
+  const canExportProgram = !isOffline && transferAccess === transferScope;
+  const { downloadingProgramId, download } = useProgramTransferDownload(transferScope, `${transferScope}:${programId}`);
+  const headerMenuAnchor = useRef<HTMLButtonElement>(null);
   const adminAllowedRef = useRef(desktopActions);
   const rootAdminAllowedRef = useRef(desktopActions);
   adminAllowedRef.current = desktopActions;
@@ -284,9 +292,11 @@ export default function ProgramDetailPage() {
         const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
         const allowed = Boolean(user?.is_admin || user?.is_super_admin || permissions.includes('*') || permissions.includes('surveys'));
         setCanUseSurveys(allowed);
+        setTransferAccess(programTransferAllowed(user) ? transferScope : null);
       } catch {
         if (!controller.signal.aborted) {
           setCanUseSurveys(false);
+          setTransferAccess(null);
           setCurrentActorID('');
           setCurrentAccountID('');
         }
@@ -294,7 +304,7 @@ export default function ProgramDetailPage() {
     };
     void loadPermissions();
     return () => controller.abort();
-  }, [runtimeSnapshot?.accountId, runtimeSnapshot?.userId]);
+  }, [runtimeSnapshot?.accountId, runtimeSnapshot?.userId, transferScope]);
 
   useEffect(() => {
     if (!canUseSurveys && activeTab === 'surveys') setActiveTab('health');
@@ -1559,13 +1569,20 @@ export default function ProgramDetailPage() {
   }, [effectiveAccountID, programId, reconcileProgramContact]);
 
   useEffect(() => subscribeWebSocket(message => {
-    if (!message || typeof message !== 'object' || (message as { event?: string }).event !== 'contact_update') return;
-    const event = message as { account_id?: string; data?: { account_id?: string } };
+    if (!message || typeof message !== 'object') return;
+    const event = message as { event?: string; account_id?: string; data?: { account_id?: string; program_id?: string } };
     const eventAccountID = event.data?.account_id || event.account_id;
     if (eventAccountID && effectiveAccountID && eventAccountID !== effectiveAccountID) return;
+    if (event.event === 'program_transfer_completed' && event.data?.program_id === programId) {
+      void fetchProgramData();
+      if (!academicDirty) void fetchAcademicData();
+      if (visibleTab === 'stats') void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
+      return;
+    }
+    if (event.event !== 'contact_update') return;
     const contactID = contactIdFromRealtimeEvent(message);
     if (contactID) void refreshLoadedParticipantContact(contactID);
-  }), [effectiveAccountID, refreshLoadedParticipantContact]);
+  }), [effectiveAccountID, refreshLoadedParticipantContact, programId, fetchProgramData, fetchAcademicData, academicDirty, visibleTab, fetchStats, selectedMonthsKey]);
 
   // WhatsApp chat
   const handleSendWhatsApp = (phone: string) => {
@@ -2439,23 +2456,32 @@ export default function ProgramDetailPage() {
           </button>
           <div className="relative">
             <button
-              onClick={() => setShowHeaderMenu(!showHeaderMenu)}
+              ref={headerMenuAnchor}
+              type="button"
+              onClick={() => setShowHeaderMenu(value => !value)}
               className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
               title="Más opciones"
+              aria-label="Acciones del programa"
+              aria-haspopup="menu"
+              aria-expanded={showHeaderMenu}
+              aria-controls={showHeaderMenu ? 'program-detail-actions' : undefined}
             >
               <MoreVertical className="w-4 h-4" />
             </button>
             {showHeaderMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-white rounded-xl border border-slate-200 shadow-lg py-1 w-48 z-50">
+              <WorkspaceActionsMenu anchor={headerMenuAnchor.current} id="program-detail-actions" label="Acciones del programa" compact={touchWorkspace} onClose={() => setShowHeaderMenu(false)}>
+                {canExportProgram && program.type === 'course' && <button type="button" role="menuitem" disabled={Boolean(downloadingProgramId)}
+                  onClick={() => {
+                    if (!rootAdminAllowedRef.current || !requireOnline('Exportar un programa')) return;
+                    setShowHeaderMenu(false);
+                    headerMenuAnchor.current?.focus({ preventScroll: true });
+                    void download(program.id, program.name, showToast);
+                  }} className="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                  {downloadingProgramId === program.id ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> : <Download className="h-4 w-4" aria-hidden="true" />}
+                  {downloadingProgramId === program.id ? 'Exportando programa…' : 'Exportar programa'}
+                </button>}
                 <button
-                  onClick={() => { setShowHeaderMenu(false); if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
-                  disabled={participantsWithPhone.length === 0}
-                  className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50 sm:hidden"
-                >
-                  <Send className="h-4 w-4" />
-                  Envío Masivo
-                </button>
-                <button
+                  type="button" role="menuitem"
                   onClick={() => { if (!rootAdminAllowedRef.current || !requireOnline('Cambiar el estado del programa')) return; setShowHeaderMenu(false); setLifecycleAction(program.status === 'archived' ? 'restore' : 'archive'); }}
                   disabled={programLifecyclePending}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 transition-colors hover:bg-slate-50"
@@ -2464,6 +2490,16 @@ export default function ProgramDetailPage() {
                   {program.status === 'archived' ? 'Desarchivar' : 'Archivar'}
                 </button>
                 <button
+                  type="button" role="menuitem"
+                  onClick={() => { setShowHeaderMenu(false); if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
+                  disabled={participantsWithPhone.length === 0}
+                  className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50 sm:hidden"
+                >
+                  <Send className="h-4 w-4" />
+                  Envío Masivo
+                </button>
+                <button
+                  type="button" role="menuitem"
                   onClick={handleDeleteProgram}
                   disabled={programLifecyclePending}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 transition-colors hover:bg-red-50"
@@ -2471,11 +2507,12 @@ export default function ProgramDetailPage() {
                   <Trash2 className="w-4 h-4" />
                   Eliminar Programa
                 </button>
-              </div>
+              </WorkspaceActionsMenu>
             )}
           </div>
         </div>}
       </div>
+      {downloadingProgramId && <p role="status" className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> Preparando archivo de programa…</p>}
 
       {mobileWorkspace && <div role="tablist" aria-label="Secciones del programa" className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
         {programSections(true, canUseSurveys).map(tab => {

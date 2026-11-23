@@ -62,7 +62,7 @@ const observationMembershipSQL = `i.account_id=$1 AND (
 const observationSelectSQL = `SELECT i.id,i.account_id,i.contact_id,i.lead_id,i.event_id,i.participant_id,
  i.program_id,i.program_session_id,i.program_participant_id,COALESCE(i.source_label,''),
  i.type,i.direction,i.outcome,i.notes,i.next_action,i.next_action_date,i.created_by,i.created_at,
- COALESCE(NULLIF(BTRIM(u.display_name),''),NULLIF(BTRIM(u.username),''),NULLIF(BTRIM(u.email),'')),
+ COALESCE(NULLIF(BTRIM(u.display_name),''),NULLIF(BTRIM(u.username),''),NULLIF(BTRIM(u.email),''),i.transfer_author_name),
  e.name,i.updated_at,i.updated_by,
  COALESCE(NULLIF(BTRIM(editor.display_name),''),NULLIF(BTRIM(editor.username),''),NULLIF(BTRIM(editor.email),'')),
  i.is_pinned,i.pinned_at,i.pinned_by

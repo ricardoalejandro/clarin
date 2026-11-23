@@ -124,7 +124,7 @@ const getParticipantAttendanceHistoryPageQuery = `
 	), observation_ranked AS (
 		SELECT i.program_session_id AS session_id, i.id,
 		       COALESCE(i.notes, '') AS notes, i.created_by,
-		       u.display_name AS created_by_name, i.created_at,
+		       COALESCE(u.display_name,i.transfer_author_name) AS created_by_name, i.created_at,
 		       COALESCE(i.source_label, '') AS source_label,
 		       COUNT(*) OVER (PARTITION BY i.program_session_id)::int AS observation_count,
 		       ROW_NUMBER() OVER (

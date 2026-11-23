@@ -1,0 +1,114 @@
+name: Program transfer verification
+
+on:
+  push:
+    branches:
+      - 'codex/programas-intercambio-archivos'
+  pull_request:
+    paths:
+      - 'backend/internal/programtransfer/**'
+      - 'backend/internal/**/program_transfer*'
+      - 'backend/pkg/database/program_transfer_migrations.go'
+      - 'frontend/src/app/dashboard/programs/**'
+      - 'frontend/src/components/programs/**'
+      - 'scripts/qa/program-transfer-postgres.ps1'
+      - 'tests/responsive-dashboard.spec.ts'
+      - '.github/workflows/program-transfer-verification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: program-transfer-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: program_transfer_test
+          POSTGRES_PASSWORD: synthetic_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U program_transfer_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash --noprofile --norc -e -o pipefail {0}
+    env:
+      GOCACHE: ${{ runner.temp }}/program-transfer-go-build
+      GOMAXPROCS: '2'
+      GOTELEMETRY: 'off'
+      PGPASSWORD: synthetic_ci_password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Create isolated databases
+        run: |
+          createdb --host=127.0.0.1 --username=program_transfer_test program_survey_integrity_test
+          createdb --host=127.0.0.1 --username=program_transfer_test program_transfer_http_test
+      - name: Program transfer unit tests and backend build
+        run: |
+          go test -p 2 ./internal/programtransfer ./internal/repository ./internal/api ./internal/service -run '^TestProgramTransfer' -count=1
+          go build -p 2 ./...
+      - name: PostgreSQL repository round trips and atomicity
+        env:
+          INTEGRITY_TEST_DATABASE_URL: postgres://program_transfer_test:synthetic_ci_password@127.0.0.1:5432/program_survey_integrity_test?sslmode=disable
+        run: |
+          go test -p 1 ./internal/repository -run '^TestProgramTransfer' -count=1 -v | tee "$RUNNER_TEMP/program-transfer-repository-tests.txt"
+          if grep -q '^--- SKIP:' "$RUNNER_TEMP/program-transfer-repository-tests.txt"; then
+            echo 'Program transfer repository integration tests were skipped.' >&2
+            exit 1
+          fi
+      - name: Verify startup migration repeatability
+        env:
+          INTEGRITY_TEST_DATABASE_URL: postgres://program_transfer_test:synthetic_ci_password@127.0.0.1:5432/program_survey_integrity_test?sslmode=disable
+        run: |
+          go test -p 1 ./internal/repository -run '^TestProgramExperienceMigrationIsRepeatable$' -count=1 -v | tee "$RUNNER_TEMP/program-transfer-migration-tests.txt"
+          if grep -q '^--- SKIP:' "$RUNNER_TEMP/program-transfer-migration-tests.txt"; then
+            echo 'Startup migration repeatability test was skipped.' >&2
+            exit 1
+          fi
+      - name: PostgreSQL HTTP signed file round trip
+        env:
+          PROGRAM_TRANSFER_HTTP_TEST_DATABASE_URL: postgres://program_transfer_test:synthetic_ci_password@127.0.0.1:5432/program_transfer_http_test?sslmode=disable
+        run: |
+          go test -p 1 ./internal/api -run '^TestProgramTransferHTTPRoundTrip$' -count=1 -v | tee "$RUNNER_TEMP/program-transfer-http-tests.txt"
+          if grep -q '^--- SKIP:' "$RUNNER_TEMP/program-transfer-http-tests.txt"; then
+            echo 'Program transfer HTTP integration test was skipped.' >&2
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      TZ: 'UTC'
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck -- --incremental false
+      - run: npm run build
+      - run: npm run test:unit -- --run --maxWorkers=2 --testTimeout=20000

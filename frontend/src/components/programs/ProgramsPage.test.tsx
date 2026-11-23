@@ -2,8 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramsPage from '@/app/dashboard/programs/page'
 
-const fixture = vi.hoisted(() => ({ api: vi.fn(), width: 1100 }))
-vi.mock('@/lib/api', () => ({ api: fixture.api }))
+const fixture = vi.hoisted(() => ({ api: vi.fn(), apiBlob: vi.fn(), width: 1100 }))
+vi.mock('@/lib/api', () => ({ api: fixture.api, apiBlob: fixture.apiBlob, subscribeWebSocket: () => () => {} }))
 vi.mock('@/components/offline-v5/ClarinRuntimeProvider', () => ({ useClarinRuntime: () => ({ isOffline: false, requireOnline: () => true }) }))
 vi.mock('@/components/responsive/useContainerWidth', () => ({ useContainerWidth: () => ({ ref: { current: null }, width: fixture.width }) }))
 vi.mock('@/components/programs/useProgramWorkspacePolicy', () => ({ useProgramWorkspacePolicy: (width: number) => ({ mobile: width < 700, desktopActions: width >= 700, touch: width < 820 }) }))
@@ -15,12 +15,34 @@ const folders = { success: true, data: { success: true, folders: [] } }
 beforeEach(() => {
   fixture.width = 1100
   fixture.api.mockReset()
+  fixture.apiBlob.mockReset()
   window.matchMedia = vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) as unknown as typeof window.matchMedia
   fixture.api.mockImplementation(async (endpoint: string, options?: RequestInit) => {
     if (endpoint.startsWith('/api/programs/folders')) return folders
     if (endpoint.startsWith('/api/programs/dashboard')) return { success: false, error: 'Dashboard unavailable' }
     if (options?.method === 'DELETE') return { success: false, status: 409, error: 'Este programa contiene datos o actividad. Archívalo para conservar su historial.' }
     return { success: true, data: [program('Retained group')] }
+  })
+})
+
+describe('ProgramsPage transfer entry points', () => {
+  it('shows both file actions only with access to Programs and Contacts', async () => {
+    const base = fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation((endpoint: string, options?: RequestInit) => endpoint === '/api/me'
+      ? Promise.resolve({ success: true, data: { user: { permissions: ['programs', 'contacts'] } } })
+      : base(endpoint, options))
+    fixture.apiBlob.mockResolvedValue({ success: false, status: 403 })
+    render(<ProgramsPage />)
+
+    const open = await screen.findByRole('button', { name: 'Importar programa' })
+    fireEvent.click(open)
+    expect(screen.getByRole('dialog', { name: 'Importar programa' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar importación' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Acciones de Retained group' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Exportar programa' }))
+    await waitFor(() => expect(fixture.apiBlob).toHaveBeenCalledOnce())
+    expect(fixture.apiBlob.mock.calls[0][0]).toBe('/api/programs/Retained%20group/transfer/export')
+    expect(await screen.findByText(/Necesitas acceso a Programas y Contactos/)).toBeInTheDocument()
   })
 })
 
@@ -196,7 +218,8 @@ describe('ProgramsPage lifecycle scopes and preservation', () => {
 
   it('shows one calm initial notice for an invalid response and recovers on retry', async () => {
     let attempts = 0
-    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint === '/api/me' ? { success: false }
+      : endpoint.startsWith('/api/programs/folders') ? folders
       : endpoint.startsWith('/api/programs/dashboard') ? new Promise(() => {})
         : { success: true, data: ++attempts === 1 ? null : [] })
     render(<ProgramsPage />)
@@ -211,7 +234,8 @@ describe('ProgramsPage lifecycle scopes and preservation', () => {
 
   it('preserves loaded rows when folders and later refreshes fail', async () => {
     let attempts = 0
-    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? { success: false }
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint === '/api/me' ? { success: false }
+      : endpoint.startsWith('/api/programs/folders') ? { success: false }
       : endpoint.startsWith('/api/programs/dashboard') ? new Promise(() => {})
         : ++attempts === 1 ? { success: true, data: [program('Preserved group')] } : { success: false })
     render(<ProgramsPage />)
