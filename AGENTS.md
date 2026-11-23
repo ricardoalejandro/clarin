@@ -20,6 +20,15 @@ These instructions are the source of truth for Codex in this repository. Read th
 - When the user requests an exact historical appearance, find and compare the original implementation/asset before changing it.
 - Preserve unrelated dirty work and state assumptions or remaining provider/session limitations clearly.
 
+## CPU Budget On A Cloud VPS
+
+- Keep total VPS CPU below **60%** whenever development, tests, builds or deployment steps run on a cloud server. Apply this rule where the work executes, including a remote Docker builder invoked from a personal computer. Work executed entirely on a personal machine is exempt.
+- Measure the entire VPS across all online vCPUs on a **0–100% scale**. Use consecutive deltas of Linux's aggregate `cpu` line in `/proc/stat`. Divide the delta of `user + nice + system + irq + softirq` by the delta of `user + nice + system + idle + iowait + irq + softirq + steal`, then multiply by 100. The kernel already includes guest time in `user` and `nice`. Validate the same calculation against the `all` row of `mpstat -P ALL 1` when available. Use container and process metrics to attribute load and verify effective quotas.
+- Record CPU execution, `steal`, `iowait`, and `100 - %idle` separately. The last value matches the approximate `top` reading and includes both kinds of waiting. For hPanel comparisons, match both the time zone and the time window. Hostinger documents GMT+0 for Server Usage. Use the historical chart for trends and the VPS samples for decisions during the task.
+- Measure the baseline before starting. Take valid samples at least once per second, from the start through final verification, including image build, export, loading and activation. Use monotonic time for sample spacing and the resume window. Treat missing, stale or invalid samples as loss of monitoring.
+- Leave room for live traffic. Limit CPU and concurrency on the actual build workers before launching them. At or above 55% host CPU, defer new work and pause the task's CPU-intensive jobs. If a sample reaches 60% or monitoring becomes unavailable, stop the task's CPU-intensive work immediately. Resume with a smaller budget only after valid readings stay below 40% for one minute.
+- Scope automatic controls to the current task's processes. Apply changes to shared services only with explicit authorization. On completion, failure or cancellation, stop the temporary monitor and restore any temporary limits. Report the measured execution peak and average, sampling interval and threshold crossings, alongside any material `steal` or `iowait` readings.
+
 ## Mandatory Local Skill Routing
 
 Before changing any area below, read the matching local skill completely:
