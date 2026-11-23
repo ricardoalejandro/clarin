@@ -110,5 +110,5 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck -- --incremental false
-      - run: npm run test:unit -- --run --maxWorkers=2 --testTimeout=20000
       - run: npm run build
+      - run: npm run test:unit -- --run --maxWorkers=2 --testTimeout=20000

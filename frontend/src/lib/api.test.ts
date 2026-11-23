@@ -357,7 +357,13 @@ describe('account session policy', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('saved', { headers: { 'X-Content-Version': '17', 'Content-Type': 'text/plain' } }))
     const result = await apiBlob('/api/utilities/documents/one/content/panel-a', { authMode: 'background' })
     expect(result).toMatchObject({ success: true, contentVersion: '17' })
-    expect(await result.blob!.text()).toBe('saved')
+    const text = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsText(result.blob!)
+    })
+    expect(text).toBe('saved')
   })
   it('notifies diagnostic readers of the canonical deadline without extending it for utility autosave', async () => {
     clearAuthState()
