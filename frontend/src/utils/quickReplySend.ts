@@ -1,10 +1,10 @@
-import type { Message } from '@/types/chat'
+import type { Message, ChatMention } from '@/types/chat'
 import type { QuickReplyComposerDraft } from '@/types/quick-reply'
 
 // Freeze one request per block. Retries must keep the operation ID and payload,
 // including quote and caption; a confirmed block is never resent.
 export function freezeQuickReplySequence(draft: QuickReplyComposerDraft, context: {
-  chatId: string; deviceId: string; jid: string; through: string; quote: Message | null; trailingText: string
+  chatId: string; deviceId: string; jid: string; through: string; quote: Message | null; trailingText: string; trailingMentions?: ChatMention[]
 }): QuickReplyComposerDraft {
   if (draft.started) return draft
   const items = [...(draft.items || [])].filter(item => item.type === 'media' || item.text?.trim())
@@ -16,6 +16,7 @@ export function freezeQuickReplySequence(draft: QuickReplyComposerDraft, context
       device_id: context.deviceId, chat_id: context.chatId, to: context.jid,
       body: item.type === 'text' ? item.text : attachment?.caption || '',
       ...(attachment ? { media_url: attachment.media_url, media_type: attachment.media_type, media_filename: attachment.media_filename } : {}),
+      mentions: context.trailingMentions && index === items.length - 1 && context.trailingText.trim() ? context.trailingMentions : undefined,
       client_operation_id: item.operationId, quick_reply: true, defer_attention: true,
       attention_through_message_id: context.through,
       quoted_message_id: quote?.message_id || quote?.id,

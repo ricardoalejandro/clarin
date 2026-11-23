@@ -435,6 +435,8 @@ import {
   updateClarinParagraphCustomData,
   type ClarinParagraphFormat,
 } from "../element/clarinParagraphFormat";
+import { updateClarinCharacterStyleCustomData, type ClarinCharacterStyle } from "../element/clarinCharacterStyle";
+import { clearClarinTextColorsWithin } from "../element/clarinTextColorHighlights";
 import { isOverScrollBars } from "../scene/scrollbars";
 import { syncInvalidIndices, syncMovedIndices } from "../fractionalIndex";
 import {
@@ -2267,6 +2269,7 @@ class App extends React.Component<AppProps, AppState> {
    */
   private resetScene = withBatchedUpdates(
     (opts?: { resetLoadingState: boolean }) => {
+      clearClarinTextColorsWithin(this.excalidrawContainerRef.current);
       this.scene.replaceAllElements([]);
       this.setState((state) => ({
         ...getDefaultAppState(),
@@ -2532,6 +2535,7 @@ class App extends React.Component<AppProps, AppState> {
   }
 
   public componentWillUnmount() {
+    clearClarinTextColorsWithin(this.excalidrawContainerRef.current);
     (window as any).launchQueue?.setConsumer(() => {});
     this.renderer.destroy();
     this.scene.destroy();
@@ -4880,6 +4884,7 @@ class App extends React.Component<AppProps, AppState> {
       clarinTextFormat?: ClarinTextFormat | null,
       clarinParagraphFormat?: ClarinParagraphFormat | null,
       textAlign?: ExcalidrawTextElement["textAlign"],
+      clarinCharacterStyle?: ClarinCharacterStyle | null,
     ) => {
       this.scene.replaceAllElements([
         // Not sure why we include deleted elements as well hence using deleted elements map
@@ -4892,13 +4897,15 @@ class App extends React.Component<AppProps, AppState> {
                     _element.customData,
                     clarinTextFormat,
                   );
-            const nextCustomData =
+            const paragraphCustomData =
               typeof clarinParagraphFormat === "undefined"
                 ? textCustomData
                 : updateClarinParagraphCustomData(
                     textCustomData,
                     clarinParagraphFormat,
                   );
+            const nextCustomData = typeof clarinCharacterStyle === "undefined"
+              ? paragraphCustomData : updateClarinCharacterStyleCustomData(paragraphCustomData, clarinCharacterStyle);
             const nextTextAlign = textAlign ?? _element.textAlign;
             const measurementElement = {
               ..._element,
@@ -4953,6 +4960,7 @@ class App extends React.Component<AppProps, AppState> {
         clarinTextFormat,
         clarinParagraphFormat,
         textAlign,
+        clarinCharacterStyle,
       ) => {
         withBatchedUpdates(
           (payload: {
@@ -4960,6 +4968,7 @@ class App extends React.Component<AppProps, AppState> {
             clarinTextFormat: ClarinTextFormat | null;
             clarinParagraphFormat: ClarinParagraphFormat | null;
             textAlign: ExcalidrawTextElement["textAlign"];
+            clarinCharacterStyle: ClarinCharacterStyle | null;
           }) => {
             updateElement(
               payload.nextOriginalText,
@@ -4967,6 +4976,7 @@ class App extends React.Component<AppProps, AppState> {
               payload.clarinTextFormat,
               payload.clarinParagraphFormat,
               payload.textAlign,
+              payload.clarinCharacterStyle,
             );
             if (isNonDeletedElement(element)) {
               updateBoundElements(
@@ -4980,6 +4990,7 @@ class App extends React.Component<AppProps, AppState> {
           clarinTextFormat,
           clarinParagraphFormat,
           textAlign,
+          clarinCharacterStyle,
         });
       },
       onSubmit: withBatchedUpdates(({
@@ -4988,6 +4999,7 @@ class App extends React.Component<AppProps, AppState> {
         clarinTextFormat,
         clarinParagraphFormat,
         textAlign,
+        clarinCharacterStyle,
       }) => {
         const isDeleted = !nextOriginalText.trim();
         updateElement(
@@ -4996,6 +5008,7 @@ class App extends React.Component<AppProps, AppState> {
           clarinTextFormat,
           clarinParagraphFormat,
           textAlign,
+          clarinCharacterStyle,
         );
         // select the created text element only if submitting via keyboard
         // (when submitting via click it should act as signal to deselect)

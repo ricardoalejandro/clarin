@@ -9,6 +9,7 @@ import { api, apiUpload } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { encodeAvatarCanvas } from '@/lib/avatarImageExport'
 import AvatarImageEditor from '@/components/AvatarImageEditor'
+import ZoomableImageSurface from '@/components/image-viewer/ZoomableImageSurface'
 import { avatarCanvasDisplacement, drawAvatarImage, initialAvatarTransform as initialTransform, type AvatarImageTransform as ImageTransform } from '@/lib/avatarImageEditor'
 import {
   OPERATIONAL_OVERLAY_LAYERS,
@@ -878,9 +879,7 @@ export default function ContactAvatarControl({
               )}
 
               {dialog === 'view' && currentURL && (
-                <div className="flex min-h-72 items-center justify-center rounded-2xl bg-slate-950 p-4">
-                  <img src={currentURL} alt={`Foto de ${displayName}`} className="max-h-[70vh] max-w-full rounded-xl object-contain shadow-2xl" />
-                </div>
+                <ZoomableImageSurface src={currentURL} alt={`Foto de ${displayName}`} sourceKey={`${identityKey}:${avatar.revision}:${currentURL}`} active={dialogOpen && authScope === getAuthScope() && !isAuthIdentityChanging(authScope)} className="h-[min(65vh,32rem)] min-h-56 w-full rounded-2xl bg-slate-950" imageClassName="rounded-xl shadow-2xl" />
               )}
 
               {dialog === 'editor' && <AvatarImageEditor

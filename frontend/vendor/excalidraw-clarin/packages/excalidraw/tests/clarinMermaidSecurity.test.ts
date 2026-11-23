@@ -2,9 +2,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { loadMermaidParser } from "../mermaid";
 
 const originalGetBBox = SVGElement.prototype.getBBox;
-let parser: Awaited<ReturnType<typeof loadMermaidParser>>;
 
-beforeAll(async () => {
+beforeAll(() => {
   Object.defineProperty(SVGElement.prototype, "getBBox", {
     configurable: true,
     value() {
@@ -12,17 +11,7 @@ beforeAll(async () => {
       return { x: 0, y: 0, width: Math.max(8, text.length * 8), height: 18 };
     },
   });
-  const fetcher = vi.fn();
-  vi.stubGlobal("fetch", fetcher);
-  try {
-    // The cold Vite import graph can exceed the conversion's 5 s budget.
-    // Initialize once with a bounded setup budget and preserve its network gate.
-    parser = await loadMermaidParser(true);
-    expect(fetcher).not.toHaveBeenCalled();
-  } finally {
-    vi.unstubAllGlobals();
-  }
-}, 20_000);
+});
 
 afterAll(() => {
   Object.defineProperty(SVGElement.prototype, "getBBox", {
@@ -34,12 +23,24 @@ afterAll(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Clarin Mermaid local conversion security", () => {
+  const flowchartDefinition = "flowchart TD\n A[Inicio] --> B[Fin]";
   const parse = async (definition: string) => {
+    const parser = await loadMermaidParser(true);
     return parser.parseMermaidToExcalidraw(definition);
   };
 
+  // The first conversion includes the parser import and Mermaid's lazy diagram
+  // initialization. Keep that cold path covered separately from warm conversions.
+  it("converts the first cold flowchart into editable elements without network or SVG fallback", async () => {
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const result = await parse(flowchartDefinition);
+    expect(result.elements.length).toBeGreaterThan(0);
+    expect(Object.keys(result.files || {})).toHaveLength(0);
+    expect(fetcher).not.toHaveBeenCalled();
+  }, 30_000);
+
   it.each([
-    ["flowchart", "flowchart TD\n A[Inicio] --> B[Fin]"],
+    ["warm flowchart", flowchartDefinition],
     ["sequence", "sequenceDiagram\n Alice->>Bob: Hola"],
     ["class", "classDiagram\n class Cuenta {\n +String nombre\n }"],
     ["ER", "erDiagram\n CUENTA ||--o{ CONTACTO : contiene"],
@@ -49,7 +50,7 @@ describe("Clarin Mermaid local conversion security", () => {
     expect(result.elements.length).toBeGreaterThan(0);
     expect(Object.keys(result.files || {})).toHaveLength(0);
     expect(fetcher).not.toHaveBeenCalled();
-  });
+  }, 5_000);
 
   it("does not emit executable links or active SVG payloads from hostile labels", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
@@ -65,5 +66,5 @@ describe("Clarin Mermaid local conversion security", () => {
       expect(payload).not.toMatch(/<script|onerror\s*=|javascript:/iu);
     }
     expect(fetcher).not.toHaveBeenCalled();
-  });
+  }, 5_000);
 });

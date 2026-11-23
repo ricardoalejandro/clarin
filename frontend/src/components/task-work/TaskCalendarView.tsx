@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, ExternalLink, GripHorizontal, GripVertical, ListTodo, Loader2, MapPin, Pencil, Plus, RefreshCw, Undo2, UserRound, X } from 'lucide-react'
 import { apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
@@ -20,6 +20,8 @@ import WorkEventEditor, { type WorkEventDraft } from './WorkEventEditor'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { canEditTask } from './taskPermissionActions'
 import { TaskPriorityIndicator, TaskStatusIndicator } from './TaskSemanticIndicators'
+import { calendarMonthGrid, calendarMonthRowCapacity, MONTH_ITEM_HEIGHT, MONTH_ITEMS_TOP, MONTH_WEEKDAY_HEIGHT } from './calendarMonthLayout'
+import { calendarOpenRequestForContext, type CalendarOpenRequest } from './calendarOpenRequest'
 import {
 	applyCalendarSchedule,
 	buildEventSchedulePayload,
@@ -50,8 +52,9 @@ interface Props {
 	search?: string
 	filters?: TaskFilters
 	storageScope?: string
-	createEventToken?: number
-	focusEvent?: WorkEventOccurrence | null
+	openRequest?: CalendarOpenRequest | null
+	openRequestContextKey: string
+	onOpenRequestConsumed: (requestID: string) => void
 	activeTaskId?: string
 	taskProjection?: Task | null
 	onOpenTaskDetail: (task: Task, trigger?: HTMLElement | null) => void
@@ -141,9 +144,9 @@ function AgendaBlock({ item, lists, compact = false, activeTaskId, onOpen, inter
 		const root = rootRef.current
 		if (!root || !interaction) return { columnWidth: 1, rowHeight: 1 }
 		if (interaction.surface === 'month') {
-			const grid = root.closest<HTMLElement>('[data-calendar-month-grid]')
-			const rect = grid?.getBoundingClientRect()
-			return { columnWidth: (rect?.width || root.getBoundingClientRect().width) / 7, rowHeight: Math.max(1, ((rect?.height || 694) - 34) / 6) }
+			const row = root.closest<HTMLElement>('[data-calendar-month-week]')
+			const rect = row?.getBoundingClientRect()
+			return { columnWidth: (rect?.width || root.getBoundingClientRect().width) / 7, rowHeight: Math.max(1, rect?.height || 1) }
 		}
 		if (interaction.surface === 'all-day') {
 			const grid = root.closest<HTMLElement>('[data-calendar-all-day-grid]')
@@ -319,14 +322,49 @@ function AgendaBlock({ item, lists, compact = false, activeTaskId, onOpen, inter
 }
 
 function CalendarMorePopover({ anchor, returnFocus, items, lists, day, activeTaskId, onOpen, onClose }: { anchor: DOMRect; returnFocus: HTMLButtonElement; items: AgendaItem[]; lists: TaskList[]; day: Date; activeTaskId?: string; onOpen: (item: AgendaItem, anchor: DOMRect, trigger: HTMLButtonElement, returnFocus?: HTMLElement) => void; onClose: () => void }) {
+	const panelRef = useRef<HTMLElement>(null)
+	const [position, setPosition] = useState<CSSProperties>({ opacity: 0 })
+	const close = useCallback((restoreFocus = true) => {
+		onClose()
+		if (restoreFocus && returnFocus.isConnected) requestAnimationFrame(() => returnFocus.focus({ preventScroll: true }))
+	}, [onClose, returnFocus])
+	useLayoutEffect(() => {
+		const update = () => {
+			const viewport = calendarViewport()
+			const width = Math.min(340, viewport.width - 24)
+			const maxHeight = Math.min(420, viewport.height - 24)
+			const height = Math.min(panelRef.current?.getBoundingClientRect().height || 420, maxHeight)
+			const rect = returnFocus.isConnected ? returnFocus.getBoundingClientRect() : anchor
+			setPosition({ ...calendarPopoverPosition(rect, { width, height }, viewport), width, maxHeight, opacity: 1 })
+		}
+		update()
+		window.addEventListener('resize', update)
+		window.addEventListener('scroll', update, true)
+		window.visualViewport?.addEventListener('resize', update)
+		window.visualViewport?.addEventListener('scroll', update)
+		return () => {
+			window.removeEventListener('resize', update)
+			window.removeEventListener('scroll', update, true)
+			window.visualViewport?.removeEventListener('resize', update)
+			window.visualViewport?.removeEventListener('scroll', update)
+		}
+	}, [anchor, returnFocus, items.length])
+	useEffect(() => {
+		panelRef.current?.focus({ preventScroll: true })
+		const dismiss = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape' || event.defaultPrevented) return
+			event.preventDefault()
+			event.stopPropagation()
+			close()
+		}
+		document.addEventListener('keydown', dismiss)
+		return () => document.removeEventListener('keydown', dismiss)
+	}, [close])
 	if (typeof document === 'undefined') return null
-	const width = Math.min(340, window.innerWidth - 24)
-	const left = Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12))
-	const top = Math.max(12, Math.min(anchor.bottom + 6, window.innerHeight - Math.min(430, items.length * 34 + 92)))
-	return createPortal(<><button type="button" aria-label="Cerrar eventos del día" onMouseDown={onClose} className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><section role="dialog" aria-label={`Agenda del ${day.toLocaleDateString('es', { dateStyle: 'long' })}`} style={{ left, top, width, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} className="fixed max-h-[420px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3"><div><p className="text-[10px] font-black uppercase tracking-[.14em] text-emerald-600">{day.toLocaleDateString('es', { weekday: 'long' })}</p><p className="text-sm font-black text-slate-900">{day.toLocaleDateString('es', { day: 'numeric', month: 'long' })}</p></div><button type="button" onClick={onClose} className="rounded-xl p-2 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button></header><div className="space-y-1.5 overflow-y-auto p-3">{items.map(item => <AgendaBlock key={item.key} item={item} lists={lists} activeTaskId={activeTaskId} onOpen={(itemAnchor, trigger) => { onClose(); onOpen(item, itemAnchor, trigger, returnFocus) }} />)}</div></section></>, document.body)
+	return createPortal(<><button type="button" aria-label="Cerrar eventos del día" onMouseDown={() => close()} className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><section ref={panelRef} tabIndex={-1} role="dialog" aria-label={`Agenda del ${day.toLocaleDateString('es', { dateStyle: 'long' })}`} style={{ ...position, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} className="fixed flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl outline-none"><header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3"><div><p className="text-[10px] font-black uppercase tracking-[.14em] text-emerald-600">{day.toLocaleDateString('es', { weekday: 'long' })}</p><p className="text-sm font-black text-slate-900">{day.toLocaleDateString('es', { day: 'numeric', month: 'long' })}</p></div><button type="button" aria-label="Cerrar agenda del día" onClick={() => close()} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button></header><div className="min-h-0 space-y-1.5 overflow-y-auto p-3">{items.map(item => <AgendaBlock key={item.key} item={item} lists={lists} activeTaskId={activeTaskId} onOpen={(itemAnchor, trigger) => { close(false); onOpen(item, itemAnchor, trigger, returnFocus) }} />)}</div></section></>, document.body)
 }
 
-function CalendarSpanLayer({ segments, lists, surface, dayCount, visibleLanes, weekOffset, activeTaskId, top = 36, onOpen, interactionFor }: {
+function CalendarSpanLayer({ segments, lists, surface, dayCount, visibleLanes, weekOffset, activeTaskId, top = MONTH_ITEMS_TOP, onOpen, interactionFor }: {
 	segments: ReturnType<typeof layoutCalendarSpans>
 	lists: TaskList[]
 	surface: 'month' | 'all-day'
@@ -338,7 +376,8 @@ function CalendarSpanLayer({ segments, lists, surface, dayCount, visibleLanes, w
 	onOpen: (item: AgendaItem, anchor: DOMRect, trigger: HTMLButtonElement) => void
 	interactionFor: (itemKey: string, surface: CalendarInteractionSurface, dayCount: number, allowResize?: boolean) => AgendaBlockInteraction
 }) {
-	return <div aria-label="Elementos programados" className="pointer-events-none absolute inset-x-1 z-[5] grid gap-x-0.5 gap-y-1" style={{ top, gridTemplateColumns: `repeat(${dayCount}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${visibleLanes}, 22px)` }}>
+	if (visibleLanes === 0) return null
+	return <div aria-label="Elementos programados" className="pointer-events-none absolute inset-x-1 z-[5] grid gap-x-0.5 gap-y-1" style={{ top, gridTemplateColumns: `repeat(${dayCount}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${visibleLanes}, ${MONTH_ITEM_HEIGHT}px)` }}>
 		{segments.filter(segment => segment.lane < visibleLanes).map(segment => {
 			const schedule = calendarItemSchedule(segment.item)
 			const resizable = Boolean(schedule?.allDay && segment.isEnd)
@@ -444,14 +483,17 @@ function CalendarItemSummary({ item, lists, anchor, anchorElement, onClose, onOp
 	const listLabel = task
 		? task.breadcrumbs_visible === false ? 'Compartida contigo' : [task.folder_name, task.list_name].filter(Boolean).join(' / ') || 'Bandeja general'
 		: event?.list_visible ? [event.folder_name, event.list_name].filter(Boolean).join(' / ') || 'Lista de calendario' : 'Invitación compartida contigo'
-	useEffect(() => {
+	useLayoutEffect(() => {
 		const reposition = () => {
 			const viewport = calendarViewport()
 			const width = Math.min(360, Math.max(220, viewport.width - 24))
-			const measuredHeight = panelRef.current?.getBoundingClientRect().height || 320
+			const maxHeight = Math.max(0, viewport.height - 24)
+			const measuredHeight = Math.min(panelRef.current?.getBoundingClientRect().height || 320, maxHeight)
 			const liveAnchor = anchorElement?.isConnected ? floatingRect(anchorElement.getBoundingClientRect()) : anchor
-			setStyle({ ...calendarPopoverPosition(liveAnchor, { width, height: measuredHeight }, viewport), width, zIndex: TASK_OVERLAY_LAYERS.workspacePopover, opacity: 1 })
+			setStyle({ ...calendarPopoverPosition(liveAnchor, { width, height: measuredHeight }, viewport), width, maxHeight, zIndex: TASK_OVERLAY_LAYERS.workspacePopover, opacity: 1 })
 		}
+		const observer = new ResizeObserver(reposition)
+		if (panelRef.current) observer.observe(panelRef.current)
 		reposition()
 		const focusFrame = window.requestAnimationFrame(() => { reposition(); panelRef.current?.focus({ preventScroll: true }) })
 		const keyboard = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() } }
@@ -461,6 +503,7 @@ function CalendarItemSummary({ item, lists, anchor, anchorElement, onClose, onOp
 		window.visualViewport?.addEventListener('resize', reposition)
 		window.visualViewport?.addEventListener('scroll', reposition)
 		return () => {
+			observer.disconnect()
 			window.cancelAnimationFrame(focusFrame)
 			window.removeEventListener('keydown', keyboard)
 			window.removeEventListener('resize', reposition)
@@ -473,7 +516,7 @@ function CalendarItemSummary({ item, lists, anchor, anchorElement, onClose, onOp
 	return createPortal(<><button type="button" aria-label="Cerrar resumen del calendario" onMouseDown={() => onClose()} className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><section ref={panelRef} tabIndex={-1} role="dialog" aria-modal="false" aria-label={`Resumen de ${item.kind === 'task' ? 'tarea' : 'evento'}: ${title}`} data-task-calendar-summary style={style} className="fixed max-h-[calc(100vh-24px)] overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/20 outline-none transition-opacity motion-reduce:transition-none"><header className="flex items-start gap-3 border-b border-slate-200 px-4 py-4"><span className="mt-0.5 h-4 w-4 shrink-0 rounded-md border-2 border-white shadow-sm ring-1 ring-slate-200" style={{ backgroundColor: color }} /><div className="min-w-0 flex-1"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-700">{item.kind === 'task' ? 'Tarea' : event?.status === 'cancelled' ? 'Evento cancelado' : 'Evento'}</p><h3 className="mt-1 break-words text-lg font-black leading-6 text-slate-900">{title}</h3></div><button type="button" aria-label="Cerrar resumen" onClick={() => onClose()} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X className="h-4 w-4" /></button></header><div className="space-y-3 px-4 py-4"><div className="flex items-start gap-3"><Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-sm font-semibold leading-5 text-slate-700">{calendarSummaryDate(item)}{event?.timezone && !event.is_all_day ? <span className="block text-[10px] font-medium text-slate-400">{event.timezone}</span> : null}</p></div><div className="flex items-start gap-3"><ListTodo className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><div className="min-w-0 text-sm leading-5 text-slate-600"><p className="truncate font-semibold text-slate-700">{listLabel}</p>{task && <p className="text-[11px] text-slate-500">{task.status_detail?.name || 'Sin estado'} · Prioridad {priorityLabels[task.priority] || task.priority}</p>}{event && <p className="text-[11px] text-slate-500">{event.availability === 'free' ? 'Disponible' : 'Ocupado'}{event.status === 'cancelled' ? ' · Cancelado' : ''}</p>}</div></div><div className="flex items-start gap-3"><UserRound className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-sm leading-5 text-slate-600">{task?.assigned_to_name || event?.organizer_name || 'Sin responsable'}</p></div>{location && <div className="flex items-start gap-3"><MapPin className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="break-words text-sm leading-5 text-slate-600">{location}</p></div>}{description && <p className="line-clamp-4 rounded-2xl bg-slate-50 px-3 py-2.5 text-sm leading-5 text-slate-600">{description}</p>}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/80 px-4 py-3">{task && <button type="button" onClick={() => { onClose(false); onOpenTaskDetail(task, anchorElement) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-xs font-bold text-slate-600 hover:bg-white hover:text-slate-900"><ExternalLink className="h-3.5 w-3.5" />Abrir tarea</button>}{task && canEditTask(task) && <button type="button" onClick={() => { onClose(false); onEditTask(task) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white shadow-sm hover:bg-emerald-700"><Pencil className="h-3.5 w-3.5" />Editar</button>}{event?.capabilities.can_edit && occurrence && <button type="button" onClick={() => { onClose(false); onEditEvent(event, occurrence) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white shadow-sm hover:bg-emerald-700"><Pencil className="h-3.5 w-3.5" />Editar evento</button>}</footer></section></>, document.body)
 }
 
-export default function TaskCalendarView({ lists, folders, statuses, users, currentUserID, environmentID, scopeFolderID, scopeListID, search = '', filters, storageScope, createEventToken = 0, focusEvent, activeTaskId, taskProjection, onOpenTaskDetail, onEditTask, onCreated, onOperation, onMore, canCreate = true }: Props) {
+export default function TaskCalendarView({ lists, folders, statuses, users, currentUserID, environmentID, scopeFolderID, scopeListID, search = '', filters, storageScope, openRequest, openRequestContextKey, onOpenRequestConsumed, activeTaskId, taskProjection, onOpenTaskDetail, onEditTask, onCreated, onOperation, onMore, canCreate = true }: Props) {
 	const [mode, setMode] = useState<TaskCalendarMode>('month')
 	const [cursor, setCursor] = useState(new Date())
 	const [items, setItems] = useState<AgendaItem[]>([])
@@ -504,13 +547,15 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const [morePopover, setMorePopover] = useState<{ anchor: DOMRect; returnFocus: HTMLButtonElement; items: AgendaItem[]; day: Date } | null>(null)
 	const [summary, setSummary] = useState<CalendarSummaryState | null>(null)
 	const [width, setWidth] = useState(1000)
+	const [monthRowsHeight, setMonthRowsHeight] = useState(0)
 	const containerRef = useRef<HTMLDivElement>(null)
 	const scrollRef = useRef<HTMLDivElement>(null)
+	const monthRowsRef = useRef<HTMLDivElement>(null)
 	const loadAbortRef = useRef<AbortController | null>(null)
 	const loadGeneration = useRef(0)
 	const accessEpochRef = useRef(0)
 	const reloadAgendaRef = useRef<() => Promise<void>>(async () => {})
-	const previousCreateToken = useRef(0)
+	const handledOpenRequest = useRef<string | null>(null)
 	const summaryRef = useRef<CalendarSummaryState | null>(null)
 	const composerReturnFocusRef = useRef<HTMLElement | null>(null)
 	const itemsRef = useRef(items)
@@ -526,6 +571,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		setSummary(null)
 		if (restoreFocus && current?.returnFocus?.isConnected) window.requestAnimationFrame(() => current.returnFocus?.focus({ preventScroll: true }))
 	}, [])
+	const closeMorePopover = useCallback(() => setMorePopover(null), [])
 	const showSummary = useCallback((item: AgendaItem, anchor: DOMRect, trigger: HTMLButtonElement, returnFocus: HTMLElement = trigger) => {
 		if (activeTaskId && item.kind === 'task') {
 			closeSummary(false)
@@ -537,19 +583,18 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		setSummary(next)
 	}, [activeTaskId, closeSummary, onOpenTaskDetail])
 
-	const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1)
-	const gridStart = new Date(first); gridStart.setDate(1 - ((first.getDay() + 6) % 7)); gridStart.setHours(0, 0, 0, 0)
-	const monthDays = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index))
+	const monthGrid = useMemo(() => calendarMonthGrid(cursor), [cursor])
+	const { from: gridStart, days: monthDays, weekCount } = monthGrid
 	const weekStart = new Date(cursor); weekStart.setDate(cursor.getDate() - ((cursor.getDay() + 6) % 7)); weekStart.setHours(0, 0, 0, 0)
 	const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))
 	const visibleDays = effectiveMode === 'week' ? weekDays : [startOfDay(cursor)]
 	const range = useMemo(() => {
-		if (mode === 'month') return { from: gridStart, to: addDays(gridStart, 42) }
+		if (mode === 'month') return { from: gridStart, to: monthGrid.to }
 		if (mode === 'week') return { from: weekStart, to: addDays(weekStart, 7) }
 		const from = startOfDay(cursor); return { from, to: addDays(from, 1) }
 	// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [cursor, mode])
-	const monthSegments = useMemo(() => layoutCalendarSpans(items, gridStart, 42), [items, gridStart.getTime()]) // eslint-disable-line react-hooks/exhaustive-deps
+	const monthSegments = useMemo(() => layoutCalendarSpans(items, gridStart, monthDays.length), [items, gridStart.getTime(), monthDays.length]) // eslint-disable-line react-hooks/exhaustive-deps
 	const allDaySegments = useMemo(() => layoutCalendarSpans(items.filter(item => calendarItemSchedule(item)?.allDay), visibleDays[0], visibleDays.length), [items, visibleDays[0]?.getTime(), visibleDays.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
 	useEffect(() => {
@@ -559,6 +604,15 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		observer.observe(node); setWidth(node.clientWidth)
 		return () => observer.disconnect()
 	}, [])
+	useLayoutEffect(() => {
+		const node = monthRowsRef.current
+		if (!node) return
+		const measure = () => setMonthRowsHeight(node.getBoundingClientRect().height)
+		const observer = new ResizeObserver(entries => setMonthRowsHeight(entries[0]?.contentRect.height ?? node.getBoundingClientRect().height))
+		observer.observe(node)
+		measure()
+		return () => observer.disconnect()
+	}, [mode])
 	useEffect(() => {
 		if (!taskProjection) return
 		const previous = taskProjectionsRef.current.get(taskProjection.id)
@@ -757,18 +811,24 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		if (effectiveMode !== 'month' && scrollRef.current) requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = 7 * 60 - 20 })
 	}, [effectiveMode])
 	useEffect(() => {
-		if (createEventToken === previousCreateToken.current) return
-		previousCreateToken.current = createEventToken
+		const request = calendarOpenRequestForContext(openRequest, openRequestContextKey)
+		if (!request || request.id === handledOpenRequest.current) return
+		handledOpenRequest.current = request.id
+		onOpenRequestConsumed(request.id)
+		if (request.kind === 'create' && !canCreate) return
 		closeSummary(false)
-		const start = new Date(); start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30, 0, 0)
-		setEditingEvent(null); setEditingOccurrence(null); setEventDraft({ startAt: start.toISOString(), endAt: new Date(start.getTime() + 60 * 60_000).toISOString(), allDay: false, listId: scopeListID }); setEventEditorOpen(true)
-	}, [closeSummary, createEventToken, scopeListID])
-	useEffect(() => {
-		if (!focusEvent) return
-		closeSummary(false)
-		setCursor(new Date(focusEvent.start_at || `${focusEvent.start_date}T12:00:00`))
-		setEditingEvent(focusEvent.event); setEditingOccurrence(focusEvent); setEventDraft(null); setEventEditorOpen(true)
-	}, [focusEvent?.event.id, focusEvent?.occurrence_key]) // eslint-disable-line react-hooks/exhaustive-deps
+		setComposer(null)
+		setMorePopover(null)
+		if (request.kind === 'focus') {
+			const occurrence = request.occurrence
+			setCursor(new Date(occurrence.start_at || `${occurrence.start_date}T12:00:00`))
+			setEditingEvent(occurrence.event); setEditingOccurrence(occurrence); setEventDraft(null)
+		} else {
+			const start = new Date(); start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30, 0, 0)
+			setEditingEvent(null); setEditingOccurrence(null); setEventDraft({ startAt: start.toISOString(), endAt: new Date(start.getTime() + 60 * 60_000).toISOString(), allDay: false, listId: scopeListID })
+		}
+		setEventEditorOpen(true)
+	}, [canCreate, closeSummary, openRequest, openRequestContextKey, onOpenRequestConsumed, scopeListID])
 
 	const dayItems = (day: Date) => items.filter(item => agendaItemOverlapsDay(item, day))
 	const dismissCalendarLayers = (restoreFocus = true) => {
@@ -776,7 +836,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		setMorePopover(null)
 		setInteractionPreview(null)
 	}
-	const move = (direction: number) => { dismissCalendarLayers(); setCursor(value => { const next = new Date(value); if (mode === 'month') next.setMonth(next.getMonth() + direction); else if (mode === 'week') next.setDate(next.getDate() + direction * 7); else next.setDate(next.getDate() + direction); return next }) }
+	const move = (direction: number) => { dismissCalendarLayers(); setCursor(value => { const next = new Date(value); if (mode === 'month') { next.setDate(1); next.setMonth(next.getMonth() + direction) } else if (mode === 'week') next.setDate(next.getDate() + direction * 7); else next.setDate(next.getDate() + direction); return next }) }
 	const closeComposer = useCallback((restoreFocus = true, afterSave = false) => {
 		if (creatingRef.current && !afterSave) return
 		createOperationRef.current = null; setCreationUncertain(false)
@@ -861,29 +921,31 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const allDayRowHeight = Math.max(32, 8 + allDayLaneCount * 22 + (allDayHasOverflow ? 20 : 0))
 	const currentTimeTop = (() => { const now = new Date(); return (now.getHours() * 60 + now.getMinutes()) })()
 	return <div ref={containerRef} data-task-calendar className="relative flex h-full min-h-0 flex-col overflow-hidden border-y border-slate-200 bg-white">
-		<header className="flex flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-2 sm:px-4"><button onClick={() => move(-1)} aria-label="Periodo anterior" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><ChevronLeft className="h-4 w-4" /></button><button onClick={() => { dismissCalendarLayers(); setCursor(new Date()) }} className="min-h-11 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600">Hoy</button><button onClick={() => move(1)} aria-label="Periodo siguiente" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><ChevronRight className="h-4 w-4" /></button><div className="ml-1 min-w-0"><h3 className="truncate text-sm font-black capitalize text-slate-800">{cursor.toLocaleDateString('es', mode === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long', year: 'numeric' })}</h3><p className="hidden text-[10px] font-semibold text-slate-500 sm:block">Tareas, proyectos y eventos</p></div><div className="ml-auto"><CalendarModePicker mode={mode} onBeforeOpen={() => dismissCalendarLayers(false)} onChange={nextMode => { dismissCalendarLayers(false); setMode(nextMode) }} /></div><button type="button" onClick={() => { dismissCalendarLayers(); void loadAgenda() }} aria-label="Actualizar calendario" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><RefreshCw className={`h-4 w-4 ${phase === 'loading' ? 'animate-spin' : ''}`} /></button></header>
+		<header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-2 sm:px-4"><button onClick={() => move(-1)} aria-label="Periodo anterior" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><ChevronLeft className="h-4 w-4" /></button><button onClick={() => { dismissCalendarLayers(); setCursor(new Date()) }} className="min-h-11 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600">Hoy</button><button onClick={() => move(1)} aria-label="Periodo siguiente" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><ChevronRight className="h-4 w-4" /></button><div className="ml-1 min-w-0"><h3 className="truncate text-sm font-black capitalize text-slate-800">{cursor.toLocaleDateString('es', mode === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long', year: 'numeric' })}</h3><p className="hidden text-[10px] font-semibold text-slate-500 sm:block">Tareas, proyectos y eventos</p></div><div className="ml-auto"><CalendarModePicker mode={mode} onBeforeOpen={() => dismissCalendarLayers(false)} onChange={nextMode => { dismissCalendarLayers(false); setMode(nextMode) }} /></div><button type="button" onClick={() => { dismissCalendarLayers(); void loadAgenda() }} aria-label="Actualizar calendario" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><RefreshCw className={`h-4 w-4 ${phase === 'loading' ? 'animate-spin' : ''}`} /></button></header>
 		{mode === 'week' && effectiveMode === 'day' && <div data-task-calendar-mobile-week className="flex gap-1 overflow-x-auto border-b border-slate-200 px-2 py-2">{weekDays.map(day => <button key={dateKey(day)} onClick={() => { dismissCalendarLayers(); setCursor(day) }} className={`min-w-[58px] rounded-xl px-2 py-2 text-center ${dateKey(day) === dateKey(cursor) ? 'bg-emerald-600 text-white' : 'bg-slate-50 text-slate-600'}`}><span className="block text-[9px] font-black uppercase">{day.toLocaleDateString('es', { weekday: 'short' })}</span><span className="text-sm font-black">{day.getDate()}</span></button>)}</div>}
-		<div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto">
-			{rangeNotice && <div role="status" className="sticky left-4 top-3 z-30 mx-4 mb-2 max-w-xl rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs font-semibold text-sky-800">{rangeNotice}</div>}
-			{mutationError && <div role="alert" className="sticky left-4 top-3 z-40 mx-4 flex max-w-xl items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800 shadow-lg"><span className="min-w-0 flex-1">{mutationError}</span>{scheduleConflict && <button type="button" onClick={() => void mutateCalendarSchedule(scheduleConflict.item, scheduleConflict.after, { before: scheduleConflict.before, confirmConflicts: true })} className="shrink-0 rounded-xl bg-amber-500 px-3 py-2 font-black text-white">Guardar de todos modos</button>}<button type="button" aria-label="Cerrar aviso" onClick={() => { setMutationError(''); setScheduleConflict(null) }} className="rounded-lg p-1 hover:bg-amber-100"><X className="h-4 w-4" /></button></div>}
-			{phase === 'loading' && !items.length && <div className="flex h-full items-center justify-center gap-2 text-sm font-semibold text-slate-400"><Loader2 className="h-5 w-5 animate-spin text-emerald-500" />Preparando agenda…</div>}
+		<div ref={scrollRef} data-calendar-scroll className={`relative min-h-0 flex-1 ${mode === 'month' ? 'flex flex-col overflow-x-auto overflow-y-hidden' : 'overflow-auto'}`}>
+			{rangeNotice && <div role="status" className="sticky left-4 top-3 z-30 mx-4 mb-2 shrink-0 max-w-xl rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs font-semibold text-sky-800">{rangeNotice}</div>}
+			{mutationError && <div role="alert" className="sticky left-4 top-3 z-40 mx-4 flex shrink-0 max-w-xl items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800 shadow-lg"><span className="min-w-0 flex-1">{mutationError}</span>{scheduleConflict && <button type="button" onClick={() => void mutateCalendarSchedule(scheduleConflict.item, scheduleConflict.after, { before: scheduleConflict.before, confirmConflicts: true })} className="shrink-0 rounded-xl bg-amber-500 px-3 py-2 font-black text-white">Guardar de todos modos</button>}<button type="button" aria-label="Cerrar aviso" onClick={() => { setMutationError(''); setScheduleConflict(null) }} className="rounded-lg p-1 hover:bg-amber-100"><X className="h-4 w-4" /></button></div>}
+			{phase === 'loading' && !items.length && <div className="absolute inset-0 z-30 flex items-center justify-center gap-2 bg-white/80 text-sm font-semibold text-slate-400"><Loader2 className="h-5 w-5 animate-spin text-emerald-500" />Preparando agenda…</div>}
 			{phase === 'error' && <div className="absolute inset-x-4 top-4 z-30 flex items-center justify-between rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700"><span>{loadError}</span><button onClick={() => void loadAgenda()} className="rounded-xl bg-white px-3 py-2 font-bold">Reintentar</button></div>}
-			{mode === 'month' && <div data-calendar-month-grid className="flex min-h-full min-w-[700px] flex-col">
-				<div className="sticky top-0 z-20 grid h-[34px] shrink-0 grid-cols-7 bg-white/95 backdrop-blur">{['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map(day => <div key={day} className="flex items-center justify-center border-b border-r border-slate-200 text-[10px] font-black uppercase text-slate-500">{day}</div>)}</div>
-				<div className="grid min-h-[660px] flex-1 grid-rows-6">{Array.from({ length: 6 }, (_, weekIndex) => {
+			{mode === 'month' && <div data-calendar-month-grid className="flex min-h-0 min-w-[350px] flex-1 flex-col">
+				<div className="sticky top-0 z-20 grid shrink-0 grid-cols-7 bg-white/95 backdrop-blur" style={{ height: MONTH_WEEKDAY_HEIGHT }}>{['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map(day => <div key={day} className="flex items-center justify-center border-b border-r border-slate-200 text-[10px] font-black uppercase text-slate-500">{day}</div>)}</div>
+				<div ref={monthRowsRef} data-calendar-month-rows className="grid min-h-0 flex-1" style={{ gridTemplateRows: `repeat(${weekCount}, minmax(0, 1fr))` }}>{Array.from({ length: weekCount }, (_, weekIndex) => {
 					const weekOffset = weekIndex * 7
 					const days = monthDays.slice(weekOffset, weekOffset + 7)
 					const segments = monthSegments.filter(segment => segment.weekIndex === weekIndex)
-					const visibleLanes = width < 900 ? 2 : 3
-					return <div key={`month-week:${weekIndex}`} data-calendar-month-week={weekIndex} className="relative grid min-h-[110px] grid-cols-7">
+					const laneCount = segments.reduce((count, segment) => Math.max(count, segment.lane + 1), 0)
+					const rowHeight = monthRowsHeight / weekCount
+					const { visibleLanes, inlineOverflow } = calendarMonthRowCapacity(rowHeight, laneCount, width)
+					return <div key={`month-week:${weekIndex}`} data-calendar-month-week={weekIndex} className="relative grid min-h-0 grid-cols-7">
 						{days.map((day, dayOffset) => {
 							const visible = dayItems(day)
 							const activeMonth = day.getMonth() === cursor.getMonth()
 							const today = dateKey(day) === dateKey(new Date())
 							const overflow = calendarSpanOverflowCount(segments, weekOffset + dayOffset, visibleLanes)
-							return <div key={dateKey(day)} data-calendar-month-day={dateKey(day)} role={canCreate ? 'button' : undefined} tabIndex={canCreate ? 0 : -1} onClick={event => openComposer(day, undefined, undefined, event.currentTarget)} onKeyDown={event => { if (canCreate && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openComposer(day, undefined, undefined, event.currentTarget) } }} className={`group relative min-h-[110px] border-b border-r border-slate-200 p-1.5 text-left transition ${canCreate ? 'cursor-pointer hover:bg-emerald-50/40' : ''} ${activeMonth ? 'bg-white' : 'bg-slate-50/70'}`}>
-								<div className="flex items-center justify-between"><span className={`flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold ${today ? 'bg-emerald-600 text-white' : activeMonth ? 'text-slate-600' : 'text-slate-300'}`}>{day.getDate()}</span>{canCreate && <Plus className="h-3.5 w-3.5 text-emerald-500 opacity-0 transition group-hover:opacity-100" />}</div>
-								{overflow > 0 && <button type="button" onClick={event => { event.stopPropagation(); setMorePopover({ anchor: event.currentTarget.getBoundingClientRect(), returnFocus: event.currentTarget, items: visible, day }) }} className="absolute bottom-1 left-1.5 z-10 min-h-6 rounded-lg bg-white/90 px-1.5 text-[9px] font-black text-slate-500 shadow-sm hover:bg-slate-100">+{overflow} más</button>}
+							return <div key={dateKey(day)} data-calendar-month-day={dateKey(day)} role={canCreate ? 'button' : undefined} tabIndex={canCreate ? 0 : -1} onClick={event => openComposer(day, undefined, undefined, event.currentTarget)} onKeyDown={event => { if (canCreate && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openComposer(day, undefined, undefined, event.currentTarget) } }} className={`group relative min-h-0 border-b border-r border-slate-200 p-1 text-left transition ${canCreate ? 'cursor-pointer hover:bg-emerald-50/40' : ''} ${activeMonth ? 'bg-white' : 'bg-slate-50/70'}`}>
+								<div className="flex items-center justify-between"><span aria-current={today ? 'date' : undefined} className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${today ? 'bg-emerald-600 text-white' : activeMonth ? 'text-slate-600' : 'text-slate-300'}`}>{day.getDate()}</span>{canCreate && !(inlineOverflow && overflow > 0) && <Plus className="h-3.5 w-3.5 text-emerald-500 opacity-0 transition group-hover:opacity-100" />}</div>
+								{overflow > 0 && <button type="button" onClick={event => { event.stopPropagation(); setMorePopover({ anchor: event.currentTarget.getBoundingClientRect(), returnFocus: event.currentTarget, items: visible, day }) }} onKeyDown={event => event.stopPropagation()} aria-label={`Ver ${visible.length} elemento${visible.length === 1 ? '' : 's'} del ${day.toLocaleDateString('es', { dateStyle: 'long' })}`} className={`${inlineOverflow ? 'absolute right-1.5 top-1.5' : 'absolute bottom-1 left-1.5'} z-10 min-h-6 rounded-lg bg-white/90 ${inlineOverflow && width < 560 ? 'px-0.5' : 'px-1.5'} text-[9px] font-black text-slate-500 shadow-sm hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-400`}>+{overflow}{width >= 560 ? ' más' : ''}</button>}
 							</div>
 						})}
 						<CalendarSpanLayer segments={segments} lists={lists} surface="month" dayCount={7} visibleLanes={visibleLanes} weekOffset={weekOffset} activeTaskId={activeTaskId} onOpen={showSummary} interactionFor={interactionFor} />
@@ -918,7 +980,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		<div className="sr-only" aria-live="polite">{announcement}</div>
 		{interactionPreview && typeof document !== 'undefined' && createPortal(<div data-calendar-drag-preview role="status" style={{ zIndex: TASK_OVERLAY_LAYERS.dragGhost, ...(interactionPreview.point ? { left: Math.max(12, Math.min(interactionPreview.point.x + 14, window.innerWidth - 292)), top: Math.max(12, Math.min(interactionPreview.point.y + 14, window.innerHeight - 82)) } : { right: 16, bottom: 78 }) }} className="pointer-events-none fixed w-[276px] max-w-[calc(100vw-24px)] rounded-2xl border border-emerald-300 bg-white/95 px-3 py-2.5 shadow-2xl shadow-slate-900/20 backdrop-blur motion-reduce:transition-none"><p className="truncate text-xs font-black text-slate-900">{interactionPreview.title}</p><p className="mt-0.5 text-[10px] font-bold text-emerald-700">{interactionPreview.label}</p></div>, document.body)}
 		{undoState && typeof document !== 'undefined' && createPortal(<div data-calendar-undo role="status" style={{ zIndex: TASK_OVERLAY_LAYERS.toast }} className="fixed bottom-[max(16px,env(safe-area-inset-bottom))] left-1/2 flex w-[min(440px,calc(100vw-24px))] -translate-x-1/2 items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-white shadow-2xl"><span className="min-w-0 flex-1 truncate text-xs font-bold">Horario actualizado</span><button type="button" onClick={undoCalendarMutation} className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-xl bg-white/10 px-3 text-xs font-black text-emerald-300 hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-emerald-300"><Undo2 className="h-3.5 w-3.5" />Deshacer</button></div>, document.body)}
-		{morePopover && <CalendarMorePopover {...morePopover} lists={lists} activeTaskId={activeTaskId} onOpen={showSummary} onClose={() => setMorePopover(null)} />}
+		{morePopover && <CalendarMorePopover {...morePopover} lists={lists} activeTaskId={activeTaskId} onOpen={showSummary} onClose={closeMorePopover} />}
 		{summary && <CalendarItemSummary item={summary.item} lists={lists} anchor={summary.anchor} anchorElement={summary.anchorElement} onClose={closeSummary} onOpenTaskDetail={onOpenTaskDetail} onEditTask={onEditTask} onEditEvent={editCalendarEvent} />}
 		{composer && <div className="fixed inset-0 z-[145] flex items-center justify-center bg-slate-950/25 p-4 backdrop-blur-[2px]" onMouseDown={event => event.target === event.currentTarget && closeComposer()}>
 			<div role="dialog" aria-modal="true" aria-labelledby="calendar-composer-title" className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">

@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Check, X, ExternalLink, Phone, Mail, Bold, Italic, Underline } from 'lucide-react'
 import { CustomFieldDefinition, CustomFieldValue, CustomFieldType } from '@/types/custom-field'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
 
 // ─── HTML helpers for rich text variant ──────────────────────────────────────
 
@@ -117,16 +118,19 @@ export default function CustomFieldInput({ definition, value, onSave, disabled }
   const [editBool, setEditBool] = useState(false)
   const [editMulti, setEditMulti] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
+  const [dateError, setDateError] = useState('')
   const [richLen, setRichLen] = useState(0)
   const inputRef = useRef<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(null)
   const richRef = useRef<HTMLDivElement>(null)
   const savingRef = useRef(false)
+  const dateCancelRef = useRef<HTMLButtonElement>(null)
 
   const textVariant = definition.field_type === 'text' ? (definition.config?.text_variant || 'inline') : 'inline'
   const maxLen = definition.config?.max_length
 
   const startEdit = () => {
     if (disabled) return
+    setDateError('')
     if (definition.field_type === 'checkbox') {
       // Toggle immediately
       handleToggleCheckbox()
@@ -201,6 +205,23 @@ export default function CustomFieldInput({ definition, value, onSave, disabled }
         val = editMulti.length > 0 ? editMulti : null
       }
       await onSave(definition.id, { value: val })
+    } finally {
+      setSaving(false)
+      savingRef.current = false
+    }
+  }
+
+  const saveDate = async (next: string) => {
+    if (savingRef.current || disabled || (definition.is_required && !next)) return
+    if (next === getRawEditValue(definition, value)) { setEditing(false); return }
+    savingRef.current = true
+    setSaving(true)
+    setDateError('')
+    try {
+      await onSave(definition.id, { value: next || null })
+      setEditing(false)
+    } catch {
+      setDateError('No se pudo guardar la fecha. Vuelve a intentarlo.')
     } finally {
       setSaving(false)
       savingRef.current = false
@@ -307,6 +328,7 @@ export default function CustomFieldInput({ definition, value, onSave, disabled }
       <div className="py-1.5 space-y-1">
         <div className="flex items-center justify-between">
           <span className="text-xs text-slate-500">{definition.name}</span>
+          {definition.field_type === 'date' && <button ref={dateCancelRef} type="button" aria-label={`Cancelar edición de ${definition.name}`} onMouseDown={event => event.preventDefault()} onClick={handleCancel} disabled={saving} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600"><X className="h-3.5 w-3.5" /></button>}
           {showCounter && (
             <span className={`text-[10px] font-mono ${counterColor}`}>{currentLen}/{maxLen}</span>
           )}
@@ -379,10 +401,15 @@ export default function CustomFieldInput({ definition, value, onSave, disabled }
             placeholder={`Ingresa ${definition.name.toLowerCase()}`}
             className="w-full px-2 py-1.5 border border-emerald-400 rounded-lg bg-white text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/20 resize-y min-h-[80px] max-h-[240px]"
           />
+        ) : definition.field_type === 'date' ? (
+          <div>
+            <OperationalDatePicker mode="date" label={definition.name} value={editVal} required={definition.is_required} disabled={saving || disabled} onChange={setEditVal} onCommit={(next, meta) => { if (meta?.reason === 'blur' && meta.relatedTarget === dateCancelRef.current) return; void saveDate(next) }} notifyUnchangedCommit compact />
+            {dateError && <p role="alert" className="mt-1 text-xs text-red-600">{dateError}</p>}
+          </div>
         ) : (
           <input
             ref={inputRef as React.RefObject<HTMLInputElement>}
-            type={definition.field_type === 'number' || definition.field_type === 'currency' ? 'number' : definition.field_type === 'date' ? 'date' : 'text'}
+            type={definition.field_type === 'number' || definition.field_type === 'currency' ? 'number' : 'text'}
             value={editVal}
             onChange={e => setEditVal(e.target.value)}
             onBlur={handleSave}

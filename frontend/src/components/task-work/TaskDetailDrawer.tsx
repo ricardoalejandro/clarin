@@ -51,6 +51,8 @@ import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailW
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskListPicker } from './TaskSelectPicker'
 import TaskDateRangePicker from './TaskDateRangePicker'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
+import type { OperationalDateDraftState } from '../operational-date/operationalDateInput'
 import TaskAttachmentViewer from './TaskAttachmentViewer'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskDetailVisualState } from './taskDetailInspectorState'
@@ -247,6 +249,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const [descriptionSaveState, setDescriptionSaveState] = useState<TaskDescriptionAutosaveState | undefined>()
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
+  const dateFields = useOperationalDateFields()
   const [allDayDraft, setAllDayDraft] = useState(false)
   const [progressDraft, setProgressDraft] = useState(0)
   const [progressInput, setProgressInput] = useState('0')
@@ -316,6 +319,16 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const editingDescriptionRef = useRef(false)
   const descriptionComposingRef = useRef(false)
   const editingDatesRef = useRef(false)
+  const dateDirtyRef = useRef({ start: false, due: false })
+  const trackStartDate = dateFields.track('start'), trackDueDate = dateFields.track('due')
+  const receiveStartDate = useCallback((state: OperationalDateDraftState) => {
+    trackStartDate(state); dateDirtyRef.current.start = state.active !== false && state.dirty
+    editingDatesRef.current = dateDirtyRef.current.start || dateDirtyRef.current.due
+  }, [trackStartDate])
+  const receiveDueDate = useCallback((state: OperationalDateDraftState) => {
+    trackDueDate(state); dateDirtyRef.current.due = state.active !== false && state.dirty
+    editingDatesRef.current = dateDirtyRef.current.start || dateDirtyRef.current.due
+  }, [trackDueDate])
   const editingProgressRef = useRef(false)
   const taskNavigationReturnRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
   const pendingParentRestoreRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
@@ -758,6 +771,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     editingDescriptionRef.current = false
     descriptionComposingRef.current = false
     editingDatesRef.current = false
+    dateDirtyRef.current = { start: false, due: false }
     editingProgressRef.current = false
     preservedDraftKeysRef.current.clear()
     setParticipantGrantPrompt(null)
@@ -1318,6 +1332,13 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     }
   }
   const requestClose = useCallback(async () => {
+    if (!canEdit && dateFields.dirty) {
+      if (!window.confirm('Ya no puedes editar esta tarea. ¿Descartar el borrador de fechas y cerrar?')) return false
+      editingDatesRef.current = false
+    } else if (canEdit) {
+      if (!dateFields.validate()) return false
+      if (dateFields.dirty && await saveDates(dateFields.value('start', startDraft), dateFields.value('due', dueDraft), allDayDraft) === false) return false
+    }
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId || !descriptionAutosaveRef.current?.hasUnsaved(requestedTaskId)) {
       onClose()
@@ -1331,19 +1352,21 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     }
     onClose()
     return true
-  }, [onClose])
+  }, [onClose, canEdit, dateFields.validate, dateFields.value, dateFields.dirty, startDraft, dueDraft, allDayDraft])
   requestCloseRef.current = () => { void requestClose() }
   useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
   const saveDates = async (startValue = startDraft, dueValue = dueDraft, isAllDay = allDayDraft) => {
-    editingDatesRef.current = false
-    if (!task) return
+    if (!task) return false
     if (startValue && dueValue && new Date(dueValue) < new Date(startValue)) {
       showFailure('La entrega no puede ser anterior al inicio.')
-      return
+      return false
     }
     const nextStart = startValue ? new Date(startValue).toISOString() : ''
     const nextDue = dueValue ? new Date(dueValue).toISOString() : ''
-    if (nextStart !== (task.start_at || '') || nextDue !== (task.due_at || '') || isAllDay !== Boolean(task.is_all_day)) await updateTask('dates', { start_at: nextStart, due_at: nextDue, is_all_day: isAllDay })
+    const saved = nextStart !== (task.start_at || '') || nextDue !== (task.due_at || '') || isAllDay !== Boolean(task.is_all_day)
+      ? await updateTask('dates', { start_at: nextStart, due_at: nextDue, is_all_day: isAllDay }) : true
+    editingDatesRef.current = !saved
+    return saved
   }
   const saveProgress = async (mode = progressMode, manual = progressDraft) => {
     editingProgressRef.current = false
@@ -1865,7 +1888,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
           <div className="flex items-center gap-2"><div className="min-w-0 flex-1"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div><TaskCompletionButton task={task} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div>
         </TaskPropertyRow>
         <TaskPropertyRow label="Responsable" icon={<UserRound className="h-3.5 w-3.5" />}><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={!canEdit || isPending('owner')} /></TaskPropertyRow>
-        <TaskPropertyRow label="Fechas" icon={<CalendarRange className="h-3.5 w-3.5" />}><TaskDateRangePicker label="Fecha de entrega" startValue={startDraft} endValue={dueDraft} allDay={allDayDraft} disabled={!canEdit} pending={isPending('dates')} onApply={range => { setStartDraft(range.startAt); setDueDraft(range.endAt); setAllDayDraft(range.isAllDay); void saveDates(range.startAt, range.endAt, range.isAllDay) }} /></TaskPropertyRow>
+        <TaskPropertyRow label="Fechas" icon={<CalendarRange className="h-3.5 w-3.5" />}><TaskDateRangePicker key={task.id} label="Fecha de entrega" startValue={startDraft} endValue={dueDraft} allDay={allDayDraft} disabled={!canEdit} pending={isPending('dates')} onStartDraftStateChange={receiveStartDate} onEndDraftStateChange={receiveDueDate} onAllDayDraftChange={setAllDayDraft} onApply={range => { setStartDraft(range.startAt); setDueDraft(range.endAt); setAllDayDraft(range.isAllDay); void saveDates(range.startAt, range.endAt, range.isAllDay) }} /></TaskPropertyRow>
         <TaskPropertyRow label="Prioridad" icon={<Flag className="h-3.5 w-3.5" />}><TaskPriorityPicker value={task.priority} disabled={!canEdit} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></TaskPropertyRow>
         <TaskPropertyRow label="Progreso" icon={<Activity className="h-3.5 w-3.5" />}><TaskProgressControl id={`task-progress-${task.id}`} mode={progressMode} inputValue={progressInput} canonicalManualValue={progressDraft} effectiveProgress={task.progress || 0} completed={taskCompleted} disabled={!canEdit} pending={isPending('progress')} error={progressError} subtaskDone={task.subtask_done || 0} subtaskCount={task.subtask_count || 0} onModeChange={changeProgressMode} onFocus={() => { editingProgressRef.current = true }} onInputChange={value => { setProgressInput(value); setProgressError('') }} onCommit={() => { void commitManualProgress() }} onReset={() => { editingProgressRef.current = false; const canonical = task.manual_progress ?? task.progress ?? 0; setProgressDraft(canonical); setProgressInput(String(canonical)); setProgressError('') }} /></TaskPropertyRow>
         <TaskPropertyRow label="Lista" icon={<ListTodo className="h-3.5 w-3.5" />}><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={!canEdit || Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} />{task.parent_task_id && <p className="mt-1.5 text-[10px] leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</TaskPropertyRow>

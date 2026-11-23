@@ -226,6 +226,11 @@ func (r *DeviceRepository) BeginDeletion(ctx context.Context, accountID, deviceI
 		return nil, ErrDeviceSessionConflict
 	}
 	result.OperationID = uuid.New()
+	// Epoch ownership survives both the temporary tombstone and the final
+	// device DELETE. Historical Message.device_id remains untouched.
+	if _, err = tx.Exec(ctx, `UPDATE whatsapp_device_owner_epochs SET ended_at=NOW() WHERE account_id=$1 AND device_id=$2 AND ended_at IS NULL`, accountID, deviceID); err != nil {
+		return nil, err
+	}
 	phase := "pending"
 	if jid == "" {
 		phase = "local_detached"
@@ -240,7 +245,7 @@ func (r *DeviceRepository) BeginDeletion(ctx context.Context, accountID, deviceI
 		return nil, err
 	}
 	result.ContactsDetached = ct.RowsAffected()
-	ct, err = tx.Exec(ctx, `UPDATE chats SET device_id=NULL,updated_at=NOW() WHERE account_id=$1 AND device_id=$2`, accountID, deviceID)
+	ct, err = tx.Exec(ctx, `UPDATE chats SET device_id=NULL,updated_at=NOW(),binding_revision=binding_revision+1,binding_state='pending' WHERE account_id=$1 AND device_id=$2`, accountID, deviceID)
 	if err != nil {
 		return nil, err
 	}

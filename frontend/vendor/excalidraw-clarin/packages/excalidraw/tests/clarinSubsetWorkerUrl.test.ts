@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveClarinSubsetWorkerUrl } from "../subset/clarinSubsetWorkerUrl";
 
 describe("Clarin subset worker URL", () => {
-  const assets = "/vendor/whiteboards-editor/0.18.1-clarin.8/";
+  const assets = "/vendor/whiteboards-editor/0.18.1-clarin.9/";
   it("uses the configured versioned asset on the page origin", () => {
     expect(resolveClarinSubsetWorkerUrl(assets, "https://clarin.test/shared/whiteboards/a")?.href)
       .toBe(`https://clarin.test${assets}subset-worker.js`);
@@ -15,7 +15,7 @@ describe("Clarin subset worker URL", () => {
   });
   it.each([
     undefined, "file:///tmp/subset-worker.js", "https://external.invalid/",
-    "//external.invalid/vendor/whiteboards-editor/0.18.1-clarin.8/",
+    "//external.invalid/vendor/whiteboards-editor/0.18.1-clarin.9/",
     "/api/", `${assets}?next=https://external.invalid`, `${assets}#fragment`,
     "/vendor/whiteboards-editor/0.18.1%2fother/",
     `https://user:password@clarin.test${assets}`, "data:text/javascript,void(0)",

@@ -1,5 +1,120 @@
 # Changelog — Clarin CRM
 
+## 2026-11-20
+
+### Build 1 — Más espacio para el lienzo de Utilitarios
+
+- Al ocultar el menú lateral, «Mostrar menú» comparte la cabecera con las pestañas y el guardado. El lienzo recupera 44 px de altura.
+
+## 2026-11-19
+
+### Build 1 — Confirmación de guardado sin saltos
+
+- Utilitarios confirma el guardado en el indicador de la cabecera, conservando la posición y el tamaño del editor, las pestañas y la selección.
+- Los errores y la recuperación de borradores mantienen sus avisos y acciones.
+
+## 2026-11-18
+
+### Build 1 — Guardado fiable y formato de texto por selección
+
+- Utilitarios guarda con Ctrl+S, Cmd+S y Guardar, además del autoguardado; conserva el borrador ante errores y permite confirmar una copia antes de recuperar la versión guardada.
+- El Editor de texto y código admite TXT, Markdown, CSV, LOG, YAML, INI, HTML, CSS, JavaScript, TypeScript y SQL, junto a JSON, XML y JSON con comentarios.
+- Documentos permite renombrar y eliminar desde cada fila, sin abrir el fichero; Escape conserva el foco y los paneles de trabajo.
+- Pizarra aplica color, fuente y tamaño al fragmento, al texto futuro o al objeto completo según la selección, conservando historial, portapapeles y formatos anteriores.
+- El motor local de Pizarra 0.18.1-clarin.9 comparte medidas entre edición y exportación, con validación de rangos y preservación de revisiones anteriores.
+
+## 2026-11-15
+
+### Build 1 — Más espacio en Utilitarios
+
+- Navegación de iconos y biblioteca recogida por defecto, con preferencias visuales independientes por cuenta y usuario.
+- Una cabecera para documentos y pestañas; herramientas en una fila con opciones secundarias en «Más».
+- JSON/XML aprovecha el espacio sin reiniciar documentos ni historial y mantiene el zoom y los paneles en un pie compacto.
+- QR, Imagen/Base64 y Criptografía integran sus acciones en barras y encabezados; Mis claves abre creación, importación y opciones avanzadas a demanda.
+- Controles adaptados a ratón y pantalla táctil, biblioteca superpuesta cuando falta ancho y pestaña activa siempre visible.
+
+## 2026-11-14
+
+### Build 1 — Biblioteca personal de Utilitarios
+
+- Hojas con pestañas, nombres, carpetas, favoritos y búsqueda por nombre y contenido; cerrar conserva el documento y eliminar programa el borrado físico de sus archivos.
+- Autoguardado con recuperación de conflictos y fallos temporales, protección al salir y actualización entre dispositivos; una referencia a una clave eliminada ya no bloquea los siguientes guardados.
+- JSON/XML admite hasta 60 MiB por panel, con 30 MiB recomendado, búsqueda completa, edición por tramos y codificaciones UTF-8, UTF-16, Windows-1252 e ISO-8859-1.
+- Biblioteca protegida de claves AES, RSA y EC, certificados X.509, PEM/DER, JWK y P12/PFX; generación de CSR, certificados de prueba y firma y verificación de JWT.
+- Duración efectiva de sesión visible y diagnóstico de cierres; el autoguardado y las consultas de fondo conservan la política de inactividad.
+
+## 2026-11-02
+
+### Build 2 — Vista amplia en Clarin
+
+- Ctrl/Cmd + Shift + F permite ocultar por completo el menú principal en escritorio y recuperarlo con el mismo atajo o con «Mostrar menú».
+- La vista amplia conserva el estado de cada sección y la preferencia de menú compacto; al cambiar de sección, cuenta o tamaño móvil vuelve la navegación habitual.
+- Pizarras mantiene su maximización y ofrece una salida visible también cuando el editor es compacto.
+
+### Build 1 — Calendarios de Clarin Work
+
+- El selector propone hoy como fecha de entrega y espera a Aplicar para guardarla; conserva las fechas existentes.
+- Entrar en Calendario muestra la agenda sin volver a abrir formularios anteriores.
+- La vista mensual ajusta todas las semanas al espacio disponible y ofrece el inventario completo de cada día mediante «+N más».
+
+## 2026-10-25
+
+### Zoom de fotografías y administradores primero
+
+- Ctrl + rueda y el pellizco con dos dedos amplían la imagen dentro de su visor, conservando las ventanas de Contactos, Leads, Eventos, Programas y Chats.
+- Las imágenes adjuntas mantienen sus comentarios y marcas; desplazar o pellizcar no crea anotaciones.
+- Los administradores aparecen primero en los integrantes del grupo, también al buscar y cargar más páginas, conservando el orden de los demás participantes.
+
+### Recuperación de identidades de integrantes
+
+- Recuperación automática de nombres y relaciones de teléfono de los integrantes ya sincronizados, usando los dispositivos vinculados y sin crear Contactos ni enviar mensajes.
+- Reanudar una sesión existente recupera identidad sin importar ni fusionar registros CRM.
+- Los datos comprobados aparecen durante la recuperación, aunque otros números sigan esperando un reintento. Los dispositivos desconectados continúan al volver.
+- Participantes, ficha y Reportería comparten la identidad comprobada. El usuario público se muestra separado del teléfono cuando WhatsApp lo entrega.
+- Las exportaciones comprueban que el reporte siga vigente; los cambios de identidad, grupo o datos CRM requieren regenerarlo.
+
+### Compartir mensajes sin bloqueos generales
+
+- Reenviar permite enviar una copia de textos y archivos compatibles, también del historial antiguo, aunque el reenvío nativo no esté habilitado.
+- El selector distingue la copia del reenvío de WhatsApp y conserva los límites conocidos y los resultados para evitar duplicados.
+- Los audios antiguos sin clasificación pueden compartirse como archivo adjunto mediante una elección explícita.
+- Los mensajes eliminados, de visualización única o sin contenido disponible permanecen protegidos individualmente.
+
+## 2026-10-24
+
+### Identidad de participantes y procedencia de mensajes
+
+- Los integrantes aprovechan los nombres disponibles para su identidad de WhatsApp, incluso cuando no se conoce su teléfono; los usuarios públicos recibidos se muestran por separado.
+- Los mensajes conservan los indicadores de reenvío entregados por WhatsApp y muestran «Reenviado» o «Reenviado muchas veces» también después de recargar.
+- El nuevo envío nativo conserva la procedencia y registra los resultados para evitar copias por reintentos. Permanece deshabilitado hasta verificarlo con dispositivos reales.
+
+### Entornos recuperables e integrantes de WhatsApp
+
+- Opciones visibles para carpetas y Entornos, con inventario del servidor, confirmación y eliminación recuperable del Entorno completo. General permanece protegido.
+- Restauración por operación que conserva lo previamente archivado o eliminado, sin borrar adjuntos ni pizarras. Los cambios simultáneos se revalidan dentro de la transacción.
+- Identidad de integrantes resuelta mediante alias comprobados, con nombre disponible, teléfono confirmado y etiquetas de administrador y Tú.
+- Ficha del integrante con foto temporal, información de perfil y grupos sincronizados en común, sin crear contactos al consultarla.
+- Mensaje abre o reutiliza el privado desde el dispositivo del grupo, sin enviar automáticamente y conservando el borrador y el contexto del grupo.
+
+## 2026-10-23
+
+### Build 1 — Eliminar listas y carpetas conservando su contenido
+
+- Eliminar una lista o carpeta permite enviar todo a Papelera o conservar el contenido dentro del mismo Entorno.
+- La confirmación muestra el inventario real, valida permisos y destinos, y contempla eventos, subtareas, pizarras e historial archivado.
+- La restauración recupera únicamente los elementos enviados por esa operación; lo eliminado anteriormente conserva su estado.
+- Los reintentos y la actualización en tiempo real evitan operaciones duplicadas y contenido obsoleto, también desde Configuración.
+
+## 2026-10-18
+
+### WhatsApp: grupos y fijados personales
+
+- Conversaciones grupales integradas en la bandeja con filtros, autores y citas identificados, menciones, participantes, permisos reales y recibos por integrante.
+- Los grupos conservan No leídos y su historial, completamente separados de Leads, campañas y Pendientes comerciales.
+- Fijar y desfijar conversaciones para cada usuario, con orden estable y sincronización entre sus sesiones.
+- Recuperación de medios históricos disponibles bajo demanda, conservando restricciones de visualización única.
+- Actualización controlada de whatsmeow, adaptación de identidades telefónicas/LID y compilación fijada con Go 1.27.2.
+
 ## 2026-10-12
 
 ### Eventos: configuración, contactos y bitácoras

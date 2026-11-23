@@ -3,13 +3,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ImagePlus, Loader2, Trash2, X } from 'lucide-react'
-import { api, apiBlob, apiUpload } from '@/lib/api'
+import { api, apiUpload } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { avatarCanvasDisplacement, drawAvatarImage, exportCompactAvatar, initialAvatarTransform, validateProgramAvatarFile, type AvatarImageTransform } from '@/lib/avatarImageEditor'
 import AvatarImageEditor from '@/components/AvatarImageEditor'
+import ZoomableImageSurface from '@/components/image-viewer/ZoomableImageSurface'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 import { OPERATIONAL_OVERLAY_LAYERS as GLOBAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
 import type { Program } from '@/types/program'
+import { acquireProgramAvatarBlob, invalidateProgramAvatarBlob } from './programAvatarCache'
 
 type AvatarProgram = Pick<Program, 'id' | 'name' | 'color' | 'avatar_url' | 'avatar_revision'>
 
@@ -20,26 +22,23 @@ function useProgramAvatarURL(program: AvatarProgram) {
   const [retry, setRetry] = useState(0)
   const [failed, setFailed] = useState('')
   useEffect(() => {
-    const controller = new AbortController()
+    let active = true
     let objectURL = ''
-    let timer: ReturnType<typeof setTimeout> | undefined
+    let release: (() => void) | undefined
     setFailed('')
     if (program.avatar_url && !isAuthIdentityChanging(scope)) {
-      timer = setTimeout(() => {
-        controller.abort()
-        if (getAuthScope() === scope) setFailed(key)
-      }, 15000)
-      void apiBlob(`/api/programs/${encodeURIComponent(program.id)}/avatar/content?v=${program.avatar_revision ?? 0}`, { signal: controller.signal }).then(response => {
-        clearTimeout(timer)
-        if (controller.signal.aborted || getAuthScope() !== scope) return
+      const lease = acquireProgramAvatarBlob(scope, program.id, program.avatar_revision ?? 0)
+      release = lease.release
+      void lease.promise.then(response => {
+        if (!active || getAuthScope() !== scope) return
         if (!response.success || !response.blob) { setFailed(key); return }
         objectURL = URL.createObjectURL(response.blob)
         setResult({ key, url: objectURL })
       })
-    }
-    return () => { clearTimeout(timer); controller.abort(); if (objectURL) URL.revokeObjectURL(objectURL) }
+    } else if (!program.avatar_url) invalidateProgramAvatarBlob(scope, program.id, program.avatar_revision ?? 0)
+    return () => { active = false; release?.(); if (objectURL) URL.revokeObjectURL(objectURL) }
   }, [key, retry, program.id, program.avatar_url, program.avatar_revision, scope])
-  return { url: result.key === key ? result.url : '', failed: failed === key, retry: () => setRetry(value => value + 1) }
+  return { url: result.key === key ? result.url : '', failed: failed === key, retry: () => { invalidateProgramAvatarBlob(scope, program.id, program.avatar_revision ?? 0); setRetry(value => value + 1) } }
 }
 
 export function ProgramAvatar({ program, className = 'h-12 w-12', interactive = false, suspended = false }: { program: AvatarProgram; className?: string; interactive?: boolean; suspended?: boolean }) {
@@ -59,7 +58,7 @@ export function ProgramAvatar({ program, className = 'h-12 w-12', interactive = 
     {interactive && program.avatar_url ? <button type="button" disabled={suspended} aria-label={`Ver foto de ${program.name}`} onClick={event => { event.stopPropagation(); if (!suspendedRef.current) setView(true) }} className={`${classes} min-h-11 min-w-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2`} style={{ backgroundColor: color }}>{display}</button>
       : <span className={classes} style={{ backgroundColor: color }}>{display}</span>}
     {view && <PhotoDialog title="Foto del programa" subtitle={program.name} paused={suspended} onClose={() => setView(false)}>
-      {url && imageFailed !== url ? <img src={url} alt={`Foto de ${program.name}`} className="mx-auto max-h-[65vh] max-w-full rounded-2xl object-contain" />
+      {url && imageFailed !== url ? <ZoomableImageSurface src={url} alt={`Foto de ${program.name}`} sourceKey={`${scope}:${program.id}:${program.avatar_revision ?? 0}:${url}`} active={!suspended && scope === getAuthScope() && !isAuthIdentityChanging(scope)} onError={() => setImageFailed(url)} className="h-[min(65vh,32rem)] w-full rounded-2xl bg-slate-950" imageClassName="rounded-2xl" />
         : failed || (Boolean(url) && imageFailed === url) ? <div role="alert" className="space-y-3 text-sm text-slate-600"><p>No se pudo cargar la foto.</p><button type="button" className="min-h-11 rounded-xl border px-4" onClick={() => { setImageFailed(''); retry() }}>Reintentar</button></div>
           : <p role="status" className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Cargando foto…</p>}
     </PhotoDialog>}

@@ -12,6 +12,9 @@ import { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { AdminFormDialog, AdminPasswordFields } from '@/components/admin'
 import AccountLeadPolicyDialog from '@/components/admin/AccountLeadPolicyDialog'
 import OfflineAccessAdminV5 from '@/components/admin/OfflineAccessAdminV5'
+import { AccountSessionPolicy } from '@/components/admin/AccountSessionPolicy'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
@@ -35,6 +38,7 @@ interface Account {
   subscription_status?: string
   trial_ends_at?: string | null
   current_period_end?: string | null
+  session_idle_timeout_minutes?: number
   grace_ends_at?: string | null
   user_count: number
   device_count: number
@@ -324,6 +328,7 @@ const ALL_MODULES = [
   { key: 'tasks.environments.create', label: 'Crear Entornos de Work', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
   { key: 'reports', label: 'Reportería', color: 'emerald' },
+  { key: 'utilities', label: 'Utilitarios', color: 'teal' },
   { key: 'quick_replies_manage', label: 'Administrar respuestas rápidas', color: 'emerald' },
 ]
 
@@ -429,7 +434,9 @@ export default function AdminPage() {
   // Modals
   const [showAccountModal, setShowAccountModal] = useState(false)
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
+  const [sessionPolicySaving, setSessionPolicySaving] = useState(false)
   const [accountFormError, setAccountFormError] = useState<AccountFormError | null>(null)
+  const accountDates = useOperationalDateFields()
   const [accountSubmitting, setAccountSubmitting] = useState(false)
   const [accountAdvancedOpen, setAccountAdvancedOpen] = useState(false)
   const [leadPolicyAccount, setLeadPolicyAccount] = useState<Account | null>(null)
@@ -940,6 +947,7 @@ export default function AdminPage() {
 
   // Account CRUD
   function openCreateAccount() {
+    accountDates.reset()
     setEditingAccount(null)
     setAccountFormError(null)
     setAccountSubmitting(false)
@@ -949,6 +957,7 @@ export default function AdminPage() {
   }
 
   function openEditAccount(a: Account) {
+    accountDates.reset()
     setEditingAccount(a)
     setAccountFormError(null)
     setAccountSubmitting(false)
@@ -968,14 +977,15 @@ export default function AdminPage() {
   }
 
   function closeAccountModal() {
-    if (accountSubmitting) return
+    if (accountSubmitting || sessionPolicySaving) return
     setShowAccountModal(false)
     setAccountFormError(null)
     setAccountAdvancedOpen(false)
   }
 
   async function saveAccount() {
-    if (accountSubmitting) return
+    if (accountSubmitting || sessionPolicySaving) return
+    if (!accountDates.validate()) return
     const trimmedName = accountForm.name.trim()
     setAccountFormError(null)
     if (!trimmedName) {
@@ -997,8 +1007,8 @@ export default function AdminPage() {
       max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
       storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
       subscription_status: accountForm.subscription_status,
-      trial_ends_at: accountForm.trial_ends_at,
-      current_period_end: accountForm.current_period_end,
+      trial_ends_at: accountDates.value('trial_ends_at', accountForm.trial_ends_at),
+      current_period_end: accountDates.value('current_period_end', accountForm.current_period_end),
     }
 
     setAccountSubmitting(true)
@@ -3337,15 +3347,15 @@ export default function AdminPage() {
         title={editingAccount ? 'Editar cuenta' : 'Crear cuenta'}
         description={editingAccount ? 'Actualiza la identidad, límites y suscripción de la cuenta.' : 'Configura una nueva cuenta y su suscripción en una sola operación.'}
         icon={Building2}
-        busy={accountSubmitting}
+        busy={accountSubmitting || sessionPolicySaving}
         formNoValidate
         onClose={closeAccountModal}
         initialFocusRef={accountNameInputRef}
         onSubmit={event => { event.preventDefault(); void saveAccount() }}
         footer={(
           <>
-            <button type="button" onClick={closeAccountModal} disabled={accountSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
-            <button type="submit" disabled={accountSubmitting} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+            <button type="button" onClick={closeAccountModal} disabled={accountSubmitting || sessionPolicySaving} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+            <button type="submit" disabled={accountSubmitting || sessionPolicySaving} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
               {accountSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {accountSubmitting ? 'Guardando…' : editingAccount ? 'Guardar cambios' : 'Crear cuenta'}
             </button>
@@ -3454,18 +3464,30 @@ export default function AdminPage() {
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <label htmlFor="admin-account-trial-end" className="mb-1.5 block text-sm font-medium text-slate-700">Prueba hasta</label>
-                    <input id="admin-account-trial-end" type="date" value={accountForm.trial_ends_at} onChange={event => { setAccountForm(form => ({ ...form, trial_ends_at: event.target.value })); setAccountFormError(current => current?.field === 'trial_ends_at' ? null : current) }} disabled={accountSubmitting} aria-invalid={accountFormError?.field === 'trial_ends_at'} aria-describedby={accountFormError?.field === 'trial_ends_at' ? 'admin-account-trial-end-error' : undefined} className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'trial_ends_at' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`} />
+                    <OperationalDatePicker id="admin-account-trial-end" mode="date" label="Prueba hasta" value={accountForm.trial_ends_at} onChange={value => { setAccountForm(form => ({ ...form, trial_ends_at: value })); setAccountFormError(current => current?.field === 'trial_ends_at' ? null : current) }} onDraftStateChange={accountDates.track('trial_ends_at')} disabled={accountSubmitting} showQuickValues={false} />
                     {accountFormError?.field === 'trial_ends_at' && <p id="admin-account-trial-end-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
                   </div>
                   <div>
                     <label htmlFor="admin-account-period-end" className="mb-1.5 block text-sm font-medium text-slate-700">Periodo hasta</label>
-                    <input id="admin-account-period-end" type="date" value={accountForm.current_period_end} onChange={event => { setAccountForm(form => ({ ...form, current_period_end: event.target.value })); setAccountFormError(current => current?.field === 'current_period_end' ? null : current) }} disabled={accountSubmitting} aria-invalid={accountFormError?.field === 'current_period_end'} aria-describedby={accountFormError?.field === 'current_period_end' ? 'admin-account-period-end-error' : undefined} className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'current_period_end' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`} />
+                    <OperationalDatePicker id="admin-account-period-end" mode="date" label="Periodo hasta" value={accountForm.current_period_end} onChange={value => { setAccountForm(form => ({ ...form, current_period_end: value })); setAccountFormError(current => current?.field === 'current_period_end' ? null : current) }} onDraftStateChange={accountDates.track('current_period_end')} disabled={accountSubmitting} showQuickValues={false} />
                     {accountFormError?.field === 'current_period_end' && <p id="admin-account-period-end-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
                   </div>
                 </div>
               </div>
             )}
           </section>
+          {showAccountModal && editingAccount && <AccountSessionPolicy
+            key={editingAccount.id}
+            accountId={editingAccount.id}
+            minutes={editingAccount.session_idle_timeout_minutes ?? 30}
+            disabled={accountSubmitting}
+            onBusyChange={setSessionPolicySaving}
+            onSaved={minutes => {
+              const id = editingAccount.id
+              setAccounts(current => current.map(account => account.id === id ? { ...account, session_idle_timeout_minutes: minutes } : account))
+              setEditingAccount(current => current?.id === id ? { ...current, session_idle_timeout_minutes: minutes } : current)
+            }}
+          />}
         </div>
       </AdminFormDialog>
 

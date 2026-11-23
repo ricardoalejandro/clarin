@@ -1,5 +1,7 @@
 'use client'
 
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
@@ -214,6 +216,7 @@ export default function LeadDetailPanel({
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
 
   // Inline editing
+  const [dateError, setDateError] = useState('')
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValues, setEditValues] = useState<Record<string, string>>({})
   const [savingField, setSavingField] = useState(false)
@@ -363,7 +366,8 @@ export default function LeadDetailPanel({
 
   const handleSaveCustomField = useCallback(async (fieldId: string, payload: any) => {
     const cid = contactMode ? contactId : lead.contact_id
-    if (!cid) return
+    const isDate = cfDefs.some(definition => definition.id === fieldId && definition.field_type === 'date')
+    if (!cid || readOnly) { if (isDate) throw new Error('El campo no está disponible para editar.'); return }
     const token = localStorage.getItem('token')
     const res = await fetch(`/api/contacts/${cid}/custom-fields/${fieldId}`, {
       method: 'PUT',
@@ -371,6 +375,7 @@ export default function LeadDetailPanel({
       body: JSON.stringify(payload),
     })
     const data = await res.json()
+    if (isDate && (!res.ok || !data.success)) throw new Error(data.error || 'No se pudo guardar la fecha.')
     if (data.success && data.value) {
       setCfValues(prev => {
         const idx = prev.findIndex(v => v.field_id === fieldId)
@@ -378,7 +383,7 @@ export default function LeadDetailPanel({
         return [...prev, data.value]
       })
     }
-  }, [contactMode, contactId, lead.contact_id])
+  }, [contactMode, contactId, lead.contact_id, cfDefs, readOnly])
 
   // ─── Fetch observations when lead changes ──────────────
   useEffect(() => {
@@ -498,16 +503,19 @@ export default function LeadDetailPanel({
     } catch { /* ignore */ }
   }
 
-  const saveLeadField = async (field: string) => {
+  const saveLeadField = async (field: string, committedValue?: string) => {
     if (readOnly) return
     if (!lead?.id) return
     if (savingFieldRef.current) return
+    if (field === 'birth_date' && committedValue === (lead.birth_date?.split('T')[0] || '')) { setEditingField(null); return }
+    let succeeded = false
+    setDateError('')
     savingFieldRef.current = field
     setSavingField(true)
     const token = localStorage.getItem('token')
     try {
       const payload: Record<string, string | number | null> = {}
-      const val = editValues[field]?.trim() ?? ''
+      const val = (committedValue ?? editValues[field])?.trim() ?? ''
       if (field === 'age') {
         payload[field] = val ? parseInt(val, 10) : 0
       } else {
@@ -527,6 +535,8 @@ export default function LeadDetailPanel({
         body: JSON.stringify(apiPayload),
       })
       const data = await res.json()
+      succeeded = Boolean(data.success)
+      if (field === 'birth_date' && !succeeded) setDateError(data.error || 'No se pudo guardar la fecha. Vuelve a intentarlo.')
       if (contactMode) {
         if (data.success && data.contact) {
           const updated = { ...lead, ...payload } as Lead
@@ -548,10 +558,11 @@ export default function LeadDetailPanel({
         }
       }
     } catch (err) {
-      console.error('Failed to save field:', err)
+      if (field === 'birth_date') setDateError('No se pudo guardar la fecha. Vuelve a intentarlo.')
+      else console.error('Failed to save field:', err)
     } finally {
       setSavingField(false)
-      setEditingField(null)
+      if (field !== 'birth_date' || succeeded) setEditingField(null)
       setTimeout(() => { savingFieldRef.current = null }, 50)
     }
   }
@@ -803,6 +814,7 @@ export default function LeadDetailPanel({
   // ─── Helpers ───────────────────────────────────────────
   const startEditing = (field: string, currentValue: string) => {
     if (readOnly) return
+    setDateError('')
     setEditingField(field)
     setEditValues({ ...editValues, [field]: currentValue })
   }
@@ -1171,7 +1183,7 @@ export default function LeadDetailPanel({
           <div className="flex items-center gap-3 group">
             <Cake className="w-4 h-4 text-emerald-600 shrink-0" />
             {editingField === 'birth_date' ? (
-              <input autoFocus type="date" value={editValues.birth_date ?? ''} onChange={(e) => setEditValues({ ...editValues, birth_date: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'birth_date')} onBlur={() => saveLeadField('birth_date')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" />
+              <div className="min-w-0 flex-1"><OperationalDatePicker mode="date" label="Fecha de nacimiento" value={editValues.birth_date ?? ''} onChange={value => setEditValues(previous => ({ ...previous, birth_date: value }))} onCommit={value => void saveLeadField('birth_date', value)} notifyUnchangedCommit disabled={savingField || readOnly} compact />{dateError && <p role="alert" className="mt-1 text-xs text-red-600">{dateError}</p>}</div>
             ) : (
               <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.birth_date ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('birth_date', lead.birth_date ? lead.birth_date.split('T')[0] : '')} title="Clic para editar">
                 {lead.birth_date ? format(parseISO(lead.birth_date.split('T')[0]), 'dd/MM/yyyy') : 'Agregar fecha de nacimiento'}
@@ -1783,6 +1795,7 @@ export default function LeadDetailPanel({
                 <CustomFieldInput
                   key={def.id}
                   definition={def}
+                  disabled={readOnly}
                   value={cfValues.find(v => v.field_id === def.id)}
                   onSave={handleSaveCustomField}
                 />

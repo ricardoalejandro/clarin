@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { StrictMode, useState } from 'react'
 import type { AgendaItem, Task, TaskList, TaskWorkflowStatus, WorkEventOccurrence } from '@/types/task'
 import TaskCalendarView from './TaskCalendarView'
+import { consumeCalendarOpenRequest, type CalendarOpenRequest } from './calendarOpenRequest'
 import { EMPTY_TASK_FILTERS } from './TaskFilters'
 
 const apiMocks = vi.hoisted(() => ({
@@ -17,6 +19,14 @@ vi.mock('@/lib/api', () => ({
   apiPut: apiMocks.put,
   subscribeWebSocket: apiMocks.subscribe,
 }))
+
+vi.mock('./WorkEventEditor', () => ({
+  default: ({ open, event, onClose }: { open: boolean; event?: { title: string }; onClose: () => void }) => open
+    ? <div role="dialog" aria-label={event?.title || 'Nuevo evento'}><button onClick={onClose}>Cerrar editor</button></div>
+    : null,
+}))
+
+let resizeMonthRows: ((height: number) => void) | undefined
 
 const status = {
   id: 'status-1',
@@ -81,6 +91,8 @@ function renderCalendar(task = scheduledTask(), overrides: Partial<React.Compone
     statuses: [status],
     users: [{ id: 'user-1', display_name: 'Usuario', username: 'usuario' }],
     currentUserID: 'user-1',
+    openRequestContextKey: 'context-1',
+    onOpenRequestConsumed: vi.fn(),
     onOpenTaskDetail: vi.fn(),
     onEditTask: vi.fn(),
     onCreated: vi.fn(),
@@ -97,12 +109,22 @@ async function calendarBlock() {
 }
 
 beforeEach(() => {
+  resizeMonthRows = undefined
   class ResizeObserverMock {
-    observe() {}
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(node: HTMLElement) {
+      const report = (height: number) => this.callback([{ target: node, contentRect: new DOMRect(0, 0, 1000, height), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this as unknown as ResizeObserver)
+      if (node.hasAttribute('data-calendar-month-rows')) resizeMonthRows = report
+      report(660)
+    }
     unobserve() {}
     disconnect() {}
   }
   vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1000)
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return new DOMRect(0, 0, 1000, this.hasAttribute('data-calendar-month-rows') ? 660 : 110)
+  })
   apiMocks.get.mockReset()
   apiMocks.post.mockReset()
   apiMocks.put.mockReset()
@@ -111,7 +133,126 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+describe('calendar navigation and month density', () => {
+  it.each([[2027, 1, 4], [2026, 5, 5], [2026, 10, 6]])('fits %i/%i in %i rows without a forced minimum height', async (year, month, weeks) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(year, month, 1, 12))
+    renderCalendar()
+    await calendarBlock()
+    expect(document.querySelectorAll('[data-calendar-month-week]')).toHaveLength(weeks)
+    expect(document.querySelector('[data-calendar-month-rows]')).toHaveStyle({ gridTemplateRows: `repeat(${weeks}, minmax(0, 1fr))` })
+    expect(document.querySelector('[data-calendar-month-rows]')).not.toHaveClass('min-h-[660px]')
+    expect(document.querySelector('[data-calendar-scroll]')).toHaveClass('overflow-y-hidden')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(apiMocks.post).not.toHaveBeenCalled()
+  })
+
+  it('changes from a 31-day month without skipping February', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2027, 0, 31, 12))
+    renderCalendar()
+    fireEvent.click(screen.getByRole('button', { name: 'Periodo siguiente' }))
+    expect(screen.getByRole('heading', { name: /febrero.*2027/i })).toBeInTheDocument()
+    expect(document.querySelector('[data-calendar-month-day="2027-02-28"]')).toBeInTheDocument()
+  })
+
+  it('keeps every dense-day item reachable through a bounded keyboard-accessible overflow panel', async () => {
+    const task = scheduledTask()
+    const items = Array.from({ length: 12 }, (_, index) => agendaItem({ ...task, id: `dense-${index}`, title: `Tarea ${index}` }))
+    renderCalendar(task, {}, items)
+    await calendarBlock()
+    fireEvent.click(screen.getByRole('button', { name: /Ver 12 elementos/ }))
+    const agenda = screen.getByRole('dialog', { name: /Agenda del/ })
+    expect(agenda.querySelectorAll('[data-calendar-agenda-block]')).toHaveLength(12)
+    expect(agenda).toHaveClass('flex-col', 'overflow-hidden')
+    expect(agenda.lastElementChild).toHaveClass('min-h-0', 'overflow-y-auto')
+    fireEvent.keyDown(agenda, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: /Agenda del/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: /Ver 12 elementos/ })).toHaveFocus())
+    expect(screen.queryByText('Crear en este horario')).not.toBeInTheDocument()
+    expect(apiMocks.post).not.toHaveBeenCalled()
+  })
+
+  it('uses a compact overflow indicator when the measured rows cannot fit any items', async () => {
+    const { container } = renderCalendar()
+    await calendarBlock()
+    const { act } = await import('@testing-library/react')
+    act(() => resizeMonthRows?.(180))
+    expect(container.querySelector('[data-calendar-agenda-block]')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Ver 1 elemento/ })).toHaveClass('top-1.5')
+  })
+
+  it('keeps narrow-month items in the day inventory instead of rendering unreadable bars', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(375)
+    const { container } = renderCalendar()
+    fireEvent.click(await screen.findByRole('button', { name: /Ver 1 elemento/ }))
+    expect(screen.getByRole('dialog', { name: /Agenda del/ })).toBeInTheDocument()
+    expect(container.querySelector('[data-calendar-agenda-block]')).not.toBeInTheDocument()
+    expect(document.querySelectorAll('[data-calendar-agenda-block]')).toHaveLength(1)
+  })
+
+  it('consumes explicit opens once across tab remounts and StrictMode', async () => {
+    const base = renderCalendar()
+    base.unmount()
+    const consumed = vi.fn()
+    function Harness() {
+      const [visible, setVisible] = useState(false)
+      const [request, setRequest] = useState<CalendarOpenRequest | null>(null)
+      return <>
+        <button onClick={() => setVisible(value => !value)}>Calendario</button>
+        <button onClick={() => { setRequest({ id: crypto.randomUUID(), contextKey: 'context-1', kind: 'create' }); setVisible(true) }}>Solicitar evento</button>
+        {visible && <TaskCalendarView {...base.props} openRequest={request} onOpenRequestConsumed={id => { consumed(id); setRequest(current => consumeCalendarOpenRequest(current, id)) }} />}
+      </>
+    }
+    render(<StrictMode><Harness /></StrictMode>)
+    fireEvent.click(screen.getByRole('button', { name: 'Calendario' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Calendario' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Solicitar evento' }))
+    expect(screen.getByRole('dialog', { name: 'Nuevo evento' })).toBeInTheDocument()
+    expect(consumed).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar editor' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Calendario' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Calendario' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Solicitar evento' }))
+    expect(consumed).toHaveBeenCalledTimes(2)
+    expect(apiMocks.post).not.toHaveBeenCalled()
+    expect(apiMocks.put).not.toHaveBeenCalled()
+  })
+
+  it('ignores foreign-context commands and cannot open creation without permission', () => {
+    const { props, rerender } = renderCalendar(undefined, { openRequest: { id: 'old', contextKey: 'different-context', kind: 'create' } })
+    expect(props.onOpenRequestConsumed).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    rerender(<TaskCalendarView {...props} canCreate={false} openRequest={{ id: 'new', contextKey: 'context-1', kind: 'create' }} />)
+    expect(props.onOpenRequestConsumed).toHaveBeenCalledWith('new')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens a shared occurrence explicitly without replaying it after close or remount', () => {
+    const task = scheduledTask()
+    const occurrence = { start_at: task.start_at, occurrence_key: 'shared-occurrence', event: { id: 'shared-event', title: 'Evento compartido' } } as WorkEventOccurrence
+    const { props, rerender, unmount } = renderCalendar(task, { canCreate: false, openRequest: { id: 'focus-1', contextKey: 'context-1', kind: 'focus', occurrence } })
+    expect(screen.getByRole('dialog', { name: 'Evento compartido' })).toBeInTheDocument()
+    expect(props.onOpenRequestConsumed).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar editor' }))
+    rerender(<TaskCalendarView {...props} openRequest={null} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    unmount()
+    const next = render(<TaskCalendarView {...props} openRequest={null} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    next.rerender(<TaskCalendarView {...props} openRequest={{ id: 'focus-2', contextKey: 'context-1', kind: 'focus', occurrence }} />)
+    expect(screen.getByRole('dialog', { name: 'Evento compartido' })).toBeInTheDocument()
+    expect(props.onOpenRequestConsumed).toHaveBeenCalledTimes(2)
+    expect(apiMocks.post).not.toHaveBeenCalled()
+    expect(apiMocks.put).not.toHaveBeenCalled()
+  })
 })
 
 describe('TaskCalendarView schedule gestures', () => {
@@ -123,7 +264,7 @@ describe('TaskCalendarView schedule gestures', () => {
   it('closes the overflow inventory immediately when access is revoked', async () => {
     const tasks = Array.from({ length: 5 }, (_, index) => agendaItem({ ...scheduledTask(), id: `task-calendar-${index + 1}`, title: `Privada ${index + 1}` }))
     renderCalendar(tasks[0].kind === 'task' ? tasks[0].task : scheduledTask(), {}, tasks)
-    fireEvent.click((await screen.findAllByRole('button', { name: /^\+\d+ más$/ }))[0])
+    fireEvent.click(await screen.findByRole('button', { name: /^Ver 5 elementos del/ }))
     expect(screen.getByTitle('Privada 5')).toBeVisible()
     revokeAccess()
     expect(screen.queryByTitle('Privada 5')).not.toBeInTheDocument()

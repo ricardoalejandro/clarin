@@ -361,7 +361,7 @@ export default function ProgramAcademicConfigPanel({
               <div className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center"><UserRoundCheck className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-2 text-sm font-semibold text-slate-600">Sin instructores asignados</p><p className="mt-1 text-xs text-slate-400">Puedes asociar uno o varios contactos.</p></div>
             ) : instructors.map(instructor => (
               <div key={instructor.contact_id} className="flex min-h-16 items-center gap-3 rounded-xl border border-slate-200 p-3">
-                <ContactPhotoPreview suspended={suspended} url={instructor.avatar_url} name={instructor.contact_name || 'Sin nombre'} sizeClassName="h-10 w-10" fallbackClassName="bg-blue-50 text-blue-700 ring-1 ring-blue-100" />
+                <ContactPhotoPreview ownerKey={`contact:${instructor.contact_id}`} suspended={suspended} url={instructor.avatar_url} name={instructor.contact_name || 'Sin nombre'} sizeClassName="h-10 w-10" fallbackClassName="bg-blue-50 text-blue-700 ring-1 ring-blue-100" />
                 <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-800">{instructor.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-500">{instructor.contact_phone || 'Sin teléfono'}</p></div>
                 <button type="button" onClick={() => setInstructors(current => current.filter(item => item.contact_id !== instructor.contact_id).map((item, position) => ({ ...item, position })))} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label={`Quitar a ${instructor.contact_name}`}><Trash2 className="h-4 w-4" /></button>
               </div>

@@ -104,12 +104,12 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 		return nil, profilePictureError("contact_without_whatsapp", "El contacto no tiene una identidad de WhatsApp válida")
 	}
 	jid = jid.ToNonAD()
-	if jid.Server == types.HiddenUserServer && p.store != nil && p.store.LIDMap != nil {
-		if pnJID, resolveErr := p.store.LIDMap.GetPNForLID(ctx, jid); resolveErr == nil && !pnJID.IsEmpty() {
-			jid = pnJID.ToNonAD()
+	if jid.Server == types.HiddenUserServer {
+		if pnJID := p.scopedPeerPhoneJID(ctx, instance, jid); !pnJID.IsEmpty() {
+			jid = pnJID
 		}
 	}
-	if jid.Server != types.DefaultUserServer {
+	if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
 		return nil, profilePictureError("contact_without_whatsapp", "La foto solo está disponible para contactos individuales de WhatsApp")
 	}
 
@@ -199,6 +199,10 @@ func (p *DevicePool) FetchInitialContactAvatar(instance *DeviceInstance, contact
 			"avatar_url":    record.AvatarURL,
 			"revision":      record.Revision,
 			"avatar_source": "whatsapp",
+		}
+		if domain.IsGroupJID(contactJID) {
+			p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventChatUpdate, payload)
+			return
 		}
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermContacts, ws.EventContactUpdate, payload)
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventChatUpdate, payload)

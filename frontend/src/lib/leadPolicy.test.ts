@@ -3,10 +3,13 @@ import { isLeadModulePath, leadAutomationEnabled, parseLeadPolicy, reconcileLead
 
 describe('account Lead policy', () => {
   it.each([[true, true, true], [true, false, false], [false, true, false], [false, false, false]])('combines module %s and automation %s', (leads_enabled, lead_automation_enabled, effective) => {
-    expect(leadAutomationEnabled({ leads_enabled, lead_automation_enabled, leads_policy_version: 1 })).toBe(effective)
+    expect(leadAutomationEnabled({ account_id: 'a', leads_enabled, lead_automation_enabled, leads_policy_version: 1 })).toBe(effective)
   })
   it('rejects malformed policy rather than enabling an unknown account', () => {
     expect(parseLeadPolicy(null)).toBeNull()
+    expect(parseLeadPolicy({ leads_enabled: true, lead_automation_enabled: true, leads_policy_version: 1 })).toBeNull()
+    expect(parseLeadPolicy({ account_id: ' ', leads_enabled: true, lead_automation_enabled: true, leads_policy_version: 1 })).toBeNull()
+    expect(parseLeadPolicy({ account_id: 'a', leads_enabled: true, lead_automation_enabled: false, leads_policy_version: 2 })?.account_id).toBe('a')
     expect(parseLeadPolicy({ leads_enabled: 'false', lead_automation_enabled: true, leads_policy_version: 1 })).toBeNull()
   })
   it('rejects another account and stale snapshots', () => {
@@ -18,8 +21,8 @@ describe('account Lead policy', () => {
   it('gates commercial routes without gating Events, Bots, or account administration', () => {
     expect(isLeadModulePath('/dashboard/leads/example')).toBe(true)
     expect(isLeadModulePath('/dashboard/automations')).toBe(true)
-    expect(isLeadModulePath('/dashboard/reports/lead-intelligence')).toBe(true)
-    expect(isLeadModulePath('/dashboard/reports/lead-intelligence/result')).toBe(true)
+    expect(isLeadModulePath('/dashboard/reports/lead-intelligence')).toBe(false)
+    expect(isLeadModulePath('/dashboard/reports/lead-intelligence/result')).toBe(false)
     for (const path of ['/dashboard/events', '/dashboard/programs', '/dashboard/bots', '/dashboard/admin', '/dashboard/reports', '/dashboard/reports/whatsapp-group-coverage', '/dashboard/reports/lead-intelligence-other']) expect(isLeadModulePath(path)).toBe(false)
   })
 })

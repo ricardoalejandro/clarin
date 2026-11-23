@@ -11,15 +11,14 @@ import (
 
 func (r *ChatRepository) State(ctx context.Context, accountID, chatID uuid.UUID) (*domain.ChatState, error) {
 	state := &domain.ChatState{ChatID: chatID}
-	err := r.db.QueryRow(ctx, `SELECT c.unread_count,c.waiting_since,c.waiting_since IS NOT NULL,c.state_version,
-	 incoming.id,incoming.timestamp
-	 FROM chats c LEFT JOIN LATERAL (
-	  SELECT m.id,m.timestamp FROM messages m WHERE m.account_id=c.account_id AND m.chat_id=c.id
-	  AND NOT m.is_from_me AND NOT COALESCE(m.is_revoked,FALSE)
-	  ORDER BY m.timestamp DESC,m.id DESC LIMIT 1
-	 ) incoming ON TRUE WHERE c.account_id=$1 AND c.id=$2`, accountID, chatID).Scan(
-		&state.UnreadCount, &state.WaitingSince, &state.NeedsReply, &state.Version,
-		&state.LastIncomingMessageID, &state.LastIncomingAt)
+	err := r.db.QueryRow(ctx, `WITH root AS(SELECT COALESCE(canonical_chat_id,id) id FROM chats WHERE account_id=$1 AND id=$2),scope AS(SELECT c.id,c.unread_count,c.waiting_since,c.state_version FROM chats c,root WHERE c.account_id=$1 AND (c.id=root.id OR c.canonical_chat_id=root.id))
+ SELECT root.id,CASE WHEN (SELECT COUNT(*) FROM scope)>1 THEN (SELECT COUNT(*)::int FROM messages m WHERE m.account_id=$1 AND m.chat_id IN(SELECT id FROM scope) AND NOT m.is_from_me AND NOT m.is_read AND NOT COALESCE(m.is_revoked,FALSE) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id)) ELSE c.unread_count END,
+ (SELECT MIN(waiting_since) FROM scope),(SELECT MIN(waiting_since) FROM scope) IS NOT NULL,(SELECT SUM(state_version)::bigint FROM scope),incoming.id,incoming.timestamp
+ FROM root JOIN chats c ON c.account_id=$1 AND c.id=root.id LEFT JOIN LATERAL(
+ SELECT m.id,m.timestamp FROM messages m WHERE m.account_id=$1 AND m.chat_id IN(SELECT id FROM scope) AND NOT m.is_from_me AND NOT COALESCE(m.is_revoked,FALSE)
+ AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id)
+ ORDER BY m.timestamp DESC,m.id DESC LIMIT 1) incoming ON TRUE`, accountID, chatID).Scan(&state.ChatID,
+		&state.UnreadCount, &state.WaitingSince, &state.NeedsReply, &state.Version, &state.LastIncomingMessageID, &state.LastIncomingAt)
 	return state, err
 }
 
@@ -32,9 +31,14 @@ func incomingBoundary(ctx context.Context, db interface {
 }, accountID, chatID uuid.UUID, messageID string) (*time.Time, *uuid.UUID, error) {
 	var at time.Time
 	var id uuid.UUID
-	err := db.QueryRow(ctx, `SELECT timestamp,id FROM messages WHERE account_id=$1 AND chat_id=$2 AND NOT is_from_me
-	 AND ($3::text<>'' OR NOT COALESCE(is_revoked,FALSE)) AND ($3::text='' OR id::text=$3 OR message_id=$3)
-	 ORDER BY timestamp DESC,id DESC LIMIT 1`, accountID, chatID, messageID).Scan(&at, &id)
+	err := db.QueryRow(ctx, `WITH root AS(SELECT COALESCE(canonical_chat_id,id) id FROM chats WHERE account_id=$1 AND id=$2)
+ SELECT visible.timestamp,visible.id FROM messages source
+ JOIN chats physical ON physical.account_id=source.account_id AND physical.id=source.chat_id
+ LEFT JOIN whatsapp_message_aliases a ON a.account_id=source.account_id AND a.alias_message_id=source.id
+ JOIN messages visible ON visible.account_id=source.account_id AND visible.id=COALESCE(a.canonical_message_id,source.id),root
+ WHERE source.account_id=$1 AND COALESCE(physical.canonical_chat_id,physical.id)=root.id AND NOT source.is_from_me
+ AND ($3::text<>'' OR NOT COALESCE(visible.is_revoked,FALSE)) AND ($3::text='' OR source.id::text=$3 OR source.message_id=$3)
+ ORDER BY (source.id::text=$3) DESC,visible.timestamp DESC,visible.id DESC LIMIT 1`, accountID, chatID, messageID).Scan(&at, &id)
 	if err == pgx.ErrNoRows && messageID == "" {
 		return nil, nil, nil
 	}
@@ -65,16 +69,18 @@ func (r *ChatRepository) AcknowledgeAttention(ctx context.Context, accountID, ch
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var locked uuid.UUID
-	if err = tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&locked); err != nil {
+	_, ids, err := lockConversationChatsTx(ctx, tx, accountID, chatID)
+	if err != nil {
 		return err
 	}
 	at, id, err := incomingBoundary(ctx, tx, accountID, chatID, messageID)
 	if err != nil {
 		return err
 	}
-	if err = acknowledgeAttentionTx(ctx, tx, accountID, chatID, at, id); err != nil {
-		return err
+	for _, physicalID := range ids {
+		if err = acknowledgeAttentionTx(ctx, tx, accountID, physicalID, at, id); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

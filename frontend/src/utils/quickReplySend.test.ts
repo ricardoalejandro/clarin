@@ -34,3 +34,12 @@ describe('quick reply sequence', () => {
     expect(frozen.items?.at(-1)?.payload?.body).toBe('Personalizado')
   })
 })
+
+
+it('freezes structured mentions only on the personal trailing block across retries', () => {
+  const mentions = [{ jid: '51900@s.whatsapp.net', name: 'María' }]
+  const frozen = freezeQuickReplySequence(createQuickReplyComposerDraft(reply)!, { ...context, trailingText: 'Hola @51900', trailingMentions: mentions })
+  expect(frozen.items?.slice(0, -1).every(item => !item.payload?.mentions)).toBe(true)
+  expect(frozen.items?.at(-1)?.payload?.mentions).toEqual(mentions)
+  expect(freezeQuickReplySequence(frozen, { ...context, trailingMentions: [] })).toBe(frozen)
+})

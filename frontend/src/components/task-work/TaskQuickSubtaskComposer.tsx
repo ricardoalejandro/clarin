@@ -7,6 +7,7 @@ import type { TaskAccountUser } from './TaskEditorModal'
 import TaskUserCombobox from './TaskUserCombobox'
 import { TaskPriorityPicker, TaskStatusPicker } from './TaskPropertyPicker'
 import TaskDateRangePicker from './TaskDateRangePicker'
+import { useOperationalDateFields } from '../operational-date/useOperationalDateFields'
 import { preferredStatusForCategory } from './taskStatusTransition'
 
 export interface TaskQuickSubtaskDraft {
@@ -27,7 +28,7 @@ export function createTaskQuickSubtaskDraft(parent: Pick<Task, 'assigned_to'>, s
     priority: 'medium',
     startAt: '',
     dueAt: '',
-    isAllDay: false,
+    isAllDay: true,
   }
 }
 
@@ -50,8 +51,9 @@ interface Props {
 
 export default function TaskQuickSubtaskComposer({ parent, value, statuses, users, onChange, onSubmit, onCancel, onMoreOptions, pending = false, creationUncertain = false, disabled = false, error, autoFocus = false, compact = false }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const dateFields = useOperationalDateFields()
   const [expanded, setExpanded] = useState(Boolean(value.title || value.startAt || value.dueAt))
-  const canSubmit = Boolean(value.title.trim() && value.statusId && value.assignedTo && !pending && !disabled)
+  const canSubmit = Boolean(value.title.trim() && value.statusId && value.assignedTo && !pending && !disabled && dateFields.valid)
   const fieldsDisabled = disabled || pending || creationUncertain
   const selectedStatus = useMemo(() => statuses.find(status => status.id === value.statusId), [statuses, value.statusId])
 
@@ -66,8 +68,11 @@ export default function TaskQuickSubtaskComposer({ parent, value, statuses, user
   const cancel = () => {
     if (pending || creationUncertain) return
     setExpanded(false)
+    dateFields.reset()
     onCancel()
   }
+  const currentDraft = () => ({ ...value, startAt: dateFields.value('start', value.startAt), dueAt: dateFields.value('due', value.dueAt) })
+  const submit = () => { if (canSubmit && dateFields.validate()) void onSubmit(currentDraft()) }
 
   return <div data-task-quick-subtask-composer className={`rounded-2xl border bg-white transition duration-200 ${expanded ? 'border-emerald-200 shadow-[0_12px_32px_rgba(15,23,42,0.08)] ring-4 ring-emerald-50/70' : 'border-slate-200 hover:border-slate-300'} ${compact ? 'p-2' : 'p-3'}`}>
     <div className="flex items-center gap-2">
@@ -86,7 +91,7 @@ export default function TaskQuickSubtaskComposer({ parent, value, statuses, user
           }
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
-            if (canSubmit) void onSubmit(value)
+            submit()
           }
         }}
         aria-label="Nombre de la subtarea"
@@ -101,7 +106,7 @@ export default function TaskQuickSubtaskComposer({ parent, value, statuses, user
       <div className="grid gap-2 sm:grid-cols-2">
         <div><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400"><Workflow className="h-3 w-3" /> Estado</span><TaskStatusPicker compact value={value.statusId} statuses={statuses} disabled={fieldsDisabled} pending={pending} onChange={statusId => patch('statusId', statusId)} /></div>
         <div><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400"><UserRound className="h-3 w-3" /> Responsable</span><TaskUserCombobox users={users} value={value.assignedTo} disabled={fieldsDisabled} onChange={assignedTo => patch('assignedTo', assignedTo)} className="min-h-9 py-1.5" /></div>
-        <div><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400"><CalendarRange className="h-3 w-3" /> Fechas</span><TaskDateRangePicker label="Fecha de entrega de la subtarea" startValue={value.startAt} endValue={value.dueAt} allDay={value.isAllDay} disabled={fieldsDisabled} pending={pending} onApply={range => onChange({ ...value, startAt: range.startAt, dueAt: range.endAt, isAllDay: range.isAllDay })} compact /></div>
+        <div><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400"><CalendarRange className="h-3 w-3" /> Fechas</span><TaskDateRangePicker label="Fecha de entrega de la subtarea" startValue={value.startAt} endValue={value.dueAt} allDay={value.isAllDay} disabled={fieldsDisabled} pending={pending} onStartDraftStateChange={dateFields.track('start')} onEndDraftStateChange={dateFields.track('due')} onAllDayDraftChange={next => patch('isAllDay', next)} onApply={range => onChange({ ...value, startAt: range.startAt, dueAt: range.endAt, isAllDay: range.isAllDay })} compact /></div>
         <div><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400"><Flag className="h-3 w-3" /> Prioridad</span><TaskPriorityPicker value={value.priority} disabled={fieldsDisabled} pending={pending} onChange={priority => patch('priority', priority)} className="min-h-9 py-1.5" /></div>
       </div>
 
@@ -109,9 +114,9 @@ export default function TaskQuickSubtaskComposer({ parent, value, statuses, user
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
         <p className="min-w-0 text-[10px] text-slate-400">{selectedStatus?.name || 'Selecciona un estado'} · {value.startAt || value.dueAt ? 'con fechas' : 'sin fechas'}</p>
         <div className="ml-auto flex items-center gap-1.5">
-          {onMoreOptions && <button type="button" disabled={fieldsDisabled} onClick={() => onMoreOptions(value)} className="min-h-9 rounded-xl px-3 text-xs font-bold text-slate-600 outline-none hover:bg-slate-100 focus:ring-2 focus:ring-emerald-400 disabled:opacity-50">Crear con detalles</button>}
+          {onMoreOptions && <button type="button" disabled={fieldsDisabled} onClick={() => { if (dateFields.validate()) onMoreOptions(currentDraft()) }} className="min-h-9 rounded-xl px-3 text-xs font-bold text-slate-600 outline-none hover:bg-slate-100 focus:ring-2 focus:ring-emerald-400 disabled:opacity-50">Crear con detalles</button>}
           <button type="button" aria-label="Cancelar subtarea" disabled={pending || creationUncertain} onClick={cancel} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus:ring-2 focus:ring-emerald-400 disabled:opacity-50"><X className="h-4 w-4" /></button>
-          <button type="button" disabled={!canSubmit} onClick={() => { void onSubmit(value) }} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-black text-white shadow-sm shadow-emerald-200 outline-none transition hover:bg-emerald-700 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:opacity-35">{pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} {creationUncertain ? 'Reintentar creación' : 'Guardar'}</button>
+          <button type="button" disabled={!canSubmit} onClick={submit} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-black text-white shadow-sm shadow-emerald-200 outline-none transition hover:bg-emerald-700 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:opacity-35">{pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} {creationUncertain ? 'Reintentar creación' : 'Guardar'}</button>
         </div>
       </div>
     </div>}

@@ -53,6 +53,8 @@ func requireContainerAccessIncludingLifecycleTx(
 ) error {
 	var query string
 	switch resourceType {
+	case "environment":
+		return requireEnvironmentAccessIncludingArchiveTx(ctx, tx, accountID, actorID, resourceID, required, true)
 	case domain.TaskAccessTargetFolder:
 		query = `SELECT (` + taskActorFolderAccessRankSQL("folder", "$3") + `)
 			FROM task_folders folder WHERE folder.account_id=$1 AND folder.id=$2`
@@ -247,6 +249,9 @@ func revalidateContainerLifecycleAuthorityTx(
 	if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
 		return err
 	}
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
 	if err := requireContainerAccessIncludingLifecycleTx(
 		ctx, tx, accountID, actorID, resourceID, resourceType, domain.TaskAccessFull,
 	); err != nil {
@@ -268,6 +273,9 @@ func revalidateEnvironmentLifecycleAuthorityTx(
 	folderIDs, listIDs []uuid.UUID,
 ) error {
 	if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return err
 	}
 	if err := requireEnvironmentAccessIncludingArchiveTx(
@@ -393,6 +401,7 @@ func (r *TaskWorkRepository) ListArchiveHierarchyForActor(ctx context.Context, a
 	}
 	defer listRows.Close()
 	roots := make([]*domain.TaskList, 0)
+	allLists := make([]*domain.TaskList, 0)
 	for listRows.Next() {
 		item := &domain.TaskList{}
 		var rank int
@@ -407,6 +416,7 @@ func (r *TaskWorkRepository) ListArchiveHierarchyForActor(ctx context.Context, a
 		}
 		item.SetEffectiveAccess(buildTaskEffectiveAccess(taskAccessLevelFromRank(rank), manage, "list_policy"))
 		item.SetLifecycle()
+		allLists = append(allLists, item)
 		if item.FolderID != nil && byID[*item.FolderID] != nil {
 			folder := byID[*item.FolderID]
 			folder.Lists = append(folder.Lists, item)
@@ -415,7 +425,14 @@ func (r *TaskWorkRepository) ListArchiveHierarchyForActor(ctx context.Context, a
 			roots = append(roots, item)
 		}
 	}
-	return folders, roots, listRows.Err()
+	if err := listRows.Err(); err != nil {
+		return nil, nil, err
+	}
+	listRows.Close()
+	if err := r.applyContainerLifecycleFacts(ctx, accountID, actorID, folders, allLists); err != nil {
+		return nil, nil, err
+	}
+	return folders, roots, nil
 }
 
 func (r *TaskWorkRepository) ArchiveList(ctx context.Context, accountID, actorID, listID uuid.UUID) ([]uuid.UUID, error) {
@@ -425,6 +442,9 @@ func (r *TaskWorkRepository) ArchiveList(ctx context.Context, accountID, actorID
 	}
 	defer tx.Rollback(ctx)
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
 		return nil, err
 	}
 	var environmentID uuid.UUID
@@ -442,7 +462,7 @@ func (r *TaskWorkRepository) ArchiveList(ctx context.Context, accountID, actorID
 	if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, listID, domain.TaskAccessTargetList, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
-	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessView); err != nil {
 		return nil, err
 	}
 	var open int
@@ -487,6 +507,9 @@ func (r *TaskWorkRepository) UnarchiveList(ctx context.Context, accountID, actor
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
 	var environmentID uuid.UUID
 	var folderID *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT environment_id,folder_id FROM task_lists
@@ -499,7 +522,7 @@ func (r *TaskWorkRepository) UnarchiveList(ctx context.Context, accountID, actor
 	if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, listID, domain.TaskAccessTargetList, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
-	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessView); err != nil {
 		return nil, err
 	}
 	if folderID != nil {
@@ -541,6 +564,9 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, actor
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
+		return nil, err
+	}
 	var environmentID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_folders
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&environmentID); err != nil {
@@ -552,7 +578,7 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, actor
 	if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, folderID, domain.TaskAccessTargetFolder, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
-	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessView); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND folder_id=$2 AND deleted_at IS NULL ORDER BY id FOR UPDATE`, accountID, folderID)
@@ -623,6 +649,9 @@ func (r *TaskWorkRepository) UnarchiveFolder(ctx context.Context, accountID, act
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
+		return nil, err
+	}
 	var environmentID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_folders
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&environmentID); err != nil {
@@ -634,7 +663,7 @@ func (r *TaskWorkRepository) UnarchiveFolder(ctx context.Context, accountID, act
 	if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, folderID, domain.TaskAccessTargetFolder, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
-	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessView); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND folder_id=$2 AND deleted_at IS NULL ORDER BY id FOR UPDATE`, accountID, folderID)

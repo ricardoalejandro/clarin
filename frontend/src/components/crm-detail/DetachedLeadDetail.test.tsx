@@ -19,6 +19,44 @@ const lead = {
 afterEach(cleanup)
 
 describe('DetachedLeadDetail', () => {
+  it('reports partial dates as dirty and saves the latest complete date only', async () => {
+    const save = vi.fn().mockResolvedValue({ success: true }), dirty = vi.fn()
+    render(<DetachedLeadDetail lead={lead} context={null} activity={null} tasks={null} onSave={save} onDirtyChange={dirty} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    const date = screen.getByRole('textbox', { name: 'Fecha de nacimiento' })
+    fireEvent.change(date, { target: { value: '04/05/' } })
+    expect(dirty).toHaveBeenLastCalledWith(true)
+    expect(screen.getByRole('button', { name: 'Guardar' })).toBeDisabled()
+    fireEvent.keyDown(date, { key: 'Enter' })
+    expect(save).not.toHaveBeenCalled()
+    expect(date).toHaveValue('04/05/')
+    fireEvent.change(date, { target: { value: '04/05/1992' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
+    await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ birth_date: '1992-05-04' })))
+    await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false))
+  })
+
+  it('protects browser closure only while a real draft exists and releases the listener', () => {
+    const add = vi.spyOn(window, 'addEventListener'), remove = vi.spyOn(window, 'removeEventListener')
+    const view = render(<DetachedLeadDetail lead={lead} context={null} activity={null} tasks={null} onSave={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    const clean = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(clean)
+    expect(clean.defaultPrevented).toBe(false)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Fecha de nacimiento' }), { target: { value: '04/05/' } })
+    const registered = add.mock.calls.find(([name]) => String(name) === 'beforeunload')!
+    const dirty = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(dirty)
+    expect(dirty.defaultPrevented).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    expect(remove).toHaveBeenCalledWith('beforeunload', registered[1])
+    const discarded = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(discarded)
+    expect(discarded.defaultPrevented).toBe(false)
+    view.unmount()
+    add.mockRestore(); remove.mockRestore()
+  })
+
   it('keeps the same ordered CRM hierarchy for a Lead without canonical Contact', () => {
     const html = renderToStaticMarkup(<DetachedLeadDetail lead={lead} context={<div>Contexto</div>} activity={<Panel>Actividad</Panel>} tasks={<Panel>Tareas</Panel>} onMessage={() => {}} onSave={async () => ({ success: true })} />)
     const headings = ['Información del contacto', 'Etiquetas', 'Observaciones de esta oportunidad', 'Historial general del contacto', 'Contexto de la oportunidad', 'Tareas relacionadas', 'Integraciones']

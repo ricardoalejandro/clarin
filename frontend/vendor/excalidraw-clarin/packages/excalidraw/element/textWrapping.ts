@@ -2,12 +2,20 @@ import { ENV } from "../constants";
 import { charWidth, getLineWidth } from "./textMeasurements";
 import type { FontString } from "./types";
 import type { ExcalidrawTextElement } from "./types";
-import { getFontString } from "../utils";
+import { getFontString, isRTL } from "../utils";
 import {
   getClarinFontForMarks,
   getClarinTextFormat,
   getGraphemeBoundaries,
 } from "./clarinRichText";
+import {
+  getClarinCharacterStyle,
+  getClarinCharacterStylePoints,
+  getClarinEffectiveCharacterStyle,
+} from "./clarinCharacterStyle";
+import { getClarinJoiningContext } from "./clarinCharacterJoining";
+import { getClarinNativeBidiFragments } from "./clarinCharacterBidi";
+import type { ClarinCharacterShapingGroup } from "./clarinCharacterShaping";
 
 let cachedCjkRegex: RegExp | undefined;
 let cachedLineBreakRegex: RegExp | undefined;
@@ -410,14 +418,16 @@ const getFormattedRangeWidth = (
   element: ExcalidrawTextElement,
   from: number,
   to: number,
+  format = getClarinTextFormat(element),
+  characterStyle = getClarinCharacterStyle(element),
 ) => {
-  const format = getClarinTextFormat(element);
   const baseFont = getFontString(element);
-  if (!format?.runs.length) {
+  if (!format?.runs.length && !characterStyle?.runs.length) {
     return getLineWidth(element.originalText.slice(from, to), baseFont);
   }
   const points = new Set<number>([from, to]);
-  for (const run of format.runs) {
+  for (const point of getClarinCharacterStylePoints(element, from, to, characterStyle)) points.add(point);
+  for (const run of format?.runs || []) {
     if (from < run.to && run.from < to) {
       points.add(Math.max(from, run.from));
       points.add(Math.min(to, run.to));
@@ -425,18 +435,43 @@ const getFormattedRangeWidth = (
   }
   const ordered = Array.from(points).sort((left, right) => left - right);
   let width = 0;
+  let shapedFont: FontString | undefined;
+  let shapedFrom = from;
+  let shapedTo = from;
+  const groups: ClarinCharacterShapingGroup[] = [];
+  const rtl = isRTL(element.text);
+  // A candidate wrapped line owns its joining context. Text outside that line
+  // must not connect across the eventual visual line break.
+  const candidateText = element.originalText.slice(from, to);
+  const measureShapedGroup = () => {
+    if (!shapedFont) return 0;
+    const text = element.originalText.slice(shapedFrom, shapedTo);
+    const { shapingText } = getClarinJoiningContext(candidateText, shapedFrom - from, shapedTo - from);
+    const width = getLineWidth(shapingText, shapedFont, rtl ? "rtl" : "ltr");
+    groups.push({ text, shapingText, font: shapedFont, rtl, width, segments: [] });
+    return width;
+  };
   for (let index = 0; index < ordered.length - 1; index++) {
     const start = ordered[index];
     const end = ordered[index + 1];
     const marks =
-      format.runs.find((run) => run.from <= start && start < run.to)?.marks ||
+      format?.runs.find((run) => run.from <= start && start < run.to)?.marks ||
       0;
-    width += getLineWidth(
-      element.originalText.slice(start, end),
-      getClarinFontForMarks(baseFont, marks) as FontString,
-    );
+    const font = characterStyle?.runs.length
+      ? getFontString(getClarinEffectiveCharacterStyle(element, start, characterStyle)) : baseFont;
+    const runFont = getClarinFontForMarks(font, marks) as FontString;
+    const runText = element.originalText.slice(start, end);
+    if (!characterStyle?.runs.length) width += getLineWidth(runText, runFont);
+    else if (shapedFont === runFont) shapedTo = end;
+    else {
+      width += measureShapedGroup();
+      shapedFont = runFont; shapedFrom = start; shapedTo = end;
+    }
   }
-  return width;
+  width += measureShapedGroup();
+  // Native typography boundaries can suppress Arabic joins in Firefox/WebKit.
+  // Read only the candidate line's width; no per-glyph ranges are needed here.
+  return getClarinNativeBidiFragments(element, groups, { widthOnly: true })?.width ?? width;
 };
 
 /** Rich-text-only wrapping that keeps persisted offsets in originalText. */
@@ -444,16 +479,20 @@ export const wrapClarinText = (
   element: ExcalidrawTextElement,
   maxWidth: number,
 ) => {
-  if (!getClarinTextFormat(element)?.runs.length) {
+  const format = getClarinTextFormat(element);
+  const characterStyle = getClarinCharacterStyle(element);
+  if (!format?.runs.length && !characterStyle?.runs.length) {
     return wrapText(element.originalText, getFontString(element), maxWidth);
   }
   if (!Number.isFinite(maxWidth) || maxWidth < 0) {
     return element.originalText;
   }
   const wrapped: string[] = [];
+  const rangeWidth = (from: number, to: number) =>
+    getFormattedRangeWidth(element, from, to, format, characterStyle);
   let lineOffset = 0;
   for (const originalLine of element.originalText.split("\n")) {
-    if (getFormattedRangeWidth(element, lineOffset, lineOffset + originalLine.length) <= maxWidth) {
+    if (rangeWidth(lineOffset, lineOffset + originalLine.length) <= maxWidth) {
       wrapped.push(originalLine);
       lineOffset += originalLine.length + 1;
       continue;
@@ -468,8 +507,7 @@ export const wrapClarinText = (
       if (/\s|-/.test(grapheme)) {
         lastBreakIndex = index;
       }
-      const width = getFormattedRangeWidth(
-        element,
+      const width = rangeWidth(
         lineOffset + boundaries[startIndex],
         lineOffset + to,
       );

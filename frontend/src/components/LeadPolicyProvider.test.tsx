@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
 import { useAccountLeadPolicy } from './LeadPolicyProvider'
+import { parseLeadPolicy } from '@/lib/leadPolicy'
 
 const websocket = vi.hoisted(() => ({ listeners: new Set<(value: unknown) => void>() }))
 vi.mock('@/lib/api', () => ({ subscribeWebSocket: (callback: (value: unknown) => void) => { websocket.listeners.add(callback); return () => websocket.listeners.delete(callback) } }))
@@ -13,6 +14,34 @@ beforeEach(() => { completeAuthIdentityChange() })
 afterEach(() => { cleanup(); websocket.listeners.clear(); vi.unstubAllGlobals() })
 
 describe('account Lead policy scope and reconciliation', () => {
+  it.each([undefined, null, '', '   ', 7])('rejects a GET policy without a valid account identity (%s)', async account_id => {
+    const malformed = { ...policy(), account_id }
+    expect(parseLeadPolicy(JSON.parse(JSON.stringify(malformed)))).toBeNull()
+    vi.stubGlobal('fetch', vi.fn(async () => response({ success: true, policy: malformed })))
+    const { result } = renderHook(() => useAccountLeadPolicy('a'))
+    await waitFor(() => expect(result.current.error).not.toBe(''))
+    expect(result.current.policy).toBeNull()
+    expect(result.current.ready).toBe(false)
+    expect(result.current.leadsEnabled).toBe(false)
+    expect(result.current.automationEnabled).toBe(false)
+  })
+
+  it('does not infer the missing policy identity from a WebSocket account envelope', async () => {
+    const initial = deferred(), recovered = deferred()
+    const fetchMock = vi.fn().mockReturnValueOnce(initial.promise).mockReturnValueOnce(recovered.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useAccountLeadPolicy('a'))
+    act(() => websocket.listeners.forEach(callback => callback({ type: 'account_capabilities_changed', data: { account_id: 'a', policy: { leads_enabled: true, lead_automation_enabled: true, leads_policy_version: 9 } } })))
+    expect(result.current.policy).toBeNull()
+    expect(result.current.leadsEnabled).toBe(false)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await act(async () => { recovered.resolve(response({ success: true, policy: policy('a', 10, false) })); await recovered.promise })
+    await waitFor(() => expect(result.current.ready).toBe(true))
+    await act(async () => { initial.resolve(response({ success: true, policy: policy('a', 1, true) })); await initial.promise })
+    expect(result.current.policy?.account_id).toBe('a')
+    expect(result.current.leadsEnabled).toBe(false)
+  })
+
   it.each([[true, true, true], [true, false, false], [false, true, false], [false, false, false]])('resolves module %s and automation %s', async (enabled, automation, effective) => {
     vi.stubGlobal('fetch', vi.fn(async () => response({ success: true, policy: policy('a', 1, enabled, automation) })))
     const { result } = renderHook(() => useAccountLeadPolicy('a'))

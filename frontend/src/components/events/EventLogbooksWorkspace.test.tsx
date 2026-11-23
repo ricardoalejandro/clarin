@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {act,cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react'
+import {act,cleanup,fireEvent,render,screen,waitFor,within} from '@testing-library/react'
 import {afterEach,beforeEach,describe,expect,it,vi,type Mock} from 'vitest'
 import EventLogbooksWorkspace from './EventLogbooksWorkspace'
 import type {EventLogbook} from './logbookWorkspace'
@@ -7,7 +7,6 @@ const state=vi.hoisted(()=>({socket:null as null|((message:unknown)=>void),downl
 vi.mock('@/lib/api',()=>({subscribeWebSocket:(callback:(message:unknown)=>void)=>{state.socket=callback;return()=>{}},apiGet:async()=>({success:true,data:{user:{id:'u',account_id:'account'}}}),api:async(url:string,init?:RequestInit)=>{const result=await transport(url,init);const data=await result.json();return {success:result.ok,data,error:data?.error,status:result.status}},apiBlob:(...args:unknown[])=>state.download(...args)}))
 vi.mock('@/components/responsive/useContainerWidth',()=>({useContainerWidth:()=>({ref:{current:null},width:1024})}))
 vi.mock('@/components/operational-window/OperationalWindowShell',()=>({default:({children,footer,title,onRequestClose}:any)=><div role="dialog" aria-label={title}><button onClick={onRequestClose}>Cerrar ventana</button>{children}{footer}</div>}))
-vi.mock('@/components/operational-date/OperationalDatePicker',()=>({default:({label,value,onChange}:any)=><input aria-label={label} value={value} onChange={e=>onChange(e.target.value)}/>}))
 let book:EventLogbook
 let transport:Mock<(url:string,init?:RequestInit)=>Promise<Response>>
 const entry={id:'entry-a',participant_id:'p',participant_name:'Ana',participant_phone:'555',stage_name:'Invitados',stage_color:'#123456',capture_stage_key:'stage',stage_position:0,notes:'Original'}
@@ -16,6 +15,23 @@ beforeEach(()=>{book={id:'book-a',event_id:'event-a',title:'Mi bitácora',date:'
 afterEach(()=>{cleanup();vi.restoreAllMocks();vi.useRealTimers();vi.unstubAllGlobals()})
 async function open(){render(<EventLogbooksWorkspace eventId="event-a" eventName="Evento" readOnly={false}/>);fireEvent.click(await screen.findByRole('button',{name:/Mi bitácora/}));await screen.findByText('Ana')}
 describe('event logbook work surface',()=>{
+ it('protects partial date text and saves only the latest complete date',async()=>{
+  await open()
+  fireEvent.click(screen.getByRole('button',{name:'Editar'}))
+  const date=screen.getByRole('textbox',{name:'Fecha de la bitácora'})
+  fireEvent.change(date,{target:{value:'14/10/'}})
+  expect(screen.getByRole('button',{name:'Guardar cambios'})).toBeDisabled()
+  fireEvent.click(screen.getByRole('button',{name:'Cerrar ventana'}))
+  expect(screen.getByRole('alertdialog',{name:'Cambios sin guardar'})).toBeVisible()
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button',{name:'Cancelar'}))
+  expect(date).toHaveValue('14/10/')
+  expect(transport.mock.calls.filter(([,init])=>init?.method==='PUT')).toHaveLength(0)
+  fireEvent.change(date,{target:{value:'14/10/2026'}})
+  fireEvent.click(screen.getByRole('button',{name:'Guardar cambios'}))
+  await waitFor(()=>expect(transport.mock.calls.filter(([,init])=>init?.method==='PUT')).toHaveLength(1))
+  const write=transport.mock.calls.find(([,init])=>init?.method==='PUT')!
+  expect(JSON.parse(String(write[1]?.body))).toMatchObject({date:'2026-10-14',expected_version:2})
+ })
  it('downloads through the shared authenticated binary client and reports failures',async()=>{await open();state.download.mockResolvedValue({success:false,error:'No se pudo recuperar la sesión para exportar'});fireEvent.click(screen.getByRole('button',{name:'Excel'}));await screen.findByText('No se pudo recuperar la sesión para exportar');expect(state.download).toHaveBeenCalledExactlyOnceWith('/api/events/event-a/logbooks/book-a/export?format=xlsx',{signal:expect.any(AbortSignal)});expect(global.fetch).not.toHaveBeenCalled()})
  it('keeps a dirty note through websocket reconciliation and protects navigation',async()=>{const onBack=vi.fn();render(<EventLogbooksWorkspace eventId="event-a" eventName="Evento" readOnly={false} onBack={onBack}/>);fireEvent.click(await screen.findByRole('button',{name:/Mi bitácora/}));await screen.findByText('Ana');fireEvent.click(screen.getByRole('button',{name:'Editar nota de Ana'}));fireEvent.change(screen.getByLabelText('Nota de bitácora'),{target:{value:'Mi borrador\ncon detalle'}});act(()=>state.socket?.({event:'logbook_update',data:{event_id:'event-a',logbook_id:'book-a',action:'entry_updated',logbook:{...book,version:3}}}));expect((screen.getByLabelText('Nota de bitácora') as HTMLTextAreaElement).value).toBe('Mi borrador\ncon detalle');expect(screen.getByRole('button',{name:'Guardar nota'}).hasAttribute('disabled')).toBe(true);fireEvent.click(screen.getByRole('button',{name:'Participantes'}));expect(screen.getByRole('alertdialog')).toBeTruthy();expect(onBack).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'Descartar y continuar'}));expect(onBack).toHaveBeenCalledOnce()})
  it('completed bitácora requires explicit reopen confirmation and sends its version',async()=>{book.status='completed';await open();expect(screen.getByRole('button',{name:'Editar'}).hasAttribute('disabled')).toBe(true);expect(screen.queryByRole('button',{name:'Editar nota de Ana'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Reabrir'}));expect(transport.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(0);fireEvent.click(screen.getAllByRole('button',{name:'Reabrir'}).at(-1)!);await waitFor(()=>expect(transport.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1));const call=transport.mock.calls.find(([url,options])=>url.endsWith('/reopen')&&options?.method==='POST');expect(JSON.parse(call![1]!.body as string)).toEqual({expected_version:2})})

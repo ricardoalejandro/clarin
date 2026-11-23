@@ -136,7 +136,7 @@ func storageInventoryCTE(claims *service.JWTClaims, includePrivateSources ...boo
 	 CASE WHEN t.object_key IS NOT NULL THEN 'trash' ELSE 'active' END AS status,
 	 t.removed_at AS trash_at,t.purge_after,
 	 ($5::boolean AND t.object_key IS NULL AND EXISTS(SELECT 1 FROM authorized_refs ar WHERE ar.object_key=io.object_key AND ar.origin='chats')
-	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key AND ar.origin<>'chats')) AS can_remove,
+	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key AND (ar.origin<>'chats' OR ar.ref_id LIKE 'preview:%' OR ar.ref_id LIKE 'edit-preview:%'))) AS can_remove,
 	 ($5::boolean AND t.object_key IS NULL AND EXISTS(SELECT 1 FROM mutable_refs mr WHERE mr.object_key=io.object_key)) AS can_remove_uses,
  ($5::boolean AND t.state='trash') AS can_restore,
 	 ($5::boolean AND (SELECT ready FROM catalog_state) AND t.state='trash' AND t.purge_after<=NOW() AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key)

@@ -75,6 +75,10 @@ func (r *TaskWorkRepository) ListEnvironmentFolders(ctx context.Context, account
 		next = &TaskStructurePageCursor{SortOrder: boundary.SortOrder, ID: boundary.ID}
 		items = items[:limit]
 	}
+	rows.Close()
+	if err := r.applyContainerLifecycleFacts(ctx, accountID, userID, items, nil); err != nil {
+		return nil, nil, err
+	}
 	return items, next, nil
 }
 
@@ -138,6 +142,10 @@ func (r *TaskWorkRepository) ListEnvironmentLists(ctx context.Context, accountID
 		boundary := items[limit-1]
 		next = &TaskStructurePageCursor{SortOrder: boundary.SortOrder, ID: boundary.ID}
 		items = items[:limit]
+	}
+	rows.Close()
+	if err := r.applyContainerLifecycleFacts(ctx, accountID, userID, nil, items); err != nil {
+		return nil, nil, err
 	}
 	return items, next, nil
 }

@@ -230,7 +230,7 @@ func (s *Server) storageInventoryBackfill(ctx context.Context, tx pgx.Tx, accoun
 			rows.Close()
 			return false, err
 		}
-		ids = append(ids, id)
+		ids = append(ids, storagePreviewReferenceSourceID(source.kind, id))
 	}
 	err = rows.Err()
 	rows.Close()
@@ -307,8 +307,9 @@ func (s *Server) storageInventoryIndexSources(ctx context.Context, tx pgx.Tx, ac
 				rows.Close()
 				return false, err
 			}
+			sourceID := storagePreviewReferenceSourceID(source.kind, id)
 			for key, readable := range storageSelfServiceReferenceValues(accountID, payload, s.storage) {
-				item := storageInventoryRefRow{SourceKind: source.kind, SourceID: id, ObjectKey: key, Generation: versions[source.kind+"|"+id], Origin: source.origin, RefID: id, Label: label, Href: href, Filename: name, Readable: readable}
+				item := storageInventoryRefRow{SourceKind: source.kind, SourceID: sourceID, ObjectKey: key, Generation: versions[source.kind+"|"+sourceID], Origin: source.origin, RefID: id, Label: label, Href: href, Filename: name, Readable: readable}
 				if !readable {
 					item.Origin = "private_external"
 					item.Label = ""

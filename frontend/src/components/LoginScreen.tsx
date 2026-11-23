@@ -420,6 +420,7 @@ export default function LoginScreen() {
           } : {}),
         }),
         credentials: 'include',
+        signal: AbortSignal.timeout(30_000),
       }, identityScope)
       const contentType = res.headers.get('content-type') || ''
       const data = contentType.includes('application/json') ? await res.json().catch(() => ({})) : {}
@@ -471,7 +472,7 @@ export default function LoginScreen() {
       }
       if (reauthExpectation) clearOfflineReauthExpectation(window.sessionStorage)
       if (getAuthScope() !== identityScope) return
-      markAuthTokenRefreshed()
+      markAuthTokenRefreshed(data.session)
       completeAuthIdentityChange()
       const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
       navigateAfterOnlineLogin(next)

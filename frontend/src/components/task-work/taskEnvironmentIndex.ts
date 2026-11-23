@@ -1,4 +1,9 @@
-import type { TaskEnvironment } from '@/types/task'
+import type { Task, TaskEnvironment } from '@/types/task'
+import { taskContainerCanManageStructure } from './taskContainerCapabilities'
+
+export function taskEnvironmentCanRemove(environment?: TaskEnvironment | null) {
+  return Boolean(environment && !environment.is_default && !environment.deleted_at && taskContainerCanManageStructure(environment))
+}
 
 export function taskEnvironmentPreferenceKey(accountID: string, userID: string) {
   return `clarin:tasks:${accountID || 'account'}:${userID || 'user'}:active-environment:v1`
@@ -17,4 +22,15 @@ export function selectActiveTaskEnvironment(environments: TaskEnvironment[], pre
 
 export function preferredTaskEnvironmentNeedsFetch(environments: TaskEnvironment[], preferredID: string) {
   return Boolean(preferredID && !environments.some(environment => environment.id === preferredID))
+}
+
+export function taskEnvironmentInventoryChanged(before?: Task | null, after?: Task | null) {
+  if (!before || !after) return Boolean(before || after)
+  return before.list_id !== after.list_id || before.environment_id !== after.environment_id
+    || before.parent_task_id !== after.parent_task_id || before.status_id !== after.status_id
+    || before.status !== after.status || before.deleted_at !== after.deleted_at
+}
+
+export function taskEnvironmentStructureEvent(action: string) {
+  return /^(environment|folder|list|container)_/.test(action)
 }

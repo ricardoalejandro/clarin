@@ -427,6 +427,51 @@ func (s *Storage) DeleteFile(ctx context.Context, objectKey string) error {
 	return nil
 }
 
+// DeleteUtilityObject removes every physical version of an unreferenced
+// utility object. The caller holds the durable GC lock and verifies references.
+func (s *Storage) DeleteUtilityObject(ctx context.Context, objectKey string) error {
+	if !IsUtilityObjectKey(objectKey) {
+		return fmt.Errorf("invalid utility deletion key")
+	}
+	bucket := s.bucketForObjectKey(objectKey)
+	for object := range s.client.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: objectKey, Recursive: true, WithVersions: true}) {
+		if object.Err != nil {
+			return object.Err
+		}
+		if object.Key != objectKey {
+			continue
+		}
+		if err := s.client.RemoveObject(ctx, bucket, objectKey, minio.RemoveObjectOptions{VersionID: object.VersionID}); err != nil {
+			return err
+		}
+	}
+	_, err := s.client.StatObject(ctx, bucket, objectKey, minio.StatObjectOptions{})
+	if err == nil {
+		return fmt.Errorf("utility object still exists")
+	}
+	response := minio.ToErrorResponse(err)
+	if response.Code != "NoSuchKey" && response.Code != "NoSuchObject" && response.Code != "NotFound" {
+		return err
+	}
+	return nil
+}
+
+func IsUtilityObjectKey(objectKey string) bool {
+	if objectKey == "" || path.Clean(objectKey) != objectKey || strings.ContainsAny(objectKey, "\\\r\n") || strings.HasPrefix(objectKey, "/") {
+		return false
+	}
+	parts := strings.Split(objectKey, "/")
+	if len(parts) != 6 || parts[1] != "_private" || parts[2] != "utilities" {
+		return false
+	}
+	for _, index := range []int{0, 3, 4, 5} {
+		if id, err := uuid.Parse(parts[index]); err != nil || id == uuid.Nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Storage) CountPrefix(ctx context.Context, prefix string) (int64, error) {
 	var count int64
 	for _, bucket := range []string{s.bucket, s.privateBucket} {

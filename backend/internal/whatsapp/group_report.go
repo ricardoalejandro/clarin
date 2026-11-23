@@ -18,6 +18,7 @@ var (
 	ErrGroupReportInvalidGroup       = errors.New("invalid whatsapp group")
 	ErrGroupReportGroupNotFound      = errors.New("whatsapp group not found")
 	ErrGroupReportUpstream           = errors.New("whatsapp group request failed")
+	ErrGroupReportSnapshotChanged    = errors.New("whatsapp group identity changed during snapshot")
 )
 
 func (p *DevicePool) reportDevice(accountID, deviceID uuid.UUID) (*DeviceInstance, error) {
@@ -104,6 +105,11 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 	if err != nil || groupJID.Server != types.GroupServer {
 		return nil, ErrGroupReportInvalidGroup
 	}
+	fingerprint := deviceSessionFingerprint(instance.Client.Store)
+	_, expectedGroupRevision, err := p.repos.Chat.SnapshotVersionByGroupJID(ctx, accountID, deviceID, groupJID.ToNonAD().String())
+	if err != nil {
+		return nil, err
+	}
 	info, err := instance.Client.GetGroupInfo(ctx, groupJID.ToNonAD())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrGroupReportUpstream, err)
@@ -115,6 +121,11 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 	contacts, err := instance.Client.Store.Contacts.GetAllContacts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrGroupReportUpstream, err)
+	}
+	// The pair is evidence from this device's current provider response,
+	// persisted before the conservative legacy-row projection runs.
+	if err = p.observePeerGroupMetadata(ctx, instance, info, contacts); err != nil {
+		return nil, err
 	}
 	name := strings.TrimSpace(info.Name)
 	if name == "" {
@@ -128,41 +139,57 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 		Suspended:        info.Suspended,
 		Members:          make([]domain.WhatsAppGroupReportIdentity, 0, len(info.Participants)),
 	}
+	identityRevision, err := p.repos.Chat.WhatsAppIdentityRevision(ctx, accountID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	identitySnapshot := &GroupParticipantIdentitySnapshot{pool: p, fingerprint: fingerprint, instance: instance, contacts: contacts, accountID: accountID, deviceID: deviceID}
+	if p.repos != nil {
+		identitySnapshot.repo = p.repos.Chat
+	}
+	identityMembers := make([]domain.GroupParticipant, 0, len(info.Participants))
+	for _, participant := range info.Participants {
+		identityMembers = append(identityMembers, groupReportParticipantIdentity(ctx, instance, participant, contacts))
+	}
+	identityMembers, err = identitySnapshot.Resolve(ctx, identityMembers)
+	if err != nil {
+		return nil, err
+	}
+	materialGroup, _ := groupProjection(info, types.EmptyJID, types.EmptyJID, true)
+	snapshot.GroupRevision, err = p.repos.Chat.RecordWhatsAppGroupSnapshotVersionCAS(ctx, accountID, deviceID, snapshot.ID, domain.WhatsAppGroupIdentityVersionMaterial(materialGroup, identityMembers), expectedGroupRevision)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.IdentityRevision, err = p.repos.Chat.WhatsAppIdentityRevision(ctx, accountID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.IdentityRevision != identityRevision {
+		return nil, ErrGroupReportSnapshotChanged
+	}
+	if err = p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+		return nil, err
+	}
 	for idx, participant := range info.Participants {
-		phoneJID := participant.PhoneNumber.ToNonAD()
-		lid := participant.LID.ToNonAD()
+		resolvedMember := identityMembers[idx]
+		phoneJID := types.EmptyJID
+		if resolvedMember.Phone != "" {
+			phoneJID = types.NewJID(resolvedMember.Phone, types.DefaultUserServer)
+		}
 		primary := participant.JID.ToNonAD()
-		if phoneJID.IsEmpty() && primary.Server == types.DefaultUserServer {
-			phoneJID = primary
-		}
-		if lid.IsEmpty() && primary.Server == types.HiddenUserServer {
-			lid = primary
-		}
-		if phoneJID.IsEmpty() && !lid.IsEmpty() {
-			if resolved, resolveErr := instance.Client.Store.LIDs.GetPNForLID(ctx, lid); resolveErr == nil && !resolved.IsEmpty() {
-				phoneJID = resolved.ToNonAD()
-			}
-		}
 
 		var phone *string
 		phoneJIDString := ""
 		if !phoneJID.IsEmpty() {
-			digits := normalizeGroupReportPhone(phoneJID.User)
-			if digits != "" {
-				phone = &digits
-				phoneJIDString = digits + "@" + types.DefaultUserServer
-			}
-		}
-		lidString := ""
-		if !lid.IsEmpty() {
-			lidString = lid.String()
+			digits := resolvedMember.Phone
+			phone = &digits
+			phoneJIDString = phoneJID.String()
 		}
 
-		contactInfo := findGroupContactInfo(contacts, phoneJID, primary, lid)
-		whatsappName := bestGroupContactName(contactInfo)
+		whatsappName := resolvedMember.Name
 		redacted := strings.TrimSpace(participant.DisplayName)
 		if redacted == "" {
-			redacted = strings.TrimSpace(contactInfo.RedactedPhone)
+			redacted = resolvedMember.RedactedPhone
 		}
 		var redactedPtr *string
 		if redacted != "" {
@@ -178,34 +205,33 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 			}
 		}
 
-		role := "member"
+		role := resolvedMember.Role
 		if sameReportJID(primary, info.OwnerJID) || sameReportJID(phoneJID, info.OwnerPN) {
 			role = "owner"
-		} else if participant.IsSuperAdmin {
-			role = "super_admin"
-		} else if participant.IsAdmin {
-			role = "admin"
-		}
-		isSelf := false
-		if instance.Client.Store.ID != nil && sameReportJID(phoneJID, instance.Client.Store.ID.ToNonAD()) {
-			isSelf = true
-		}
-		if !instance.Client.Store.LID.IsEmpty() && sameReportJID(lid, instance.Client.Store.LID.ToNonAD()) {
-			isSelf = true
 		}
 
 		snapshot.Members = append(snapshot.Members, domain.WhatsAppGroupReportIdentity{
 			Ordinal:       idx,
 			WhatsAppName:  whatsappName,
+			Username:      resolvedMember.Username,
 			Phone:         phone,
 			RedactedPhone: redactedPtr,
 			PhoneJID:      phoneJIDString,
-			LID:           lidString,
+			LID:           resolvedMember.LID,
 			Role:          role,
-			IsSelf:        isSelf,
+			IsSelf:        resolvedMember.IsSelf,
 		})
 	}
 	return snapshot, nil
+}
+
+func groupReportParticipantIdentity(ctx context.Context, instance *DeviceInstance, participant types.GroupParticipant, contacts map[types.JID]types.ContactInfo) domain.GroupParticipant {
+	var ownPN types.JID
+	if instance.Client.Store.ID != nil {
+		ownPN = instance.Client.Store.ID.ToNonAD()
+	}
+	member := resolveGroupMemberIdentity(participant, ownPN, instance.Client.Store.LID, types.EmptyJID, nil)
+	return resolveCachedGroupParticipant(ctx, instance, member, contacts)
 }
 
 func sameReportJID(left, right types.JID) bool {
@@ -224,25 +250,4 @@ func normalizeGroupReportPhone(value string) string {
 		return "51" + result
 	}
 	return result
-}
-
-func findGroupContactInfo(contacts map[types.JID]types.ContactInfo, candidates ...types.JID) types.ContactInfo {
-	for _, candidate := range candidates {
-		if candidate.IsEmpty() {
-			continue
-		}
-		if info, ok := contacts[candidate.ToNonAD()]; ok {
-			return info
-		}
-	}
-	return types.ContactInfo{}
-}
-
-func bestGroupContactName(info types.ContactInfo) string {
-	for _, value := range []string{info.FullName, info.FirstName, info.BusinessName, info.PushName} {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
 }

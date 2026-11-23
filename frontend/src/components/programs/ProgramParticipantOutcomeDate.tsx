@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { CalendarDays, Check, Edit2, Loader2, X } from 'lucide-react'
 import { api } from '@/lib/api'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from '@/components/operational-date/useOperationalDateFields'
 import type { ProgramParticipant } from '@/types/program'
 import { formatCalendarDate, limaDateInputValue } from '@/utils/calendarDate'
 import { es } from 'date-fns/locale'
@@ -26,18 +28,35 @@ export default function ProgramParticipantOutcomeDate({ programId, participant, 
   const readOnlyRef = useRef(readOnly)
   readOnlyRef.current = readOnly
   const busyRef = useRef(false)
-  const identity = `${programId}:${participant.id}`
+  const generation = useRef(0)
+  const identity = `${programId}:${participant.id}:${participant.status}`
   const identityRef = useRef(identity)
   identityRef.current = identity
   useEffect(() => { identityRef.current = identity; return () => { identityRef.current = '' } }, [identity])
   const [editing, setEditing] = useState(false)
+  const dates = useOperationalDateFields()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [confirmedDate, setConfirmedDate] = useState('')
   const confirmationRef = useRef<HTMLDivElement>(null)
   useAccessibleDialog(confirmOpen && !readOnly, confirmationRef, () => setConfirmOpen(false))
   const [draft, setDraft] = useState(current)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  useEffect(() => { onDirtyChange?.(editing && draft !== current) }, [draft, editing, onDirtyChange, current])
+  useEffect(() => {
+    generation.current += 1
+    busyRef.current = false
+    dates.reset()
+    setEditing(false)
+    setDraft(current)
+    setSaving(false)
+    setError('')
+    setConfirmOpen(false)
+    setConfirmedDate('')
+    return () => { generation.current += 1 }
+  // Canonical date updates preserve an active edit; only a different participation starts a new draft.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity])
+  useEffect(() => { onDirtyChange?.(editing && (draft !== current || dates.dirty)) }, [draft, editing, onDirtyChange, current, dates.dirty])
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
   const maximumDate = useMemo(() => limaDateInputValue(), [])
   const minimumDate = dateKey(participant.enrolled_at)
@@ -48,6 +67,7 @@ export default function ProgramParticipantOutcomeDate({ programId, participant, 
 
   const cancel = () => {
     if (readOnlyRef.current || saving) return
+    dates.reset()
     setDraft(current)
     setError('')
     setEditing(false)
@@ -55,30 +75,39 @@ export default function ProgramParticipantOutcomeDate({ programId, participant, 
 
   const save = async () => {
     if (readOnlyRef.current || identityRef.current !== identity || busyRef.current) return
-    if (!draft || saving || draft === current) {
-      if (draft === current) setEditing(false)
+    if (!dates.validate()) return
+    const candidate = dates.value('ended_on', draft)
+    if (!candidate || saving || candidate === current) {
+      if (candidate === current) setEditing(false)
       return
     }
-    if (draft < minimumDate || draft > maximumDate) {
+    if (candidate < minimumDate || candidate > maximumDate) {
       setError('La fecha debe estar entre la incorporación y el día actual de Lima.')
       return
     }
+    setConfirmedDate(candidate)
     setConfirmOpen(true)
   }
 
   const commit = async () => {
     if (readOnlyRef.current || identityRef.current !== identity || busyRef.current) return
+    if (!confirmedDate || confirmedDate < minimumDate || confirmedDate > maximumDate) {
+      setConfirmOpen(false)
+      setError('La fecha debe estar entre la incorporación y el día actual de Lima.')
+      return
+    }
     setConfirmOpen(false)
     busyRef.current = true
     const requestIdentity = identity
+    const requestGeneration = generation.current
     setSaving(true)
     setError('')
     const result = await api<{ success: boolean; ended_on: string }>(
       `/api/programs/${programId}/participants/${participant.id}/outcome-date`,
-      { method: 'PATCH', body: JSON.stringify({ ended_on: draft }) },
+      { method: 'PATCH', body: JSON.stringify({ ended_on: confirmedDate }) },
     )
+    if (identityRef.current !== requestIdentity || generation.current !== requestGeneration) return
     busyRef.current = false
-    if (identityRef.current !== requestIdentity) return
     setSaving(false)
     if (!result.success || !result.data?.success || !result.data.ended_on) {
       setError(result.error || 'No se pudo actualizar la fecha de cierre.')
@@ -103,12 +132,12 @@ export default function ProgramParticipantOutcomeDate({ programId, participant, 
       {!editing && <p className="mt-1 text-[10px] leading-relaxed text-slate-400">Es el primer día fuera del programa; una sesión en esta fecha queda excluida.</p>}
       {editing && (
         <div hidden={readOnly} inert={readOnly} className="mt-2">
-          <label className="block"><span className="sr-only">Nueva {label.toLocaleLowerCase('es')}</span><input type="date" value={draft} min={minimumDate} max={maximumDate} onChange={event => { setDraft(event.target.value); setError('') }} disabled={saving} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base font-medium text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:opacity-60 sm:text-sm" /></label>
+          <OperationalDatePicker mode="date" label={`Nueva ${label.toLocaleLowerCase('es')}`} value={draft} min={minimumDate} max={maximumDate} required allowClear={false} onDraftStateChange={dates.track('ended_on')} onChange={value => { setDraft(value); setError('') }} disabled={saving || readOnly} />
           {error && <p className="mt-2 text-xs leading-relaxed text-red-600" role="alert">{error}</p>}
           <p className="mt-2 flex items-start gap-1.5 text-[10px] leading-relaxed text-slate-400"><CalendarDays className="mt-0.5 h-3.5 w-3.5 shrink-0" />Se recalcularán el periodo y las métricas sin eliminar asistencias históricas.</p>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <button type="button" onClick={cancel} disabled={saving} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50"><X className="h-4 w-4" />Cancelar</button>
-            <button type="button" onClick={() => void save()} disabled={saving || !draft || draft === current} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{saving ? 'Guardando…' : 'Guardar'}</button>
+            <button type="button" onClick={() => void save()} disabled={saving || !dates.valid || (!dates.dirty && (!draft || draft === current))} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{saving ? 'Guardando…' : 'Guardar'}</button>
           </div>
         </div>
       )}
@@ -116,6 +145,7 @@ export default function ProgramParticipantOutcomeDate({ programId, participant, 
     {confirmOpen && !readOnly && typeof document !== 'undefined' && createPortal(
       <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/50 p-4">
         <div ref={confirmationRef} role="alertdialog" aria-modal="true" aria-label="Confirmar fecha de cierre" tabIndex={-1} className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
+          <p className="mb-2 text-sm font-semibold text-slate-900">{label}: {formatCalendarDate(confirmedDate, 'dd/MM/yyyy')}</p>
           <p className="text-sm text-slate-700">Las métricas se recalcularán. Las asistencias fuera del nuevo periodo seguirán visibles como historial y una sesión en la fecha de cierre quedará excluida.</p>
           <div className="mt-4 flex justify-end gap-2"><button type="button" onClick={() => setConfirmOpen(false)} className="min-h-11 rounded-xl px-3">Cancelar</button><button type="button" onClick={() => void commit()} className="min-h-11 rounded-xl bg-emerald-600 px-3 text-white">Confirmar</button></div>
         </div>

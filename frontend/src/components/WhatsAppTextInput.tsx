@@ -8,15 +8,21 @@ import { applyWhatsAppFormat, insertTextAtSelection } from '@/lib/whatsappEditor
 import type { TextSelection, WhatsAppFormatCommand } from '@/lib/whatsappEditor'
 
 export interface WhatsAppTextInputHandle {
+  getSelection?: () => TextSelection
+  setSelection?: (selection: TextSelection) => void
   focus: () => void
   blur: () => void
   insertAtCaret: (text: string, options?: { restoreFocus?: boolean }) => void
   clear: () => void
 }
 
-interface WhatsAppTextInputProps {
+export interface WhatsAppTextInputProps {
+  ariaControls?: string
+  ariaExpanded?: boolean
+  ariaActiveDescendant?: string
+  onSelectionChange?: (selection: TextSelection) => void
   value: string
-  onChange: (value: string) => void
+  onChange: (value: string, source?: 'input' | 'format' | 'insert' | 'paste') => void
   placeholder?: string
   className?: string
   rows?: number
@@ -61,6 +67,8 @@ const FORMAT_ACTIONS: Array<{ icon: typeof Bold; label: string; command: WhatsAp
 const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputProps>(function WhatsAppTextInput({
   value,
   onChange,
+  onSelectionChange,
+  ariaControls, ariaExpanded, ariaActiveDescendant,
   placeholder = 'Escribe un mensaje...',
   className = '',
   rows = 4,
@@ -79,9 +87,9 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   const selectionRef = useRef<TextSelection>({ start: value.length, end: value.length })
   valueRef.current = value
 
-  const commitEdit = useCallback((nextValue: string, selection: TextSelection, restoreFocus = true) => {
+  const commitEdit = useCallback((nextValue: string, selection: TextSelection, restoreFocus = true, source: 'input' | 'format' | 'insert' | 'paste' = 'insert') => {
     selectionRef.current = selection
-    onChange(nextValue)
+    onChange(nextValue, source)
     requestAnimationFrame(() => {
       if (!editorRef.current) return
       editorRef.current.innerHTML = formatToHtmlPreview(nextValue) || ''
@@ -93,6 +101,8 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   }, [onChange])
 
   useImperativeHandle(ref, () => ({
+    getSelection() { return selectionRef.current },
+    setSelection(selection) { selectionRef.current = selection; if (editorRef.current) { editorRef.current.focus(); setCaretOffset(editorRef.current, selection.end) } },
     focus() {
       if (!editorRef.current) return
       editorRef.current.focus()
@@ -130,7 +140,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n')
     const caretPos = getCaretOffset(editorRef.current)
     selectionRef.current = { start: caretPos, end: caretPos }
-    onChange(text)
+    onChange(text, 'input')
     const html = formatToHtmlPreview(text)
     editorRef.current.innerHTML = html || ''
     setCaretOffset(editorRef.current, caretPos)
@@ -175,7 +185,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     // Splice pasted text at caret/selection position
     const newText = currentText.slice(0, caretStart) + pastedText + currentText.slice(caretEnd)
 
-    commitEdit(newText, { start: caretStart + pastedText.length, end: caretStart + pastedText.length })
+    commitEdit(newText, { start: caretStart + pastedText.length, end: caretStart + pastedText.length }, true, 'paste')
   }, [commitEdit, onPasteFiles])
 
   // Show toolbar on text selection
@@ -186,6 +196,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       if (sel?.rangeCount && editorRef.current.contains(sel.anchorNode)) {
         const caret = getCaretOffset(editorRef.current)
         selectionRef.current = { start: caret, end: caret }
+        onSelectionChange?.(selectionRef.current)
       }
       setToolbar(null)
       return
@@ -212,6 +223,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       return
     }
     selectionRef.current = { start: selStart, end: selEnd }
+    onSelectionChange?.(selectionRef.current)
     const toolbarHalfWidth = 74
     const rawX = rect.left + rect.width / 2 - editorRect.left
     const x = editorRect.width <= toolbarHalfWidth * 2
@@ -327,7 +339,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     if (!editorRef.current) return
     const edit = applyWhatsAppFormat(valueRef.current, selection, command)
     setToolbar(null)
-    commitEdit(edit.value, edit.selection)
+    commitEdit(edit.value, edit.selection, true, 'format')
   }, [commitEdit])
 
   const handleEditorKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -396,6 +408,9 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       <div
         ref={editorRef}
         role="textbox"
+        aria-controls={ariaControls}
+        aria-expanded={ariaExpanded}
+        aria-activedescendant={ariaActiveDescendant}
         aria-multiline={keyboardChromeTarget || !singleLine}
         aria-label={placeholder}
         data-chat-keyboard-target={keyboardChromeTarget ? 'true' : undefined}

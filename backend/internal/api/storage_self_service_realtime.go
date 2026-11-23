@@ -55,6 +55,16 @@ func (s *Server) storageSelfServiceReconcileMessages(accountID uuid.UUID, result
 			log.Printf("[StorageSelfService] realtime reconciliation failed account=%s: %v", accountID, err)
 			return
 		}
+		byChat := make(map[uuid.UUID][]*domain.Message)
+		for _, message := range messages {
+			byChat[message.ChatID] = append(byChat[message.ChatID], message)
+		}
+		for chatID, values := range byChat {
+			if err := s.services.Chat.AttachReactions(ctx, accountID, chatID, values); err != nil {
+				log.Printf("[StorageSelfService] message hydration failed account=%s: %v", accountID, err)
+				return
+			}
+		}
 		for _, message := range messages {
 			if message.MediaURL != nil && s.storage != nil {
 				canonical := s.storage.CanonicalMediaURL(*message.MediaURL)

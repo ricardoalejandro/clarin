@@ -20,7 +20,7 @@ func globalAuthoritySource(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(raw)
+	return strings.ReplaceAll(string(raw), "\r\n", "\n")
 }
 
 func boundedGlobalAuthorityFunction(t *testing.T, source, start, end string) string {

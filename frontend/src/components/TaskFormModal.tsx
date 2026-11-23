@@ -3,6 +3,9 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { X, Calendar, Clock, AlertCircle, Search, List, Loader2 } from 'lucide-react'
 import { Task, TaskType, TaskPriority, TaskList, TASK_TYPE_CONFIG, TASK_PRIORITY_CONFIG, REMINDER_OPTIONS } from '@/types/task'
+import OperationalDatePicker from './operational-date/OperationalDatePicker'
+import { useOperationalDateFields } from './operational-date/useOperationalDateFields'
+import { operationalDateLocalValue } from './operational-date/operationalDate'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface User {
@@ -29,6 +32,7 @@ interface Props {
 }
 
 export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, leadName, eventId, eventName, programId, programName, contactId, contactName, listId, taskLists }: Props) {
+  const dateFields = useOperationalDateFields()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -71,6 +75,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
     if (!isOpen) return
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (document.querySelector('[data-operational-date-picker]') || (e.target instanceof Element && e.target.closest('[data-operational-date-owner]'))) return
         e.preventDefault()
         e.stopImmediatePropagation()
         if (showUserDropdown) {
@@ -86,6 +91,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
 
   useEffect(() => {
     if (isOpen) {
+      dateFields.reset()
       setUserSearch('')
       setDebouncedUserSearch('')
       fetchUsers()
@@ -95,7 +101,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
         setType(task.type)
         if (task.due_at) {
           const d = new Date(task.due_at)
-          setDueDate(d.toISOString().split('T')[0])
+          setDueDate(operationalDateLocalValue(d, 'date'))
           setDueTime(d.toTimeString().slice(0, 5))
         } else {
           setDueDate('')
@@ -142,7 +148,8 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
   }
 
   const handleSubmit = async () => {
-    if (!title.trim()) return
+    if (!title.trim() || !dateFields.validate()) return
+    const submittedDate = dateFields.value('due', dueDate)
     setSaving(true)
     try {
       const token = localStorage.getItem('token')
@@ -158,9 +165,9 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
       }
 
       // Only set due_at if a date was selected
-      if (dueDate) {
-        body.due_at = new Date(`${dueDate}T${dueTime}:00`).toISOString()
-      }
+      if (submittedDate) {
+        body.due_at = new Date(`${submittedDate}T${dueTime}:00`).toISOString()
+      } else if (task?.due_at) body.due_at = ''
 
       // Link context
       if (leadId) body.lead_id = leadId
@@ -259,12 +266,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
                     <Calendar className="w-3 h-3 inline mr-1" />Fecha
                   </label>
-                  <input
-                    type="date"
-                    value={dueDate}
-                    onChange={e => setDueDate(e.target.value)}
-                    className="w-full px-2.5 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-800"
-                  />
+                  <OperationalDatePicker mode="date" label="Fecha" value={dueDate} onDraftStateChange={dateFields.track('due')} onChange={setDueDate} compact />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
@@ -422,7 +424,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!title.trim() || saving}
+            disabled={!title.trim() || saving || !dateFields.valid}
             className="px-5 py-2 bg-emerald-600 text-white text-sm font-medium rounded-xl hover:bg-emerald-700 disabled:opacity-50 transition shadow-sm"
           >
             {saving ? (

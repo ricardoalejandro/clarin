@@ -5,6 +5,8 @@ export const TASK_PICKER_BLOCKING_LAYER_SELECTOR = [
   '[data-task-picker-backdrop]',
   '[data-task-date-range-picker]',
   '[data-task-date-range-backdrop]',
+  '[data-operational-date-picker]',
+  '[data-operational-picker-backdrop]',
 ].join(',')
 
 export const TASK_DETAIL_ESCAPE_LAYER_SELECTOR = [

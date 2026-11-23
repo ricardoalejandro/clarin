@@ -43,7 +43,7 @@ function AccountLeadPolicyForm({ account, onClose, authScope }: { account: { id:
         const response = await fetch(`/api/admin/accounts/${account.id}/lead-policy`, { credentials: 'include', cache: 'no-store', signal: controller.signal })
         const data = await response.json()
         const loaded = parseLeadPolicy(data.policy)
-        if (!response.ok || !data.success || !loaded || (loaded.account_id && loaded.account_id !== account.id)) throw new Error(data.error || 'No pudimos consultar la configuración.')
+        if (!response.ok || !data.success || !loaded || loaded.account_id !== account.id) throw new Error(data.error || 'No pudimos consultar la configuración.')
         if (controller.signal.aborted || generation.current !== current || getAuthScope() !== authScope) return
         setPolicy(loaded); setDraft({ leads_enabled: loaded.leads_enabled, lead_automation_enabled: loaded.lead_automation_enabled })
       } catch (cause) {
@@ -65,7 +65,7 @@ function AccountLeadPolicyForm({ account, onClose, authScope }: { account: { id:
       if (controller.signal.aborted || current !== generation.current || getAuthScope() !== authScope || isAuthIdentityChanging()) return
       if (response.status === 409) { setConflict(true); setError('La configuración cambió en otra sesión. Actualízala y revisa tus cambios antes de guardar.'); return }
       const saved = parseLeadPolicy(data.policy)
-      if (!response.ok || !data.success || !saved || (saved.account_id && saved.account_id !== account.id) || saved.leads_policy_version < policy.leads_policy_version) throw new Error(data.error || 'No pudimos guardar la configuración.')
+      if (!response.ok || !data.success || !saved || saved.account_id !== account.id || saved.leads_policy_version < policy.leads_policy_version) throw new Error(data.error || 'No pudimos guardar la configuración.')
       setPolicy(saved); onClose()
     } catch (cause) { if (!controller.signal.aborted && current === generation.current && getAuthScope() === authScope) setError(cause instanceof Error ? cause.message : 'No pudimos guardar la configuración.') }
     finally { if (saveAbort.current === controller) { saveInFlight.current = false; saveAbort.current = null; if (!controller.signal.aborted) setBusy(false) } }

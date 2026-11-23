@@ -9,7 +9,6 @@ vi.mock('@/lib/authScope', () => ({ getAuthScope: () => 'account:user', subscrib
 vi.mock('@/components/operational-window/OperationalWindowShell', () => ({ default: ({ open, children, footer }: { open: boolean; children: ReactNode; footer: ReactNode }) => open ? <section>{children}{footer}</section> : null }))
 vi.mock('@/components/task-work/TaskContainerAppearance', () => ({ TaskColorPicker: () => <span>Color</span> }))
 vi.mock('@/components/task-work/TaskSelectPicker', () => ({ TaskSelectPicker: ({ value, options, onChange, label }: { value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void; label: string }) => <select aria-label={label} value={value} onChange={event => onChange(event.target.value)}>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> }))
-vi.mock('@/components/operational-date/OperationalDatePicker', () => ({ default: () => <span>Fecha</span> }))
 vi.mock('./EventStageEditor', () => ({ default: ({ stages, onChange }: { stages: Array<{ name: string }>; onChange: (stages: Array<{ name: string }>) => void }) => <input aria-label="Etapa de prueba" value={stages[0]?.name || ''} onChange={event => onChange(stages.map((stage, index) => index ? stage : { ...stage, name: event.target.value }))} /> }))
 vi.mock('./EventRulesEditor', () => ({ default: () => <span>Reglas cargadas</span> }))
 
@@ -25,6 +24,28 @@ beforeEach(() => {
   })
 })
 describe('event configuration sections', () => {
+  it('keeps incomplete dates in their section and submits the latest valid date and time', async () => {
+    render(<EventConfigurationWindow open eventId="event-a" onClose={vi.fn()} />)
+    await screen.findByLabelText('Nombre del evento')
+    const start = screen.getByRole('textbox', { name: 'Inicio del evento' })
+    fireEvent.change(start, { target: { value: '14/10/' } })
+    expect(screen.getByRole('button', { name: 'Guardar datos' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('tab', { name: 'Etapas' }))
+    expect(screen.getByRole('tab', { name: /Datos/ })).toHaveAttribute('aria-selected', 'true')
+    expect(start).toHaveValue('14/10/')
+    expect(mockApi.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar' }))
+    expect(screen.getByRole('alertdialog', { name: 'Descartar cambios pendientes' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    fireEvent.change(start, { target: { value: '14/10/2026' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Inicio del evento: hora' }), { target: { value: '14:35' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar datos' }))
+    await waitFor(() => expect(mockApi.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(1))
+    const write = mockApi.mock.calls.find(([, options]) => options?.method === 'PUT')!
+    expect(JSON.parse(write[1].body)).toMatchObject({ event_date: new Date('2026-10-14T14:35').toISOString() })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Guardar datos' })).toBeDisabled())
+  })
+
   it('saves only metadata and leaves the window open', async () => {
     const saved = vi.fn(), close = vi.fn()
     render(<EventConfigurationWindow open eventId="event-a" onClose={close} onSaved={saved} />)
